@@ -10,16 +10,15 @@ Usage:
   python install_skill.py skill <repo-path> [--name NAME] [--workspace DIR]
 
   # MCP server:
-  python install_skill.py mcp <repo-path> --name NAME \
-      --command CMD --args ARG1 ARG2 [--env KEY=VALUE ...] \
-      [--workspace DIR]
+  python install_skill.py mcp --name NAME \
+      --command CMD --args ARG1 ARG2 [--env KEY=VALUE ...]
 
   # Dry run (show what would happen without writing):
   python install_skill.py skill <path> --dry-run
   python install_skill.py mcp ... --dry-run
 
 Supported tools (auto-detected):
-  - Claude Code        (~/.claude/)
+  - Claude Code        (~/.claude/  -- MCPs registered via `claude mcp add`)
   - Claude Desktop     (%APPDATA%/Claude/claude_desktop_config.json)
   - Codex              (~/.codex/config.toml)
   - Antigravity/Gemini (~/.gemini/config/mcp_config.json)
@@ -28,7 +27,9 @@ Supported tools (auto-detected):
 import argparse
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -39,9 +40,8 @@ APPDATA = Path(os.environ.get("APPDATA", HOME / "AppData" / "Roaming"))
 
 # ── Config paths ──────────────────────────────────────────────────────────────
 
-CLAUDE_CODE_DIR      = HOME / ".claude"
-CLAUDE_CODE_SETTINGS = CLAUDE_CODE_DIR / "settings.json"
-CLAUDE_CODE_SKILLS   = CLAUDE_CODE_DIR / "skills"
+CLAUDE_CODE_DIR    = HOME / ".claude"
+CLAUDE_CODE_SKILLS = CLAUDE_CODE_DIR / "skills"
 
 CLAUDE_DESKTOP_CONFIG = APPDATA / "Claude" / "claude_desktop_config.json"
 
@@ -51,9 +51,14 @@ CODEX_SKILLS = CODEX_DIR / "skills"
 
 ANTIGRAVITY_CONFIG = HOME / ".gemini" / "config" / "mcp_config.json"
 
+# Never copy these into the permanent skill location
+COPY_IGNORE = shutil.ignore_patterns(
+    ".git", "node_modules", "__pycache__", "*.pyc", ".env", ".venv"
+)
+
 # ── Tool detection ─────────────────────────────────────────────────────────────
 
-def detect_tools() -> dict[str, bool]:
+def detect_tools() -> dict:
     """Return which agent tools are present on this machine."""
     return {
         "Claude Code":    CLAUDE_CODE_DIR.exists(),
@@ -88,30 +93,69 @@ def log(msg: str, dry: bool = False):
     print(f"{prefix}{msg}", flush=True)
 
 
-def make_symlink(target: Path, link: Path, dry: bool):
+def make_link(target: Path, link: Path, dry: bool):
+    """Create a directory symlink; fall back to an NTFS junction on Windows
+    (symlinks require Developer Mode or admin rights there)."""
     if link.exists() or link.is_symlink():
         log(f"  skip (exists): {link}", dry)
         return
-    log(f"  symlink: {link} -> {target}", dry)
-    if not dry:
-        link.parent.mkdir(parents=True, exist_ok=True)
-        link.symlink_to(target)
+    log(f"  link: {link} -> {target}", dry)
+    if dry:
+        return
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        if os.name == "nt":
+            r = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                log("  (NTFS junction created -- symlink permission not available)")
+                return
+        sys.exit(
+            f"ERROR: could not link {link} -> {target}\n"
+            "  On Windows, enable Developer Mode (Settings > System > For developers)\n"
+            "  or run this script once from an elevated prompt."
+        )
 
 
 def read_json(path: Path) -> dict:
-    if path.exists():
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        sys.exit(f"ERROR: {path} is not valid JSON ({e}). Fix it manually -- nothing was modified.")
 
 
 def write_json(path: Path, data: dict, dry: bool):
+    """Write JSON atomically, keeping a .bak of the previous version."""
     log(f"  write: {path}", dry)
-    if not dry:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
+    if dry:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        backup = path.with_name(path.name + ".bak")
+        shutil.copy2(path, backup)
+        log(f"  backup: {backup}")
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def toml_str(value: str) -> str:
+    """Escape a value as a TOML basic string (JSON string escaping is a
+    compatible subset)."""
+    return json.dumps(str(value))
+
+
+def toml_key(key: str) -> str:
+    """Bare key if possible, quoted key otherwise."""
+    return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else json.dumps(key)
 
 
 def add_to_json_config(config_path: Path, name: str, entry: dict,
@@ -120,7 +164,7 @@ def add_to_json_config(config_path: Path, name: str, entry: dict,
     data = read_json(config_path)
     servers = data.setdefault("mcpServers", {})
     if name in servers:
-        log(f"  skip (already present): {name} in {config_path.name}", dry)
+        log(f"  skip (already present): {name} in {config_path.name} -- remove the entry manually to re-add", dry)
         return
     payload = dict(entry)
     if include_disabled:
@@ -133,21 +177,21 @@ def add_to_json_config(config_path: Path, name: str, entry: dict,
 def add_to_codex_toml(name: str, entry: dict, dry: bool):
     """Append MCP block to ~/.codex/config.toml."""
     lines = CODEX_CONFIG.read_text(encoding="utf-8").splitlines()
-    section = f"[mcp_servers.{name}]"
+    section = f"[mcp_servers.{toml_key(name)}]"
     if any(line.strip() == section for line in lines):
-        log(f"  skip (already present): {name} in config.toml", dry)
+        log(f"  skip (already present): {name} in config.toml -- edit the file manually to update", dry)
         return
 
     block = [f"\n{section}"]
-    block.append(f'command = "{entry["command"]}"')
+    block.append(f"command = {toml_str(entry['command'])}")
     if entry.get("args"):
-        args_str = ", ".join(f'"{a}"' for a in entry["args"])
+        args_str = ", ".join(toml_str(a) for a in entry["args"])
         block.append(f"args = [{args_str}]")
     block.append("enabled = true")
     if entry.get("env"):
-        block.append(f"\n[mcp_servers.{name}.env]")
+        block.append(f"\n[mcp_servers.{toml_key(name)}.env]")
         for k, v in entry["env"].items():
-            block.append(f'{k} = "{v}"')
+            block.append(f"{toml_key(k)} = {toml_str(v)}")
 
     log(f"  appending '{name}' to config.toml", dry)
     if not dry:
@@ -156,53 +200,76 @@ def add_to_codex_toml(name: str, entry: dict, dry: bool):
 
 
 def add_to_claude_code(name: str, entry: dict, dry: bool):
-    """Add MCP entry to ~/.claude/settings.json."""
-    data = read_json(CLAUDE_CODE_SETTINGS)
-    servers = data.setdefault("mcpServers", {})
-    if name in servers:
-        log(f"  skip (already present): {name} in settings.json", dry)
+    """Register the MCP with Claude Code via `claude mcp add` (user scope).
+
+    Claude Code reads MCP servers from ~/.claude.json (managed by the CLI),
+    not from ~/.claude/settings.json -- writing settings.json has no effect.
+    """
+    claude = shutil.which("claude")
+    if claude is None:
+        log("  Claude Code: 'claude' CLI not found on PATH -- register manually:")
+        log(f"    claude mcp add -s user {name} -- {entry['command']} {' '.join(entry.get('args', []))}")
         return
-    servers[name] = entry
-    write_json(CLAUDE_CODE_SETTINGS, data, dry)
-    log(f"  added '{name}' to Claude Code settings.json", dry)
+
+    cmd = [claude, "mcp", "add", "-s", "user"]
+    for k, v in (entry.get("env") or {}).items():
+        cmd += ["-e", f"{k}={v}"]
+    cmd += [name, "--", entry["command"], *entry.get("args", [])]
+
+    log(f"  run: {' '.join(cmd)}", dry)
+    if dry:
+        return
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    out = (r.stdout or "") + (r.stderr or "")
+    if r.returncode == 0:
+        log(f"  added '{name}' to Claude Code (user scope)")
+    elif "already exists" in out.lower():
+        log(f"  skip (already present): {name} in Claude Code")
+    else:
+        log(f"  WARNING: claude mcp add failed: {out.strip()}")
 
 
 # ── Subcommands ───────────────────────────────────────────────────────────────
 
 def install_skill(repo_path: Path, name: str, workspace: Path, dry: bool):
+    repo_path = repo_path.resolve()
+    if not repo_path.is_dir():
+        sys.exit(f"ERROR: {repo_path} is not a directory")
+
     tools = detect_tools()
-    permanent = workspace / name
+    permanent = (workspace / name).resolve()
 
     print(f"\n-- Skill '{name}' --")
     print(f"   Detected tools: {[t for t, ok in tools.items() if ok]}")
 
-    # Copy to permanent location
-    if permanent.exists():
-        log(f"  permanent dir exists: {permanent}")
+    # Copy to permanent location (skip if the repo already lives there)
+    if permanent == repo_path or permanent.exists():
+        log(f"  permanent dir: {permanent}")
     else:
         log(f"  copy {repo_path} -> {permanent}", dry)
         if not dry:
-            shutil.copytree(repo_path, permanent, symlinks=True)
+            shutil.copytree(repo_path, permanent, symlinks=True, ignore=COPY_IGNORE)
 
-    # Symlinks — only for tools that are present
+    # Links -- only for tools that are present
     if tools["Claude Code"]:
-        make_symlink(permanent, CLAUDE_CODE_SKILLS / name, dry)
+        make_link(permanent, CLAUDE_CODE_SKILLS / name, dry)
     if tools["Codex"]:
-        make_symlink(permanent, CODEX_SKILLS / name, dry)
+        make_link(permanent, CODEX_SKILLS / name, dry)
 
     # Claude Desktop and Antigravity don't use a skills directory
-    # (they share ~/.claude/ or use the plugin system)
 
     print(f"\n[OK] Skill '{name}' installed.")
-    print(f"     Update later: cd {permanent} && git pull")
+    print(f"     Update later: git -C {permanent} fetch -- then RE-SCAN before checking out")
 
 
-def install_mcp(name: str, entry: dict, workspace: Path, dry: bool):
+def install_mcp(name: str, entry: dict, dry: bool):
     tools = detect_tools()
 
     print(f"\n-- MCP '{name}' --")
     print(f"   Detected tools: {[t for t, ok in tools.items() if ok]}")
     print(f"   Command: {entry['command']} {' '.join(entry.get('args', []))}")
+    if entry.get("env"):
+        print("   Note: env values are stored in plaintext in the tool configs.")
 
     if tools["Claude Code"]:
         add_to_claude_code(name, entry, dry)
@@ -221,11 +288,11 @@ def install_mcp(name: str, entry: dict, workspace: Path, dry: bool):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Universal Skill/MCP installer — detects installed tools automatically"
+        description="Universal Skill/MCP installer -- detects installed tools automatically"
     )
     parser.add_argument(
         "--workspace", type=Path, default=None,
-        help="Directory for permanent skill/MCP storage (default: auto-detect)"
+        help="Directory for permanent skill storage (default: auto-detect)"
     )
     sub = parser.add_subparsers(dest="mode", required=True)
 
@@ -250,20 +317,22 @@ def main():
     workspace = args.workspace or workspace_default()
 
     if args.mode == "skill":
-        name = args.name or args.repo_path.name
+        name = args.name or args.repo_path.resolve().name
         install_skill(args.repo_path, name, workspace, args.dry_run)
 
     elif args.mode == "mcp":
         env = {}
         for kv in (args.env or []):
-            k, _, v = kv.partition("=")
+            k, sep, v = kv.partition("=")
+            if not sep or not k.strip():
+                sys.exit(f"ERROR: --env expects KEY=VALUE, got: {kv!r}")
             env[k.strip()] = v.strip()
 
-        entry: dict = {"command": args.command, "args": args.args}
+        entry = {"command": args.command, "args": args.args}
         if env:
             entry["env"] = env
 
-        install_mcp(args.name, entry, workspace, args.dry_run)
+        install_mcp(args.name, entry, args.dry_run)
 
 
 if __name__ == "__main__":
