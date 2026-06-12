@@ -52,15 +52,19 @@ Install the scanner binary, isolated via uv:
 ```
 
 For LLM-powered analysis, copy `.env.example` to `.env` **next to this
-SKILL.md** and set `SKILL_SCANNER_LLM_API_KEY`. Load it before scanning:
+SKILL.md** and configure an LLM provider of your choice — Anthropic, OpenAI,
+local Ollama (free, no API key), or any OpenAI-compatible endpoint
+(OpenRouter, Groq, Azure, vLLM, LM Studio). All options are documented in
+`.env.example`; LiteLLM is bundled with the scanner. Load before scanning:
 
 ```bash
 SKILL_DIR="$HOME/.claude/skills/skill-scanner"   # adjust if installed elsewhere
 set -a && source "$SKILL_DIR/.env" && set +a
 ```
 
-Without the key, run scans with `--use-behavioral` only (static + behavioral,
-no API needed).
+Without any provider, run scans with `--use-behavioral` only (static +
+behavioral, fully offline). Note for security verdicts: prefer a capable
+model — small local models catch fewer threats.
 
 ## Scan modes
 
@@ -87,16 +91,19 @@ Locate the skill directories and scan (stderr stays visible — rule 2):
 find "$WORKDIR/src" -name "SKILL.md" -not -path "*/node_modules/*"
 
 skill-scanner scan "$WORKDIR/src/<skill-dir>" \
-  --use-behavioral --use-llm --llm-provider anthropic --enable-meta \
+  --use-behavioral --use-llm --enable-meta \
   --format table
 echo "scanner exit code: $?"
 ```
+
+(Provider and model come from `.env` — the commands stay the same for every
+provider.)
 
 If the repo contains multiple skills:
 
 ```bash
 skill-scanner scan-all "$WORKDIR/src" \
-  --use-behavioral --use-llm --llm-provider anthropic --enable-meta \
+  --use-behavioral --use-llm --enable-meta \
   --format table
 ```
 
@@ -125,8 +132,8 @@ the scan run forever.
 ### 3. Scan a local path
 
 ```bash
-skill-scanner scan "<path>" --use-behavioral --use-llm --llm-provider anthropic \
-  --enable-meta --format table
+skill-scanner scan "<path>" --use-behavioral --use-llm --enable-meta \
+  --format table
 ```
 
 ## Interpreting results
@@ -270,7 +277,8 @@ uv tool install package-name --link-mode=copy
 | Flag | When to use |
 |------|-------------|
 | `--use-behavioral` | Always (dataflow analysis, free) |
-| `--use-llm --llm-provider anthropic` | Deeper semantic analysis (costs API credits) |
+| `--use-llm` | Deeper semantic analysis — provider/model from `.env` (Anthropic, OpenAI, Ollama, OpenAI-compatible) |
+| `--llm-provider <p>` | Override the `.env` provider for one run |
 | `--enable-meta` | Combine with LLM — filters false positives automatically |
 | `--format table` | Default output |
 | `--format html --output report.html` | Interactive report for complex findings |

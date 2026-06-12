@@ -7,7 +7,8 @@ Skills and MCP servers are third-party code executed with your user account's pe
 ## What you get
 
 - **Commit-pinned ZIP scanning** — repos are fetched as a ZIP snapshot of one exact commit; `git clone` never touches your machine before a verdict, and the commit that was scanned is the commit that gets installed. No scan/install gap an attacker could slip a push into.
-- **Three analysis layers** — static signatures, behavioral dataflow analysis, and optional LLM-powered semantic analysis with automatic false-positive filtering (Anthropic API).
+- **Three analysis layers** — static signatures, behavioral dataflow analysis, and optional LLM-powered semantic analysis with automatic false-positive filtering.
+- **Bring your own LLM** — Anthropic, OpenAI, local Ollama (free, no API key), or any OpenAI-compatible endpoint (OpenRouter, Groq, Azure, vLLM, LM Studio) via bundled LiteLLM.
 - **Fail-closed workflow** — scanner errors are never silently treated as "no findings".
 - **Prompt-injection aware** — content of scanned repos is treated as data, never as instructions to the reviewing agent.
 - **Clear verdicts** — ✅ SAFE / ⚠️ REVIEW / 🚫 DO NOT INSTALL, with file and line for every finding.
@@ -28,7 +29,7 @@ Detection is automatic — only tools whose configs exist are touched. JSON conf
 
 - [uv](https://docs.astral.sh/uv/) — installs the scanner in an isolated environment (uv ships its own Python)
 - Python 3.10+ — only for running `scripts/install_skill.py`
-- An [Anthropic API key](https://console.anthropic.com/) — optional, enables LLM-powered analysis
+- An LLM provider of your choice — optional, enables LLM-powered analysis (see [LLM provider support](#llm-provider-support)); without one, scans run with `--use-behavioral` only
 
 ## Quick start
 
@@ -38,7 +39,7 @@ cd skill-scanner
 
 ./setup.sh          # Windows PowerShell: .\setup.ps1
 
-cp .env.example .env   # optional: set SKILL_SCANNER_LLM_API_KEY for LLM analysis
+cp .env.example .env   # optional: pick an LLM provider for deeper analysis
 
 # Register as a global Claude Code skill (auto-detects your tools):
 python scripts/install_skill.py skill .
@@ -49,7 +50,7 @@ python scripts/install_skill.py skill .
 ### Scan a GitHub repo before installing
 
 ```bash
-# Load API key (optional, enables --use-llm)
+# Load LLM provider config (optional, enables --use-llm)
 set -a && source .env && set +a
 
 REPO="user/repo-name"
@@ -64,8 +65,9 @@ curl -fsSL "https://github.com/${REPO}/archive/${SHA}.zip" -o "$WORKDIR/scan.zip
 unzip -q "$WORKDIR/scan.zip" -d "$WORKDIR/src"
 
 # Scan the extracted skill directory (the ZIP unpacks into <repo>-<sha>/)
+# Provider and model come from .env — no provider flag needed
 skill-scanner scan "$WORKDIR/src"/* --use-behavioral --use-llm \
-  --llm-provider anthropic --enable-meta --format table
+  --enable-meta --format table
 
 # Cleanup (keep $SHA for installation)
 rm -rf "$WORKDIR"
@@ -106,6 +108,21 @@ python scripts/install_skill.py skill <path> --dry-run
 ```bash
 skill-scanner scan-all ~/.claude/skills --use-behavioral --format table
 ```
+
+## LLM provider support
+
+The LLM analyzer (`--use-llm`) works with any provider — configure it once in `.env`, the scan commands stay the same:
+
+| Provider | `.env` settings | Notes |
+|----------|----------------|-------|
+| **Anthropic** (default) | `PROVIDER=anthropic`, `API_KEY`, `MODEL=claude-haiku-4-5-20251001` | fast + cheap for scanning |
+| **OpenAI** | `PROVIDER=openai`, `API_KEY`, `MODEL=gpt-4o-mini` | |
+| **Ollama** (local) | `MODEL=ollama/<model>` | free, no API key, fully offline |
+| **OpenAI-compatible** | `PROVIDER=openai-compatible`, `API_KEY`, `MODEL`, `BASE_URL` | OpenRouter, Groq, Azure OpenAI, vLLM, LM Studio, ... |
+
+All variables use the `SKILL_SCANNER_LLM_` prefix (see `.env.example`). LiteLLM is bundled — no extra install. A separate model for the meta analyzer can be set via `SKILL_SCANNER_META_LLM_*`.
+
+**Verdict quality depends on model quality.** This tool makes security decisions — prefer a capable model. Small local models catch fewer threats; if in doubt, combine a weak LLM verdict with a manual source review. No provider at all is fine too: `--use-behavioral` alone runs static + dataflow analysis offline.
 
 ## Security model
 
