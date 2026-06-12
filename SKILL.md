@@ -1,17 +1,22 @@
 ---
 name: skill-scanner
 description: >
-  Scan Claude Code skills, plugins, and MCP servers for malicious code BEFORE
+  Scan AI agent skills, plugins, and MCP servers for malicious code BEFORE
   installation — catches prompt injection, credential theft, data exfiltration,
   and backdoors using cisco-ai-skill-scanner (static + behavioral + LLM
-  analysis). Repos are downloaded as commit-pinned ZIP snapshots (never git
-  clone before a verdict), and the exact commit that was scanned is the commit
-  that gets installed via the bundled universal installer (Claude Code, Claude
-  Desktop, Codex, Antigravity). Use whenever the user provides a GitHub URL for
-  a skill/plugin/MCP, wants to install one, asks "is this safe", "scan this
-  skill", "check before install", "audit my skills", "überprüfe", "scanne",
-  "ist das sicher" — or any variation. Always invoke proactively before
-  installing anything; never install without scanning first.
+  analysis, any LLM provider). Skills follow the open SKILL.md standard
+  (agentskills.io) and MCP is an open protocol, so one scan covers every
+  agent: repos are downloaded as commit-pinned ZIP snapshots (never git clone
+  before a verdict), and the exact scanned commit is installed via the bundled
+  universal installer into Claude Code, Claude Desktop, Codex,
+  Antigravity/Gemini, Hermes, and OpenClaw at once — or a chosen subset via
+  --tools. Scan once, install everywhere: one audit instead of one per agent,
+  ideal when working across multiple agents because of rate limits. Use
+  whenever the user provides a GitHub URL for a skill/plugin/MCP, wants to
+  install one, asks "is this safe", "scan this skill", "check before install",
+  "audit my skills", "überprüfe", "scanne", "ist das sicher" — or any
+  variation. Always invoke proactively before installing anything; never
+  install without scanning first.
 ---
 
 # skill-scanner — scan first, install after
@@ -21,6 +26,12 @@ permissions. A malicious one can read SSH keys, `.env` files, and browser
 profiles, exfiltrate them, or hijack the agent itself through a poisoned
 SKILL.md. This skill makes a security scan the mandatory first step of every
 installation.
+
+Because skills follow the open [SKILL.md standard](https://agentskills.io) and
+MCP is an open protocol, the scan is agent-agnostic: one verdict covers Claude
+Code, Codex, Gemini/Antigravity, Hermes, OpenClaw, and any other compatible
+agent — and the installer deploys the same audited commit to all of them in
+one step.
 
 ## Core security rules (apply to every workflow below)
 
@@ -210,22 +221,30 @@ changed after the scan — re-scan before proceeding.
 Then run the universal installer. It auto-detects which agent tools exist on
 this machine and only touches configs that are present:
 
-| Tool | Detection path |
-|------|---------------|
-| Claude Code | `~/.claude/` |
-| Claude Desktop | `%APPDATA%/Claude/claude_desktop_config.json` |
-| Codex | `~/.codex/config.toml` |
-| Antigravity / Gemini | `~/.gemini/config/mcp_config.json` |
+| Tool | Detection path | Skills | MCPs |
+|------|---------------|--------|------|
+| Claude Code | `~/.claude/` | ✓ | via `claude mcp add` |
+| Claude Desktop | `%APPDATA%/Claude/claude_desktop_config.json` | — | ✓ |
+| Codex | `~/.codex/config.toml` | ✓ | ✓ |
+| Antigravity / Gemini | `~/.gemini/config/mcp_config.json` | — | ✓ |
+| Hermes | `~/.hermes/` | ✓ | manual (`config.yaml`) |
+| OpenClaw | `~/.openclaw/` | ✓ | manual (own CLI) |
 
 ```bash
 INSTALLER="$HOME/.claude/skills/skill-scanner/scripts/install_skill.py"
 
-# Skill (markdown, no executables):
+# Skill (markdown, no executables) -- all detected agents at once:
 python "$INSTALLER" skill "$WORKSPACE/<name>"
+
+# Only specific agents:
+python "$INSTALLER" skill "$WORKSPACE/<name>" --tools claude-code hermes
 
 # Dry run first to preview all changes:
 python "$INSTALLER" skill "$WORKSPACE/<name>" --dry-run
 ```
+
+Ask the user which agents to target if they work with several — default is
+all detected ones.
 
 Updating later: `git -C "$WORKSPACE/<name>" fetch` → **re-scan the new
 commit** → checkout the new SHA.
@@ -249,6 +268,10 @@ how MCP configs work) and appear in your shell history.
 For Claude Code, the installer registers MCP servers via
 `claude mcp add -s user` — Claude Code reads MCP servers from `~/.claude.json`,
 not from `~/.claude/settings.json`.
+
+Hermes and OpenClaw manage MCP servers in their own config formats (YAML /
+CLI tooling); the installer prints instructions for those instead of writing
+their configs blindly.
 
 ## MCP isolation rules (check before every installation)
 

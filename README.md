@@ -1,6 +1,6 @@
 # skill-scanner
 
-**Scan any Claude Code skill, plugin, or MCP server for malicious code — before it ever runs on your machine.**
+**Scan any AI agent skill, plugin, or MCP server for malicious code — before it ever runs on your machine.**
 
 Skills and MCP servers are third-party code executed with your user account's permissions. A malicious one can read your SSH keys, grab `.env` files and browser sessions, exfiltrate data — or hijack your AI agent through a poisoned SKILL.md (prompt injection). This skill makes **scan first, install after** the default workflow, powered by [cisco-ai-skill-scanner](https://github.com/cisco-ai-defense/skill-scanner).
 
@@ -12,7 +12,13 @@ Skills and MCP servers are third-party code executed with your user account's pe
 - **Fail-closed workflow** — scanner errors are never silently treated as "no findings".
 - **Prompt-injection aware** — content of scanned repos is treated as data, never as instructions to the reviewing agent.
 - **Clear verdicts** — ✅ SAFE / ⚠️ REVIEW / 🚫 DO NOT INSTALL, with file and line for every finding.
-- **Universal installer included** — after a SAFE verdict, one command installs the skill or MCP server to every agent tool detected on the machine.
+- **Universal installer included** — after a SAFE verdict, one command installs the skill or MCP server to every agent detected on the machine (Claude Code, Claude Desktop, Codex, Antigravity/Gemini, Hermes, OpenClaw), or a subset via `--tools`.
+
+## One scan, every agent
+
+Skills are not a Claude-only concept: they follow the open [SKILL.md standard (agentskills.io)](https://agentskills.io), and [MCP](https://modelcontextprotocol.io) is an open protocol. The same skill or server runs in Claude Code, Codex, Gemini/Antigravity, [Hermes](https://hermes-agent.nousresearch.com), [OpenClaw](https://docs.openclaw.ai), and friends — and the Cisco scanner doesn't care which agent the code is destined for.
+
+Many people now work across several agents in parallel, not least because of per-provider rate limits. That normally means installing — and *trusting* — the same third-party code once per agent. skill-scanner collapses this into **scan once, verdict once, install everywhere**: one command links the audited commit into every detected agent, so all your agents run exactly the same reviewed code. Use `--tools` to target only specific agents.
 
 ## Supported tools (auto-detected)
 
@@ -22,8 +28,10 @@ Skills and MCP servers are third-party code executed with your user account's pe
 | Claude Desktop | — | `%APPDATA%/Claude/claude_desktop_config.json` |
 | Codex | `~/.codex/skills/` | `~/.codex/config.toml` |
 | Antigravity / Gemini CLI | — | `~/.gemini/config/mcp_config.json` |
+| Hermes (Nous Research) | `~/.hermes/skills/` | manual — `mcp_servers:` block in Hermes `config.yaml` |
+| OpenClaw | `~/.openclaw/skills/` | manual — OpenClaw's own MCP tooling |
 
-Detection is automatic — only tools whose configs exist are touched. JSON configs are backed up (`.bak`) before every write.
+Detection is automatic — only tools whose configs exist are touched. JSON configs are backed up (`.bak`) before every write. Hermes and OpenClaw use their own MCP config formats (YAML / CLI), so the installer prints instructions for those instead of modifying configs blindly.
 
 ## Prerequisites
 
@@ -83,7 +91,11 @@ Install the same commit that was scanned:
 git clone https://github.com/user/repo-name ~/path/to/workspace/repo-name
 git -C ~/path/to/workspace/repo-name -c advice.detachedHead=false checkout "$SHA"
 
+# All detected agents at once:
 python scripts/install_skill.py skill ~/path/to/workspace/repo-name
+
+# Or only specific agents:
+python scripts/install_skill.py skill ~/path/to/workspace/repo-name --tools claude-code hermes
 ```
 
 **MCP server (PyPI, isolated via uvx):**

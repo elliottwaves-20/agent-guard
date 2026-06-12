@@ -13,6 +13,9 @@ Usage:
   python install_skill.py mcp --name NAME \
       --command CMD --args ARG1 ARG2 [--env KEY=VALUE ...]
 
+  # Limit to specific tools (default: all detected):
+  python install_skill.py skill <path> --tools claude-code hermes
+
   # Dry run (show what would happen without writing):
   python install_skill.py skill <path> --dry-run
   python install_skill.py mcp ... --dry-run
@@ -22,6 +25,11 @@ Supported tools (auto-detected):
   - Claude Desktop     (%APPDATA%/Claude/claude_desktop_config.json)
   - Codex              (~/.codex/config.toml)
   - Antigravity/Gemini (~/.gemini/config/mcp_config.json)
+  - Hermes             (~/.hermes/skills -- skills only; MCPs via config.yaml)
+  - OpenClaw           (~/.openclaw/skills -- skills only; MCPs via its own CLI)
+
+Skills follow the open SKILL.md standard (agentskills.io) -- one scanned skill
+installs into every detected agent at once.
 """
 
 import argparse
@@ -51,21 +59,40 @@ CODEX_SKILLS = CODEX_DIR / "skills"
 
 ANTIGRAVITY_CONFIG = HOME / ".gemini" / "config" / "mcp_config.json"
 
+HERMES_DIR    = HOME / ".hermes"
+HERMES_SKILLS = HERMES_DIR / "skills"
+
+OPENCLAW_DIR    = HOME / ".openclaw"
+OPENCLAW_SKILLS = OPENCLAW_DIR / "skills"
+
 # Never copy these into the permanent skill location
 COPY_IGNORE = shutil.ignore_patterns(
     ".git", "node_modules", "__pycache__", "*.pyc", ".env", ".venv"
 )
 
-# ── Tool detection ─────────────────────────────────────────────────────────────
+# ── Tool registry ──────────────────────────────────────────────────────────────
+# Skills follow the open SKILL.md standard (agentskills.io), so the same skill
+# directory works for every agent below. "skills" is None for tools that have
+# no skills directory (they only take MCP servers).
 
-def detect_tools() -> dict:
-    """Return which agent tools are present on this machine."""
-    return {
-        "Claude Code":    CLAUDE_CODE_DIR.exists(),
-        "Claude Desktop": CLAUDE_DESKTOP_CONFIG.exists(),
-        "Codex":          CODEX_CONFIG.exists(),
-        "Antigravity":    ANTIGRAVITY_CONFIG.exists(),
-    }
+TOOLS = {
+    "claude-code":    {"label": "Claude Code",          "detect": CLAUDE_CODE_DIR,       "skills": CLAUDE_CODE_SKILLS},
+    "claude-desktop": {"label": "Claude Desktop",       "detect": CLAUDE_DESKTOP_CONFIG, "skills": None},
+    "codex":          {"label": "Codex",                "detect": CODEX_CONFIG,          "skills": CODEX_SKILLS},
+    "antigravity":    {"label": "Antigravity / Gemini", "detect": ANTIGRAVITY_CONFIG,    "skills": None},
+    "hermes":         {"label": "Hermes",               "detect": HERMES_DIR,            "skills": HERMES_SKILLS},
+    "openclaw":       {"label": "OpenClaw",             "detect": OPENCLAW_DIR,          "skills": OPENCLAW_SKILLS},
+}
+
+
+def detect_tools(selected: list = None) -> dict:
+    """Return {tool_id: present} for the selected tools (default: all)."""
+    ids = selected or list(TOOLS)
+    return {tid: TOOLS[tid]["detect"].exists() for tid in ids}
+
+
+def present_labels(present: dict) -> list:
+    return [TOOLS[tid]["label"] for tid, ok in present.items() if ok]
 
 
 def workspace_default() -> Path:
@@ -231,16 +258,17 @@ def add_to_claude_code(name: str, entry: dict, dry: bool):
 
 # ── Subcommands ───────────────────────────────────────────────────────────────
 
-def install_skill(repo_path: Path, name: str, workspace: Path, dry: bool):
+def install_skill(repo_path: Path, name: str, workspace: Path, dry: bool,
+                  selected: list = None):
     repo_path = repo_path.resolve()
     if not repo_path.is_dir():
         sys.exit(f"ERROR: {repo_path} is not a directory")
 
-    tools = detect_tools()
+    present = detect_tools(selected)
     permanent = (workspace / name).resolve()
 
     print(f"\n-- Skill '{name}' --")
-    print(f"   Detected tools: {[t for t, ok in tools.items() if ok]}")
+    print(f"   Target tools: {present_labels(present) or 'none detected'}")
 
     # Copy to permanent location (skip if the repo already lives there)
     if permanent == repo_path or permanent.exists():
@@ -250,37 +278,46 @@ def install_skill(repo_path: Path, name: str, workspace: Path, dry: bool):
         if not dry:
             shutil.copytree(repo_path, permanent, symlinks=True, ignore=COPY_IGNORE)
 
-    # Links -- only for tools that are present
-    if tools["Claude Code"]:
-        make_link(permanent, CLAUDE_CODE_SKILLS / name, dry)
-    if tools["Codex"]:
-        make_link(permanent, CODEX_SKILLS / name, dry)
-
-    # Claude Desktop and Antigravity don't use a skills directory
+    # One link per detected tool that has a skills directory
+    # (Claude Desktop and Antigravity only take MCP servers)
+    for tid, ok in present.items():
+        skills_dir = TOOLS[tid]["skills"]
+        if ok and skills_dir is not None:
+            make_link(permanent, skills_dir / name, dry)
 
     print(f"\n[OK] Skill '{name}' installed.")
     print(f"     Update later: git -C {permanent} fetch -- then RE-SCAN before checking out")
 
 
-def install_mcp(name: str, entry: dict, dry: bool):
-    tools = detect_tools()
+def install_mcp(name: str, entry: dict, dry: bool, selected: list = None):
+    present = detect_tools(selected)
 
     print(f"\n-- MCP '{name}' --")
-    print(f"   Detected tools: {[t for t, ok in tools.items() if ok]}")
+    print(f"   Target tools: {present_labels(present) or 'none detected'}")
     print(f"   Command: {entry['command']} {' '.join(entry.get('args', []))}")
     if entry.get("env"):
         print("   Note: env values are stored in plaintext in the tool configs.")
 
-    if tools["Claude Code"]:
+    if present.get("claude-code"):
         add_to_claude_code(name, entry, dry)
-    if tools["Claude Desktop"]:
+    if present.get("claude-desktop"):
         add_to_json_config(CLAUDE_DESKTOP_CONFIG, name, entry, dry)
-    if tools["Codex"]:
+    if present.get("codex"):
         add_to_codex_toml(name, entry, dry)
-    if tools["Antigravity"]:
+    if present.get("antigravity"):
         add_to_json_config(ANTIGRAVITY_CONFIG, name, entry, dry, include_disabled=True)
 
-    print(f"\n[OK] MCP '{name}' added to all detected tools.")
+    # Hermes and OpenClaw manage MCP servers through their own config formats
+    # (YAML / CLI tooling) -- this installer does not modify those. Point the
+    # user at the right place instead of writing blind.
+    if present.get("hermes"):
+        log("  Hermes: not auto-configured. Add the server under the "
+            "'mcp_servers:' block of your Hermes config.yaml.")
+    if present.get("openclaw"):
+        log("  OpenClaw: not auto-configured. Register the server with "
+            "OpenClaw's own MCP tooling (see docs.openclaw.ai).")
+
+    print(f"\n[OK] MCP '{name}' processed for all target tools.")
     print("     Restart affected apps to activate.")
 
 
@@ -296,10 +333,16 @@ def main():
     )
     sub = parser.add_subparsers(dest="mode", required=True)
 
+    tool_choices = list(TOOLS)
+
     # skill
     p_skill = sub.add_parser("skill", help="Install a markdown skill globally")
     p_skill.add_argument("repo_path", type=Path, help="Path to scanned + approved skill repo")
     p_skill.add_argument("--name", help="Override name (default: directory name)")
+    p_skill.add_argument("--tools", nargs="*", choices=tool_choices, default=None,
+                         metavar="TOOL",
+                         help=f"Limit installation to specific tools "
+                              f"(default: all detected). Choices: {', '.join(tool_choices)}")
     p_skill.add_argument("--dry-run", action="store_true")
 
     # mcp
@@ -311,6 +354,10 @@ def main():
                        help="Arguments for the command")
     p_mcp.add_argument("--env", nargs="*", default=[], metavar="KEY=VALUE",
                        help="Environment variables")
+    p_mcp.add_argument("--tools", nargs="*", choices=tool_choices, default=None,
+                       metavar="TOOL",
+                       help=f"Limit installation to specific tools "
+                            f"(default: all detected). Choices: {', '.join(tool_choices)}")
     p_mcp.add_argument("--dry-run", action="store_true")
 
     args = parser.parse_args()
@@ -318,7 +365,8 @@ def main():
 
     if args.mode == "skill":
         name = args.name or args.repo_path.resolve().name
-        install_skill(args.repo_path, name, workspace, args.dry_run)
+        install_skill(args.repo_path, name, workspace, args.dry_run,
+                      selected=args.tools)
 
     elif args.mode == "mcp":
         env = {}
@@ -332,7 +380,7 @@ def main():
         if env:
             entry["env"] = env
 
-        install_mcp(args.name, entry, args.dry_run)
+        install_mcp(args.name, entry, args.dry_run, selected=args.tools)
 
 
 if __name__ == "__main__":
