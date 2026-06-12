@@ -49,7 +49,7 @@ cd skill-scanner
 
 cp .env.example .env   # optional: pick an LLM provider for deeper analysis
 
-# Register as a global Claude Code skill (auto-detects your tools):
+# Register skill-scanner itself as a global agent skill (auto-detects your tools):
 python scripts/install_skill.py skill .
 ```
 
