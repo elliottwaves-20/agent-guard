@@ -84,11 +84,11 @@ LLM_MODEL = _resolve_llm_model()
 LLM_BASE_URL = (os.environ.get("MCP_SCANNER_LLM_BASE_URL", "")
                 or os.environ.get("SKILL_SCANNER_LLM_BASE_URL", "")).strip()
 
-DOCKER_IMAGE = "skill-scanner-mcp-sandbox"
+DOCKER_IMAGE = "agent-guard-mcp-sandbox"
 # Persistent Docker volume for the in-container uv cache, so a server's heavy
 # deps (pandas/numpy/...) are downloaded once, not on every sandbox run. Holds
 # only downloaded packages -- no host filesystem is exposed.
-CACHE_VOLUME = "skill-scanner-mcp-uvcache"
+CACHE_VOLUME = "agent-guard-mcp-uvcache"
 
 # Hard cap on a single scanner invocation, so a hanging scan never blocks forever.
 # Generous, because the FIRST sandbox run of a heavy server downloads its deps.

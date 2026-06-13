@@ -1,6 +1,6 @@
-# skill-scanner
+# agent-guard
 
-[![skills.sh](https://skills.sh/b/elliottwaves-20/skill-scanner)](https://skills.sh/elliottwaves-20/skill-scanner)
+[![skills.sh](https://skills.sh/b/elliottwaves-20/agent-guard)](https://skills.sh/elliottwaves-20/agent-guard)
 
 **Scan any AI agent skill, plugin, or MCP server for malicious code — before it ever runs on your machine.**
 
@@ -21,7 +21,7 @@ Skills and MCP servers are third-party code executed with your user account's pe
 
 Skills are not a Claude-only concept: they follow the open [SKILL.md standard (agentskills.io)](https://agentskills.io), and [MCP](https://modelcontextprotocol.io) is an open protocol. The same skill or server runs in Claude Code, Codex, Gemini/Antigravity, [Hermes](https://hermes-agent.nousresearch.com), [OpenClaw](https://docs.openclaw.ai), and friends — and the Cisco scanner doesn't care which agent the code is destined for.
 
-Many people now work across several agents in parallel, not least because of per-provider rate limits. That normally means installing — and *trusting* — the same third-party code once per agent. skill-scanner collapses this into **scan once, verdict once, install everywhere**: one command links the audited commit into every detected agent, so all your agents run exactly the same reviewed code. Use `--tools` to target only specific agents.
+Many people now work across several agents in parallel, not least because of per-provider rate limits. That normally means installing — and *trusting* — the same third-party code once per agent. agent-guard collapses this into **scan once, verdict once, install everywhere**: one command links the audited commit into every detected agent, so all your agents run exactly the same reviewed code. Use `--tools` to target only specific agents.
 
 ## Supported tools (auto-detected)
 
@@ -50,13 +50,13 @@ Detection is automatic — only tools whose configs exist are touched. Claude De
 ```bash
 # Installs the skill into every agent the CLI detects (Claude Code, Codex,
 # Hermes, OpenClaw, Cursor, ...). Works without git.
-npx skills add elliottwaves-20/skill-scanner
+npx skills add elliottwaves-20/agent-guard
 ```
 
 This installs the skill files. The skill drives the [cisco-ai-skill-scanner](https://github.com/cisco-ai-defense/skill-scanner) binary, so run the one-time setup afterwards to install it:
 
 ```bash
-cd ~/.claude/skills/skill-scanner   # or wherever the CLI placed it
+cd ~/.claude/skills/agent-guard   # or wherever the CLI placed it
 ./setup.sh                          # Windows PowerShell: .\setup.ps1
 cp .env.example .env                # optional: pick an LLM provider
 ```
@@ -64,14 +64,14 @@ cp .env.example .env                # optional: pick an LLM provider
 **Option B — clone and install manually:**
 
 ```bash
-git clone https://github.com/elliottwaves-20/skill-scanner
-cd skill-scanner
+git clone https://github.com/elliottwaves-20/agent-guard
+cd agent-guard
 
 ./setup.sh          # Windows PowerShell: .\setup.ps1
 
 cp .env.example .env   # optional: pick an LLM provider for deeper analysis
 
-# Register skill-scanner itself into every detected agent (auto-detects your tools):
+# Register agent-guard itself into every detected agent (auto-detects your tools):
 python scripts/install_skill.py skill .
 ```
 

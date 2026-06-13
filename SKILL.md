@@ -1,5 +1,5 @@
 ---
-name: skill-scanner
+name: agent-guard
 description: >
   Scan AI agent skills, plugins, and MCP servers for malicious code BEFORE
   installation — catches prompt injection, credential theft, data exfiltration,
@@ -19,7 +19,7 @@ description: >
   install without scanning first.
 ---
 
-# skill-scanner — scan first, install after
+# agent-guard — scan first, install after
 
 Skills and MCP servers are third-party code that runs with your user account's
 permissions. A malicious one can read SSH keys, `.env` files, and browser
@@ -69,7 +69,7 @@ local Ollama (free, no API key), or any OpenAI-compatible endpoint
 `.env.example`; LiteLLM is bundled with the scanner. Load before scanning:
 
 ```bash
-SKILL_DIR="$HOME/.claude/skills/skill-scanner"   # adjust if installed elsewhere
+SKILL_DIR="$HOME/.claude/skills/agent-guard"   # adjust if installed elsewhere
 set -a && source "$SKILL_DIR/.env" && set +a
 ```
 
@@ -160,7 +160,7 @@ safe order.
 from the registry and scan it.
 
 ```bash
-INSTALLER_DIR="$HOME/.claude/skills/skill-scanner/scripts"
+INSTALLER_DIR="$HOME/.claude/skills/agent-guard/scripts"
 set -a && source <.env> && set +a   # behavioral scan is LLM-based, needs the key
 
 python "$INSTALLER_DIR/scan_mcp.py" pypi <package>      # PyPI MCP
@@ -270,7 +270,7 @@ Claude Code and Claude Desktop share `~/.claude/skills/`, so the installer
 links it once and both pick it up.
 
 ```bash
-INSTALLER="$HOME/.claude/skills/skill-scanner/scripts/install_skill.py"
+INSTALLER="$HOME/.claude/skills/agent-guard/scripts/install_skill.py"
 
 # Skill (markdown, no executables) -- all detected agents at once:
 python "$INSTALLER" skill "$WORKSPACE/<name>"
