@@ -38,9 +38,10 @@ Detection is automatic — only tools whose configs exist are touched. Claude De
 
 ## Prerequisites
 
-- [uv](https://docs.astral.sh/uv/) — installs the scanner in an isolated environment (uv ships its own Python)
-- Python 3.10+ — only for running `scripts/install_skill.py`
-- An LLM provider of your choice — optional, enables LLM-powered analysis (see [LLM provider support](#llm-provider-support)); without one, scans run with `--use-behavioral` only
+- [uv](https://docs.astral.sh/uv/) — installs the scanners in isolated environments (uv ships its own Python)
+- Python 3.10+ — for running `scripts/install_skill.py` and `scripts/scan_mcp.py`
+- An LLM provider of your choice — optional, enables LLM-powered analysis (see [LLM provider support](#llm-provider-support)); without one, skill scans run with `--use-behavioral` only
+- [Docker](https://docs.docker.com/get-docker/) — **optional**, only for the MCP sandbox (`scan_mcp.py ... --sandbox`, Stage 2). Skill scans and the default Stage 1 MCP source scan do **not** need Docker.
 
 ## Quick start
 

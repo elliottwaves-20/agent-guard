@@ -179,6 +179,10 @@ python "$INSTALLER_DIR/scan_mcp.py" pypi <package> --sandbox -- uvx <package>
 A clean Stage 1 verdict does not prove runtime safety — use `--sandbox` for
 unfamiliar servers. Only after SAFE: `install_skill.py mcp ...` (see below).
 
+**Stage 2 needs Docker** (running). The first `--sandbox` run builds a small
+sandbox image; if Docker is missing, `scan_mcp.py` says so and exits — Stage 1
+and all skill scans work without it.
+
 ## Interpreting results
 
 ### Severity levels
