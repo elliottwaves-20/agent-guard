@@ -255,12 +255,15 @@ this machine and only touches configs that are present:
 
 | Tool | Detection path | Skills | MCPs |
 |------|---------------|--------|------|
-| Claude Code | `~/.claude/` | ✓ | via `claude mcp add` |
-| Claude Desktop | `%APPDATA%/Claude/claude_desktop_config.json` | — | ✓ |
-| Codex | `~/.codex/config.toml` | ✓ | ✓ |
-| Antigravity / Gemini | `~/.gemini/config/mcp_config.json` | — | ✓ |
-| Hermes | `~/.hermes/` | ✓ | manual (`config.yaml`) |
-| OpenClaw | `~/.openclaw/` | ✓ | manual (own CLI) |
+| Claude Code | `~/.claude/` | ✓ `~/.claude/skills/` | via `claude mcp add` |
+| Claude Desktop | `%APPDATA%/Claude/claude_desktop_config.json` | ✓ shares `~/.claude/skills/` | ✓ |
+| Codex | `~/.codex/config.toml` | ✓ `~/.codex/skills/` | ✓ |
+| Antigravity / Gemini | `~/.gemini/config/mcp_config.json` | ✓ `~/.gemini/config/skills/` | ✓ |
+| Hermes | `~/.hermes/` | ✓ `~/.hermes/skills/` | manual (`config.yaml`) |
+| OpenClaw | `~/.openclaw/` | ✓ `~/.openclaw/skills/` | manual (own CLI) |
+
+Claude Code and Claude Desktop share `~/.claude/skills/`, so the installer
+links it once and both pick it up.
 
 ```bash
 INSTALLER="$HOME/.claude/skills/skill-scanner/scripts/install_skill.py"

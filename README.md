@@ -28,13 +28,13 @@ Many people now work across several agents in parallel, not least because of per
 | Tool | Skills | MCP servers |
 |------|--------|-------------|
 | Claude Code | `~/.claude/skills/` | `claude mcp add -s user` → `~/.claude.json` |
-| Claude Desktop | — | `%APPDATA%/Claude/claude_desktop_config.json` |
+| Claude Desktop | `~/.claude/skills/` *(shared with Claude Code)* | `%APPDATA%/Claude/claude_desktop_config.json` |
 | Codex | `~/.codex/skills/` | `~/.codex/config.toml` |
-| Antigravity / Gemini CLI | — | `~/.gemini/config/mcp_config.json` |
+| Antigravity / Gemini | `~/.gemini/config/skills/` | `~/.gemini/config/mcp_config.json` |
 | Hermes (Nous Research) | `~/.hermes/skills/` | manual — `mcp_servers:` block in Hermes `config.yaml` |
 | OpenClaw | `~/.openclaw/skills/` | manual — OpenClaw's own MCP tooling |
 
-Detection is automatic — only tools whose configs exist are touched. JSON configs are backed up (`.bak`) before every write. Hermes and OpenClaw use their own MCP config formats (YAML / CLI), so the installer prints instructions for those instead of modifying configs blindly.
+Detection is automatic — only tools whose configs exist are touched. Claude Desktop reads skills from the same `~/.claude/skills/` as Claude Code, so that shared path is linked once and serves both. JSON configs are backed up (`.bak`) before every write. Hermes and OpenClaw use their own MCP config formats (YAML / CLI), so the installer prints instructions for those instead of modifying configs blindly.
 
 ## Prerequisites
 

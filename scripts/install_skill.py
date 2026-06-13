@@ -57,7 +57,9 @@ CODEX_DIR    = HOME / ".codex"
 CODEX_CONFIG = CODEX_DIR / "config.toml"
 CODEX_SKILLS = CODEX_DIR / "skills"
 
-ANTIGRAVITY_CONFIG = HOME / ".gemini" / "config" / "mcp_config.json"
+ANTIGRAVITY_DIR    = HOME / ".gemini" / "config"
+ANTIGRAVITY_CONFIG = ANTIGRAVITY_DIR / "mcp_config.json"
+ANTIGRAVITY_SKILLS = ANTIGRAVITY_DIR / "skills"   # official global skills dir
 
 HERMES_DIR    = HOME / ".hermes"
 HERMES_SKILLS = HERMES_DIR / "skills"
@@ -72,14 +74,16 @@ COPY_IGNORE = shutil.ignore_patterns(
 
 # ── Tool registry ──────────────────────────────────────────────────────────────
 # Skills follow the open SKILL.md standard (agentskills.io), so the same skill
-# directory works for every agent below. "skills" is None for tools that have
-# no skills directory (they only take MCP servers).
+# directory works for every agent below. Claude Desktop reads skills from the
+# same ~/.claude/skills as Claude Code, so it shares that path (the installer
+# de-duplicates shared paths and links each one once). "skills" is None only for
+# agents that genuinely have no skills directory.
 
 TOOLS = {
     "claude-code":    {"label": "Claude Code",          "detect": CLAUDE_CODE_DIR,       "skills": CLAUDE_CODE_SKILLS},
-    "claude-desktop": {"label": "Claude Desktop",       "detect": CLAUDE_DESKTOP_CONFIG, "skills": None},
+    "claude-desktop": {"label": "Claude Desktop",       "detect": CLAUDE_DESKTOP_CONFIG, "skills": CLAUDE_CODE_SKILLS},
     "codex":          {"label": "Codex",                "detect": CODEX_CONFIG,          "skills": CODEX_SKILLS},
-    "antigravity":    {"label": "Antigravity / Gemini", "detect": ANTIGRAVITY_CONFIG,    "skills": None},
+    "antigravity":    {"label": "Antigravity / Gemini", "detect": ANTIGRAVITY_CONFIG,    "skills": ANTIGRAVITY_SKILLS},
     "hermes":         {"label": "Hermes",               "detect": HERMES_DIR,            "skills": HERMES_SKILLS},
     "openclaw":       {"label": "OpenClaw",             "detect": OPENCLAW_DIR,          "skills": OPENCLAW_SKILLS},
 }
@@ -278,12 +282,15 @@ def install_skill(repo_path: Path, name: str, workspace: Path, dry: bool,
         if not dry:
             shutil.copytree(repo_path, permanent, symlinks=True, ignore=COPY_IGNORE)
 
-    # One link per detected tool that has a skills directory
-    # (Claude Desktop and Antigravity only take MCP servers)
+    # One link per UNIQUE skills directory. Claude Code and Claude Desktop both
+    # read ~/.claude/skills, so that shared path is linked once and serves both.
+    seen = set()
     for tid, ok in present.items():
         skills_dir = TOOLS[tid]["skills"]
-        if ok and skills_dir is not None:
-            make_link(permanent, skills_dir / name, dry)
+        if not ok or skills_dir is None or str(skills_dir) in seen:
+            continue
+        seen.add(str(skills_dir))
+        make_link(permanent, skills_dir / name, dry)
 
     print(f"\n[OK] Skill '{name}' installed.")
     print(f"     Update later: git -C {permanent} fetch -- then RE-SCAN before checking out")
