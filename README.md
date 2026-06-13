@@ -13,7 +13,7 @@ Skills and MCP servers are third-party code executed with your user account's pe
 - **Bring your own LLM** — Anthropic, OpenAI, local Ollama (free, no API key), or any OpenAI-compatible endpoint (OpenRouter, Groq, Azure, vLLM, LM Studio) via bundled LiteLLM.
 - **Fail-closed workflow** — scanner errors are never silently treated as "no findings".
 - **Prompt-injection aware** — content of scanned repos is treated as data, never as instructions to the reviewing agent.
-- **Clear verdicts** — ✅ SAFE / ⚠️ REVIEW / 🚫 DO NOT INSTALL, with file and line for every finding.
+- **Clear verdicts** — ✅ SAFE / ⚠ REVIEW / 🚫 DO NOT INSTALL, with file and line for every finding.
 - **Universal installer included** — after a SAFE verdict, one command installs the skill or MCP server to every agent detected on the machine (Claude Code, Claude Desktop, Codex, Antigravity/Gemini, Hermes, OpenClaw), or a subset via `--tools`.
 
 ## One scan, every agent

@@ -195,7 +195,7 @@ After every scan, state the verdict clearly:
 ✅ SAFE — no Critical/High findings. Installation recommended.
    Findings: [Medium/Low/Info with short description]
 
-⚠️ REVIEW REQUIRED — [n] High finding(s).
+⚠ REVIEW REQUIRED — [n] High finding(s).
    Affected file: [path:line]
    Finding: [what exactly was found]
    → Read the source, then decide.
