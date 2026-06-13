@@ -163,6 +163,18 @@ All variables use the `SKILL_SCANNER_LLM_` prefix (see `.env.example`). LiteLLM 
 3. **Scan = install** — the pinned commit SHA bridges scan and installation; if the repo moves in between, re-scan.
 4. **ZIP before verdict, clone after** — plain ZIP downloads execute nothing, while `git clone` has historically had RCE edge cases (e.g. CVE-2024-32002 via recursive submodules). Cloning is reserved for repos that already passed.
 
+## Why this skill triggers capability warnings
+
+Automated skill scanners (Socket, Snyk, ClawScan, and others) flag this skill with capability warnings. That is expected, and it is worth understanding rather than hiding — a security tool should be the most transparent skill you install.
+
+The warnings describe what the skill genuinely does:
+
+- **It runs an external binary.** The skill drives [cisco-ai-skill-scanner](https://github.com/cisco-ai-defense/skill-scanner) — that *is* its job. The Cisco scanner is the **only** external runtime dependency: Cisco's official, open-source tool, installed isolated via `uv`, always pulled at the latest version (not version-pinned, so security fixes to the scanner reach you automatically).
+- **It installs across multiple agents.** The bundled installer links the audited skill into every agent you have — the "one scan, every agent" feature. Scanners read cross-platform installation as expanded reach; here it is the intended behavior, and you can limit it with `--tools`.
+- **It can route data to an LLM.** Optional `--use-llm` analysis sends the *scanned* skill's contents to the LLM provider **you** configure (Anthropic, OpenAI, a local Ollama model, or none at all). No data leaves your machine unless you opt in and choose the provider.
+
+Both major scanners classify this as **not malicious** — they flag capability, not intent. You cannot drive these flags to green without removing the tool's reason to exist. What keeps it trustworthy is everything in the [Security model](#security-model) above: scanned content is treated as data, the workflow fails closed, repos are pinned and ZIP-scanned before any clone, and the skill ships **no hidden or invisible characters** of its own.
+
 ## MCP isolation rules
 
 Never install MCP dependencies globally. Always use isolated runners:
