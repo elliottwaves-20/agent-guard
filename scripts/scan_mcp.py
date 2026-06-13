@@ -33,6 +33,7 @@ import argparse
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -44,7 +45,27 @@ from pathlib import Path
 
 MCP_SCANNER = shutil.which("mcp-scanner")
 LLM_KEY = os.environ.get("SKILL_SCANNER_LLM_API_KEY", "")
+
+# The MCP scanner's LiteLLM model. It defaults to gpt-4o, so an Anthropic key
+# without this set fails with an OpenAI auth error. Honor an explicit
+# MCP_SCANNER_LLM_MODEL, else derive a sensible model from the key prefix.
+LLM_MODEL = os.environ.get("MCP_SCANNER_LLM_MODEL", "")
+if not LLM_MODEL and LLM_KEY.startswith("sk-ant-"):
+    LLM_MODEL = "anthropic/claude-haiku-4-5-20251001"
+
 DOCKER_IMAGE = "skill-scanner-mcp-sandbox"
+# Persistent Docker volume for the in-container uv cache, so a server's heavy
+# deps (pandas/numpy/...) are downloaded once, not on every sandbox run. Holds
+# only downloaded packages -- no host filesystem is exposed.
+CACHE_VOLUME = "skill-scanner-mcp-uvcache"
+
+# Hard cap on a single scanner invocation, so a hanging scan never blocks forever.
+# Generous, because the FIRST sandbox run of a heavy server downloads its deps.
+SCAN_TIMEOUT = int(os.environ.get("SCAN_MCP_TIMEOUT", "600"))
+# How long the scanner waits for a stdio MCP to start. The default (60s) is too
+# short for servers whose first `uvx`/`npx` launch must download heavy deps
+# (pandas, numpy, ...) inside a fresh container.
+STDIO_TIMEOUT = int(os.environ.get("SCAN_MCP_STDIO_TIMEOUT", "240"))
 
 
 def die(msg: str, code: int = 2):
@@ -130,6 +151,32 @@ def fetch_npm(spec: str, dest: Path) -> Path:
 
 # -- scanning -----------------------------------------------------------------
 
+def scanner_env() -> dict:
+    """os.environ plus the resolved LLM model, so the scanner's LiteLLM picks
+    the right provider instead of its gpt-4o default."""
+    e = dict(os.environ)
+    if LLM_MODEL:
+        e["MCP_SCANNER_LLM_MODEL"] = LLM_MODEL
+    return e
+
+
+def run_scanner(cmd: list, label: str, env: dict = None) -> int:
+    """Run an mcp-scanner command with a hard timeout, then judge its output."""
+    print(f"  {label}")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=SCAN_TIMEOUT, env=env)
+    except subprocess.TimeoutExpired:
+        print("\n" + "=" * 60)
+        print(f"[BLOCK] NO VERDICT -- scan timed out after {SCAN_TIMEOUT}s. Do NOT "
+              "install. The server may hang on start, or its dependencies are too "
+              "slow to fetch. Raise SCAN_MCP_TIMEOUT or review manually.")
+        return 2
+    out = (r.stdout or "") + (r.stderr or "")
+    print(out)
+    return verdict(out, r.returncode)
+
+
 def run_behavioral(src: Path) -> int:
     need_scanner()
     if not LLM_KEY:
@@ -137,11 +184,8 @@ def run_behavioral(src: Path) -> int:
             "in .env and `source` it before scanning.")
     cmd = [MCP_SCANNER, "--llm-api-key", LLM_KEY, "behavioral", str(src),
            "--format", "summary"]
-    print(f"  scanning source (no execution): {src}")
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    out = (r.stdout or "") + (r.stderr or "")
-    print(out)
-    return verdict(out, r.returncode)
+    return run_scanner(cmd, f"scanning source (no execution): {src}",
+                       env=scanner_env())
 
 
 def run_remote(url: str) -> int:
@@ -149,10 +193,8 @@ def run_remote(url: str) -> int:
     cmd = [MCP_SCANNER, "remote", "--server-url", url, "--format", "summary"]
     if LLM_KEY:
         cmd[1:1] = ["--llm-api-key", LLM_KEY]
-    print(f"  scanning remote MCP (no local code runs): {url}")
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    print((r.stdout or "") + (r.stderr or ""))
-    return verdict((r.stdout or "") + (r.stderr or ""), r.returncode)
+    return run_scanner(cmd, f"scanning remote MCP (no local code runs): {url}",
+                       env=scanner_env())
 
 
 def run_sandbox(command: list) -> int:
@@ -168,6 +210,7 @@ def run_sandbox(command: list) -> int:
     if not LLM_KEY:
         die("sandbox scan needs SKILL_SCANNER_LLM_API_KEY in the environment.")
     build_sandbox_image()
+    ensure_cache_volume()
     inner = " ".join(_shquote(c) for c in command)
     # `mcp-scanner` here is the binary *inside* the container (on its PATH).
     # --format is a GLOBAL flag and must precede the `stdio` subcommand.
@@ -177,11 +220,32 @@ def run_sandbox(command: list) -> int:
     # Live (stdio) analysis uses yara (local signatures) + llm (semantic
     # analysis of the running server's tools/prompts). The behavioral analyzer
     # is source-only (Stage 1) and rejects stdio; api/virustotal need paid keys.
+    # Both the LLM key and the stdio timeout are passed as ENV VARS, never as
+    # CLI flags: every flag the scanner copies into os.environ inside main()
+    # (--llm-api-key, --stdio-timeout) hits an UnboundLocalError there. The env
+    # vars are read cleanly. STDIO_TIMEOUT raises the 60s default so a fresh
+    # container has time to download a server's deps (pandas/numpy/...) first.
     scan = ["mcp-scanner", "--format", "summary",
             "--analyzers", "yara,llm",
             "stdio", "--stdio-command", command[0]]
     for a in command[1:]:
         scan += ["--stdio-arg", a]
+
+    # Pre-fetch the server and its deps BEFORE the scan, in the same container.
+    # A heavy server (pandas/numpy/...) can take minutes to download on its first
+    # `uvx`/`npx` launch -- longer than the scanner's stdio handshake timeout.
+    # Running the launch command once with stdin closed warms the uv cache and
+    # Python imports (the server reads stdin, gets EOF, exits), so the real scan
+    # connects fast. Combined with the persistent cache volume, later runs skip
+    # the download entirely.
+    launch = " ".join(shlex.quote(c) for c in command)
+    scan_str = " ".join(shlex.quote(c) for c in scan)
+    script = (
+        f'echo "[sandbox] pre-fetching server + deps (first run can be slow)..." >&2; '
+        f'timeout {STDIO_TIMEOUT} {launch} </dev/null >/dev/null 2>&1 || true; '
+        f'echo "[sandbox] running live scan..." >&2; '
+        f'{scan_str}'
+    )
     docker = [
         "docker", "run", "--rm",
         "--network", "bridge",            # needed for the LLM API call
@@ -190,17 +254,35 @@ def run_sandbox(command: list) -> int:
         "--security-opt", "no-new-privileges",
         "--pids-limit", "256",
         # container root is read-only; give uv/uvx and the MCP a writable HOME
-        # on the tmpfs so they can cache and spawn
+        # on the tmpfs, and a PERSISTENT volume for the uv cache so heavy deps
+        # download once across runs (the volume holds only packages, not host fs)
+        "-v", f"{CACHE_VOLUME}:/uvcache",
         "-e", "HOME=/tmp",
-        "-e", "UV_CACHE_DIR=/tmp/uv",
+        "-e", "UV_CACHE_DIR=/uvcache",
         "-e", f"MCP_SCANNER_LLM_API_KEY={LLM_KEY}",
+        "-e", f"MCP_SCANNER_LLM_MODEL={LLM_MODEL}",
+        "-e", f"MCP_SCANNER_STDIO_TIMEOUT={STDIO_TIMEOUT}",
         DOCKER_IMAGE,
-    ] + scan
-    print(f"  Stage 2: live stdio scan of `{inner}` inside Docker sandbox "
-          "(no host filesystem access)")
-    r = subprocess.run(docker, capture_output=True, text=True)
-    print((r.stdout or "") + (r.stderr or ""))
-    return verdict((r.stdout or "") + (r.stderr or ""), r.returncode)
+        "sh", "-c", script,
+    ]
+    return run_scanner(
+        docker,
+        f"Stage 2: live stdio scan of `{inner}` inside Docker sandbox "
+        "(no host filesystem access)")
+
+
+def ensure_cache_volume():
+    """Create the uv cache volume and hand it to the non-root scanner user.
+
+    Docker volumes are created root-owned, but the container runs as uid 1000,
+    so without this chown uv cannot write the cache (Permission denied)."""
+    subprocess.run(["docker", "volume", "create", CACHE_VOLUME],
+                   capture_output=True, text=True)
+    subprocess.run(
+        ["docker", "run", "--rm", "-v", f"{CACHE_VOLUME}:/uvcache",
+         "--user", "root", "--entrypoint", "chown", DOCKER_IMAGE,
+         "-R", "1000:1000", "/uvcache"],
+        capture_output=True, text=True)
 
 
 def build_sandbox_image():
@@ -231,26 +313,45 @@ def _shquote(s: str) -> str:
     return s if s and all(c.isalnum() or c in "-_./@" for c in s) else repr(s)
 
 
-def verdict(output: str, code: int) -> int:
-    """Parse mcp-scanner summary into a clear verdict. Fail closed."""
-    print("\n" + "=" * 60)
-    unsafe = None
+def _summary_int(output: str, key: str):
+    """Pull an integer that follows `key:` in the scanner summary, or None."""
     for line in output.splitlines():
         low = line.lower().strip()
-        if low.startswith("unsafe items:"):
+        if low.startswith(key):
             try:
-                unsafe = int(line.split(":")[1])
-            except ValueError:
-                pass
+                return int(line.split(":", 1)[1])
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def verdict(output: str, code: int) -> int:
+    """Turn mcp-scanner summary into a clear verdict. Fail closed."""
+    print("\n" + "=" * 60)
+    unsafe = _summary_int(output, "unsafe items:")
+    tools = _summary_int(output, "total tools scanned:")
+
+    # Scanner crashed and produced no parsable counts -> no verdict.
     if code != 0 and unsafe is None:
         print("[BLOCK] NO VERDICT -- scanner errored. Do NOT install. Re-run the scan.")
         return 2
+
+    # Source scan found nothing to analyse (tools defined dynamically, or the
+    # analyzer can't see them statically). NOT a clean bill of health.
+    if tools == 0 and not unsafe:
+        print("[WARN] INCONCLUSIVE -- the source scan found no analyzable tools in "
+              "this package. That is not a safety guarantee; the tools may be "
+              "registered dynamically. Run a live check with --sandbox before "
+              "installing.")
+        return 2
+
     if unsafe is None:
         print("[WARN] NO VERDICT -- could not parse scanner output. Review manually "
               "before installing.")
         return 2
     if unsafe == 0:
-        print("[SAFE] -- no unsafe items. Installation reasonable.\n"
+        extra = f" ({tools} tool(s) checked)" if tools else ""
+        print(f"[SAFE] -- no unsafe items{extra}. Installation reasonable.\n"
               "   Reminder: a clean source scan does not prove runtime safety. "
               "Use --sandbox for a live check if in doubt.")
         return 0
