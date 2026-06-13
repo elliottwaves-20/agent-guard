@@ -4,11 +4,12 @@
 
 **Scan any AI agent skill, plugin, or MCP server for malicious code — before it ever runs on your machine.**
 
-Skills and MCP servers are third-party code executed with your user account's permissions. A malicious one can read your SSH keys, grab `.env` files and browser sessions, exfiltrate data — or hijack your AI agent through a poisoned SKILL.md (prompt injection). This skill makes **scan first, install after** the default workflow, powered by [cisco-ai-skill-scanner](https://github.com/cisco-ai-defense/skill-scanner).
+Skills and MCP servers are third-party code executed with your user account's permissions. A malicious one can read your SSH keys, grab `.env` files and browser sessions, exfiltrate data — or hijack your AI agent through a poisoned SKILL.md (prompt injection). This skill makes **scan first, install after** the default workflow, powered by Cisco's [skill-scanner](https://github.com/cisco-ai-defense/skill-scanner) (for skills) and [mcp-scanner](https://github.com/cisco-ai-defense/mcp-scanner) (for MCP servers).
 
 ## What you get
 
 - **Commit-pinned ZIP scanning** — repos are fetched as a ZIP snapshot of one exact commit; `git clone` never touches your machine before a verdict, and the commit that was scanned is the commit that gets installed. No scan/install gap an attacker could slip a push into.
+- **Skills *and* MCP servers** — an MCP server is code that must run to be inspected, so naive scanning would execute it. `scan_mcp.py` scans the package **source** first (fetched from the registry, nothing executed), with an optional **Docker-sandboxed** live scan — untrusted MCP code never runs unconfined on your machine.
 - **Three analysis layers** — static signatures, behavioral dataflow analysis, and optional LLM-powered semantic analysis with automatic false-positive filtering.
 - **Bring your own LLM** — Anthropic, OpenAI, local Ollama (free, no API key), or any OpenAI-compatible endpoint (OpenRouter, Groq, Azure, vLLM, LM Studio) via bundled LiteLLM.
 - **Fail-closed workflow** — scanner errors are never silently treated as "no findings".
@@ -103,6 +104,32 @@ rm -rf "$WORKDIR"
 
 Scanner errors or empty output mean **no verdict** — never treat a failed scan as safe.
 
+### Scan an MCP server before installing
+
+MCP servers need different handling than skills. A skill is Markdown that only gets *read*; an MCP server is code that must *run* to expose its tools — so "just start it and scan" would already execute untrusted code. `scan_mcp.py` enforces a safe order:
+
+**Stage 1 (default — nothing from the package runs):** fetch the source straight from the registry and scan it.
+
+```bash
+# PyPI MCP server:
+python scripts/scan_mcp.py pypi mcp-server-name
+
+# npm MCP server:
+python scripts/scan_mcp.py npm @scope/mcp-server-name
+
+# source already on disk / a hosted remote MCP:
+python scripts/scan_mcp.py local ./path/to/mcp-source
+python scripts/scan_mcp.py remote https://example.com/mcp
+```
+
+**Stage 2 (optional — live runtime check):** start the server inside a throwaway **Docker container with no access to your filesystem**, then scan its live tools and prompts.
+
+```bash
+python scripts/scan_mcp.py pypi mcp-server-name --sandbox -- uvx mcp-server-name
+```
+
+The scan reuses `SKILL_SCANNER_LLM_API_KEY` from `.env` (the behavioral source analysis is LLM-based). A clean Stage 1 scan does **not** prove runtime safety — reach for `--sandbox` when a server is unfamiliar. Install only after a SAFE verdict.
+
 ### Install after a SAFE verdict
 
 Install the same commit that was scanned:
@@ -118,7 +145,7 @@ python scripts/install_skill.py skill ~/path/to/workspace/repo-name
 python scripts/install_skill.py skill ~/path/to/workspace/repo-name --tools claude-code hermes
 ```
 
-**MCP server (PyPI, isolated via uvx):**
+**MCP server (PyPI, isolated via uvx) — only after `scan_mcp.py` returned SAFE:**
 
 ```bash
 python scripts/install_skill.py mcp \

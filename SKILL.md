@@ -147,6 +147,38 @@ skill-scanner scan "<path>" --use-behavioral --use-llm --enable-meta \
   --format table
 ```
 
+### 4. Scan an MCP server before installing
+
+MCP servers are **not** scanned with `skill-scanner` — they need
+`scan_mcp.py` (wraps `cisco-ai-mcp-scanner`). Key difference from skills: an
+MCP server is code that must *run* to expose its tools, so starting an unknown
+one to scan it already executes untrusted code. Never do a bare
+`mcp-scanner stdio` on an untrusted server. Use the wrapper, which enforces a
+safe order.
+
+**Stage 1 (default — nothing from the package executes):** fetch the source
+from the registry and scan it.
+
+```bash
+INSTALLER_DIR="$HOME/.claude/skills/skill-scanner/scripts"
+set -a && source <.env> && set +a   # behavioral scan is LLM-based, needs the key
+
+python "$INSTALLER_DIR/scan_mcp.py" pypi <package>      # PyPI MCP
+python "$INSTALLER_DIR/scan_mcp.py" npm <@scope/package> # npm MCP
+python "$INSTALLER_DIR/scan_mcp.py" local <path>         # local source
+python "$INSTALLER_DIR/scan_mcp.py" remote <url>         # hosted remote MCP
+```
+
+**Stage 2 (optional — live runtime check in a Docker sandbox):** starts the
+server with **no host filesystem access** to inspect its live tools/prompts.
+
+```bash
+python "$INSTALLER_DIR/scan_mcp.py" pypi <package> --sandbox -- uvx <package>
+```
+
+A clean Stage 1 verdict does not prove runtime safety — use `--sandbox` for
+unfamiliar servers. Only after SAFE: `install_skill.py mcp ...` (see below).
+
 ## Interpreting results
 
 ### Severity levels

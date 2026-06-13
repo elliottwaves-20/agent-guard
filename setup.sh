@@ -22,23 +22,26 @@ case "$(uname -s)" in
 esac
 
 echo ""
-echo "Installing cisco-ai-skill-scanner..."
-if uv tool list 2>/dev/null | grep -q "^cisco-ai-skill-scanner"; then
-  echo "  already installed -- upgrading instead"
-  uv tool upgrade cisco-ai-skill-scanner
-else
-  # shellcheck disable=SC2086  # LINK_ARGS is intentionally word-split (single flag or empty)
-  uv tool install cisco-ai-skill-scanner $LINK_ARGS
-fi
+echo "Installing Cisco scanners (skills + MCP servers)..."
+for pkg in cisco-ai-skill-scanner cisco-ai-mcp-scanner; do
+  if uv tool list 2>/dev/null | grep -q "^${pkg}"; then
+    echo "  ${pkg}: already installed -- upgrading"
+    uv tool upgrade "$pkg"
+  else
+    # shellcheck disable=SC2086  # LINK_ARGS is intentionally word-split (single flag or empty)
+    uv tool install "$pkg" $LINK_ARGS
+  fi
+done
 
 echo ""
 echo "Verifying..."
-if command -v skill-scanner &>/dev/null; then
-  skill-scanner --version
-else
-  echo "skill-scanner is installed but not on PATH."
-  echo "  Run: uv tool update-shell   -- then open a new shell."
-fi
+for bin in skill-scanner mcp-scanner; do
+  if command -v "$bin" &>/dev/null; then
+    echo "  $($bin --version 2>&1 | head -1)"
+  else
+    echo "  $bin installed but not on PATH -- run: uv tool update-shell (then reopen shell)"
+  fi
+done
 
 echo ""
 echo "[OK] Setup complete."

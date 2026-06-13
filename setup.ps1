@@ -14,24 +14,27 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 }
 Write-Host "  uv: $(uv --version)"
 
-Write-Host "`nInstalling cisco-ai-skill-scanner..." -ForegroundColor Cyan
+Write-Host "`nInstalling Cisco scanners (skills + MCP servers)..." -ForegroundColor Cyan
 
 # --link-mode=copy: required when uv cache and target sit on different
 # filesystems or inside a synced folder (OneDrive); harmless otherwise.
-$installed = uv tool list 2>$null | Select-String -Quiet "cisco-ai-skill-scanner"
-if ($installed) {
-    Write-Host "  already installed -- upgrading instead"
-    uv tool upgrade cisco-ai-skill-scanner
-} else {
-    uv tool install cisco-ai-skill-scanner --link-mode=copy
+foreach ($pkg in @("cisco-ai-skill-scanner", "cisco-ai-mcp-scanner")) {
+    $installed = uv tool list 2>$null | Select-String -Quiet $pkg
+    if ($installed) {
+        Write-Host "  ${pkg}: already installed -- upgrading"
+        uv tool upgrade $pkg
+    } else {
+        uv tool install $pkg --link-mode=copy
+    }
 }
 
 Write-Host "`nVerifying installation..." -ForegroundColor Cyan
-if (Get-Command skill-scanner -ErrorAction SilentlyContinue) {
-    skill-scanner --version
-} else {
-    Write-Host "skill-scanner is installed but not on PATH." -ForegroundColor Yellow
-    Write-Host "  Run: uv tool update-shell   -- then open a new terminal." -ForegroundColor Yellow
+foreach ($bin in @("skill-scanner", "mcp-scanner")) {
+    if (Get-Command $bin -ErrorAction SilentlyContinue) {
+        Write-Host "  $(& $bin --version 2>&1 | Select-Object -First 1)"
+    } else {
+        Write-Host "  $bin installed but not on PATH -- run: uv tool update-shell (then reopen terminal)" -ForegroundColor Yellow
+    }
 }
 
 Write-Host "`n[OK] Setup complete." -ForegroundColor Green
