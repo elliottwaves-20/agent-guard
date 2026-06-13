@@ -46,12 +46,43 @@ from pathlib import Path
 MCP_SCANNER = shutil.which("mcp-scanner")
 LLM_KEY = os.environ.get("SKILL_SCANNER_LLM_API_KEY", "")
 
-# The MCP scanner's LiteLLM model. It defaults to gpt-4o, so an Anthropic key
-# without this set fails with an OpenAI auth error. Honor an explicit
-# MCP_SCANNER_LLM_MODEL, else derive a sensible model from the key prefix.
-LLM_MODEL = os.environ.get("MCP_SCANNER_LLM_MODEL", "")
-if not LLM_MODEL and LLM_KEY.startswith("sk-ant-"):
-    LLM_MODEL = "anthropic/claude-haiku-4-5-20251001"
+
+def _resolve_llm_model() -> str:
+    """Provider-agnostic LiteLLM model for the MCP scanner.
+
+    The scanner defaults to gpt-4o, so any non-OpenAI provider must set a model
+    or its LLM analysis fails (e.g. an Anthropic key hits an OpenAI auth error).
+    Bring your own LLM: an explicit MCP_SCANNER_LLM_MODEL wins; otherwise reuse
+    whatever the user already configured for the skill scanner
+    (SKILL_SCANNER_LLM_PROVIDER / SKILL_SCANNER_LLM_MODEL), mapped to LiteLLM's
+    `provider/model` form so Anthropic, OpenAI, Ollama, OpenRouter, Azure,
+    OpenAI-compatible endpoints, etc. all work without code changes.
+    """
+    explicit = os.environ.get("MCP_SCANNER_LLM_MODEL", "").strip()
+    if explicit:
+        return explicit
+    model = os.environ.get("SKILL_SCANNER_LLM_MODEL", "").strip()
+    provider = os.environ.get("SKILL_SCANNER_LLM_PROVIDER", "").strip().lower()
+    if not model:
+        # last resort: infer from the key prefix, else leave to scanner default
+        return "anthropic/claude-haiku-4-5-20251001" if LLM_KEY.startswith("sk-ant-") else ""
+    # OpenAI-compatible endpoints (OpenRouter, Groq, vLLM, ...) route through
+    # LiteLLM's `openai/` adapter + a base URL, even when the model name itself
+    # contains a slash (e.g. meta-llama/llama-3.3-70b).
+    if provider in ("openai-compatible", "custom-openai"):
+        return model if model.startswith("openai/") else f"openai/{model}"
+    if "/" in model:
+        return model  # already LiteLLM-prefixed (ollama/..., anthropic/..., openrouter/...)
+    if provider == "anthropic" or model.startswith("claude"):
+        return f"anthropic/{model}"
+    return model  # openai (gpt-* is native to LiteLLM) or unknown -> pass through
+
+
+# LiteLLM model + optional base URL, both honoring an explicit MCP_SCANNER_*
+# override and otherwise inherited from the skill scanner's config.
+LLM_MODEL = _resolve_llm_model()
+LLM_BASE_URL = (os.environ.get("MCP_SCANNER_LLM_BASE_URL", "")
+                or os.environ.get("SKILL_SCANNER_LLM_BASE_URL", "")).strip()
 
 DOCKER_IMAGE = "skill-scanner-mcp-sandbox"
 # Persistent Docker volume for the in-container uv cache, so a server's heavy
@@ -152,11 +183,13 @@ def fetch_npm(spec: str, dest: Path) -> Path:
 # -- scanning -----------------------------------------------------------------
 
 def scanner_env() -> dict:
-    """os.environ plus the resolved LLM model, so the scanner's LiteLLM picks
-    the right provider instead of its gpt-4o default."""
+    """os.environ plus the resolved LLM model + base URL, so the scanner's
+    LiteLLM picks the user's provider instead of its gpt-4o default."""
     e = dict(os.environ)
     if LLM_MODEL:
         e["MCP_SCANNER_LLM_MODEL"] = LLM_MODEL
+    if LLM_BASE_URL:
+        e["MCP_SCANNER_LLM_BASE_URL"] = LLM_BASE_URL
     return e
 
 
@@ -262,6 +295,10 @@ def run_sandbox(command: list) -> int:
         "-e", f"MCP_SCANNER_LLM_API_KEY={LLM_KEY}",
         "-e", f"MCP_SCANNER_LLM_MODEL={LLM_MODEL}",
         "-e", f"MCP_SCANNER_STDIO_TIMEOUT={STDIO_TIMEOUT}",
+    ]
+    if LLM_BASE_URL:
+        docker += ["-e", f"MCP_SCANNER_LLM_BASE_URL={LLM_BASE_URL}"]
+    docker += [
         DOCKER_IMAGE,
         "sh", "-c", script,
     ]
