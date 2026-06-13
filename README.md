@@ -1,5 +1,7 @@
 # skill-scanner
 
+[![skills.sh](https://skills.sh/b/elliottwaves-20/skill-scanner)](https://skills.sh/elliottwaves-20/skill-scanner)
+
 **Scan any AI agent skill, plugin, or MCP server for malicious code — before it ever runs on your machine.**
 
 Skills and MCP servers are third-party code executed with your user account's permissions. A malicious one can read your SSH keys, grab `.env` files and browser sessions, exfiltrate data — or hijack your AI agent through a poisoned SKILL.md (prompt injection). This skill makes **scan first, install after** the default workflow, powered by [cisco-ai-skill-scanner](https://github.com/cisco-ai-defense/skill-scanner).
@@ -41,6 +43,24 @@ Detection is automatic — only tools whose configs exist are touched. JSON conf
 
 ## Quick start
 
+**Option A — via [skills.sh](https://skills.sh) (any of 70+ agents):**
+
+```bash
+# Installs the skill into every agent the CLI detects (Claude Code, Codex,
+# Hermes, OpenClaw, Cursor, ...). Works without git.
+npx skills add elliottwaves-20/skill-scanner
+```
+
+This installs the skill files. The skill drives the [cisco-ai-skill-scanner](https://github.com/cisco-ai-defense/skill-scanner) binary, so run the one-time setup afterwards to install it:
+
+```bash
+cd ~/.claude/skills/skill-scanner   # or wherever the CLI placed it
+./setup.sh                          # Windows PowerShell: .\setup.ps1
+cp .env.example .env                # optional: pick an LLM provider
+```
+
+**Option B — clone and install manually:**
+
 ```bash
 git clone https://github.com/elliottwaves-20/skill-scanner
 cd skill-scanner
@@ -49,7 +69,7 @@ cd skill-scanner
 
 cp .env.example .env   # optional: pick an LLM provider for deeper analysis
 
-# Register skill-scanner itself as a global agent skill (auto-detects your tools):
+# Register skill-scanner itself into every detected agent (auto-detects your tools):
 python scripts/install_skill.py skill .
 ```
 
