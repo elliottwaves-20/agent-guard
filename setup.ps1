@@ -1,8 +1,17 @@
-# setup.ps1 -- Install cisco-ai-skill-scanner via uv (Windows)
+# setup.ps1 -- install the agent-guard scanners via uv (Windows)
+#   - SkillSpector          : skill scans + the static MCP source scan
+#   - cisco-ai-mcp-scanner  : the optional runtime MCP check (scan_mcp.py
+#                             --sandbox / remote) -- the one thing a static
+#                             scan cannot do (see tools registered at runtime)
 # Run from PowerShell: .\setup.ps1
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# SkillSpector is Alpha: no releases/tags and not on PyPI. We pin an exact
+# commit so "scan = install" applies to the scanner itself. Bump deliberately.
+$SkillSpectorRepo = "https://github.com/NVIDIA/SkillSpector"
+$SkillSpectorSha  = "cff7ecc4f2881d9e23ea4bb801a6353e1dbe39e6"
 
 Write-Host "Checking prerequisites..." -ForegroundColor Cyan
 
@@ -14,28 +23,48 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 }
 Write-Host "  uv: $(uv --version)"
 
-Write-Host "`nInstalling Cisco scanners (skills + MCP servers)..." -ForegroundColor Cyan
+$sha12 = $SkillSpectorSha.Substring(0, 12)
+Write-Host "`nInstalling SkillSpector (skills + static MCP scan), pinned @ $sha12..." -ForegroundColor Cyan
+# --python 3.12: SkillSpector requires 3.12/3.13; we pin 3.12 (uv fetches it)
+# for prebuilt yara-python wheels. --link-mode=copy keeps it safe when the uv
+# cache/target sit in a synced folder (OneDrive); harmless otherwise.
+$ssSpec = "git+$SkillSpectorRepo@$SkillSpectorSha"
+$ssInstalled = uv tool list 2>$null | Select-String -Quiet "^skillspector"
+if ($ssInstalled) {
+    Write-Host "  skillspector: already installed -- re-pinning to $sha12"
+    uv tool install --force $ssSpec --python 3.12 --link-mode=copy
+} else {
+    uv tool install $ssSpec --python 3.12 --link-mode=copy
+}
 
-# --link-mode=copy: required when uv cache and target sit on different
-# filesystems or inside a synced folder (OneDrive); harmless otherwise.
-foreach ($pkg in @("cisco-ai-skill-scanner", "cisco-ai-mcp-scanner")) {
-    $installed = uv tool list 2>$null | Select-String -Quiet $pkg
-    if ($installed) {
-        Write-Host "  ${pkg}: already installed -- upgrading"
-        uv tool upgrade $pkg
-    } else {
-        uv tool install $pkg --link-mode=copy
-    }
+Write-Host "`nInstalling cisco-ai-mcp-scanner (optional runtime MCP check)..." -ForegroundColor Cyan
+$mcpInstalled = uv tool list 2>$null | Select-String -Quiet "^cisco-ai-mcp-scanner"
+if ($mcpInstalled) {
+    Write-Host "  cisco-ai-mcp-scanner: already installed -- upgrading"
+    uv tool upgrade cisco-ai-mcp-scanner
+} else {
+    uv tool install cisco-ai-mcp-scanner --link-mode=copy
+}
+
+# cisco-ai-skill-scanner is no longer used -- SkillSpector replaced it for skill
+# and static MCP scans. Leave any existing install untouched, but flag it.
+$oldInstalled = uv tool list 2>$null | Select-String -Quiet "^cisco-ai-skill-scanner"
+if ($oldInstalled) {
+    Write-Host "`n  Note: cisco-ai-skill-scanner is installed but no longer used by agent-guard." -ForegroundColor Yellow
+    Write-Host "        Remove it with: uv tool uninstall cisco-ai-skill-scanner" -ForegroundColor Yellow
 }
 
 Write-Host "`nVerifying installation..." -ForegroundColor Cyan
-foreach ($bin in @("skill-scanner", "mcp-scanner")) {
-    if (Get-Command $bin -ErrorAction SilentlyContinue) {
-        Write-Host "  $(& $bin --version 2>&1 | Select-Object -First 1)"
-    } else {
-        Write-Host "  $bin installed but not on PATH -- run: uv tool update-shell (then reopen terminal)" -ForegroundColor Yellow
-    }
+if (Get-Command skillspector -ErrorAction SilentlyContinue) {
+    Write-Host "  $(skillspector --version 2>&1 | Select-Object -First 1)"
+} else {
+    Write-Host "  skillspector installed but not on PATH -- run: uv tool update-shell (then reopen terminal)" -ForegroundColor Yellow
+}
+if (Get-Command mcp-scanner -ErrorAction SilentlyContinue) {
+    Write-Host "  mcp-scanner: ready"   # no --version flag; presence on PATH is the check
+} else {
+    Write-Host "  mcp-scanner installed but not on PATH -- run: uv tool update-shell (then reopen terminal)" -ForegroundColor Yellow
 }
 
 Write-Host "`n[OK] Setup complete." -ForegroundColor Green
-Write-Host "     Next: copy .env.example to .env and set SKILL_SCANNER_LLM_API_KEY"
+Write-Host "     Next (optional): copy .env.example to .env and set SKILLSPECTOR_PROVIDER + its API key"

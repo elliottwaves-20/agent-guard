@@ -9,14 +9,20 @@ This wrapper enforces the safe order:
 
   Stage 1 (default, NO execution): fetch the package source straight from the
     registry (PyPI sdist / npm tarball) with urllib -- never pip/uvx/npm install --
-    and run `mcp-scanner behavioral` on the source. Nothing from the package runs.
+    and run SkillSpector's static scanner on the source. Nothing from the
+    package runs. SkillSpector's pattern set covers the MCP-specific risks
+    (Tool Poisoning, Tool Misuse, Least Privilege) on top of taint tracking,
+    credential-access and exfiltration checks.
 
   Stage 2 (optional, --sandbox): run the live `mcp-scanner stdio` scan inside a
     throwaway Docker container with no host filesystem access, so the server can
     be started for runtime tool/prompt analysis without touching your machine.
+    This is the one thing a static scan cannot do: see MCP tools that are only
+    registered at runtime. Powered by cisco-ai-mcp-scanner.
 
-Powered by cisco-ai-mcp-scanner. Stage 1 needs an LLM key (behavioral alignment
-is LLM-based); it reads SKILL_SCANNER_LLM_API_KEY (same .env as the skill flow).
+LLM analysis is optional. Configure one provider in .env (SKILLSPECTOR_PROVIDER
++ its key); scan_mcp.py reuses that choice for the Cisco runtime scanner too.
+Without a provider, Stage 1 runs static-only (--no-llm).
 
 Usage:
   python scan_mcp.py pypi  <package>[==version]      # fetch sdist, scan source
@@ -43,46 +49,123 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-MCP_SCANNER = shutil.which("mcp-scanner")
-LLM_KEY = os.environ.get("SKILL_SCANNER_LLM_API_KEY", "")
+SKILLSPECTOR = shutil.which("skillspector")   # Stage 1: static source scan
+MCP_SCANNER = shutil.which("mcp-scanner")      # Stage 2 / remote: runtime (Cisco)
 
 
-def _resolve_llm_model() -> str:
-    """Provider-agnostic LiteLLM model for the MCP scanner.
+# -- LLM resolution -----------------------------------------------------------
+# One provider config drives both scanners. SkillSpector reads its own native
+# env (SKILLSPECTOR_PROVIDER + the provider's key var); the Cisco runtime
+# scanner wants a LiteLLM `provider/model` id + key. resolve_llm() reads the
+# SkillSpector-native variables (with a legacy SKILL_SCANNER_* fallback so an
+# older .env keeps working) and the *_env() helpers feed each scanner the shape
+# it expects.
 
-    The scanner defaults to gpt-4o, so any non-OpenAI provider must set a model
-    or its LLM analysis fails (e.g. an Anthropic key hits an OpenAI auth error).
-    Bring your own LLM: an explicit MCP_SCANNER_LLM_MODEL wins; otherwise reuse
-    whatever the user already configured for the skill scanner
-    (SKILL_SCANNER_LLM_PROVIDER / SKILL_SCANNER_LLM_MODEL), mapped to LiteLLM's
-    `provider/model` form so Anthropic, OpenAI, Ollama, OpenRouter, Azure,
-    OpenAI-compatible endpoints, etc. all work without code changes.
+def resolve_llm():
+    """Return (provider, key, model, base_url) from the configured env.
+
+    Precedence: SkillSpector-native vars, then legacy Cisco SKILL_SCANNER_*.
+    If no provider is named, infer it from whichever credential is present.
     """
-    explicit = os.environ.get("MCP_SCANNER_LLM_MODEL", "").strip()
-    if explicit:
-        return explicit
-    model = os.environ.get("SKILL_SCANNER_LLM_MODEL", "").strip()
-    provider = os.environ.get("SKILL_SCANNER_LLM_PROVIDER", "").strip().lower()
+    provider = (os.environ.get("SKILLSPECTOR_PROVIDER", "")
+                or os.environ.get("SKILL_SCANNER_LLM_PROVIDER", "")).strip().lower()
+    model = (os.environ.get("SKILLSPECTOR_MODEL", "")
+             or os.environ.get("SKILL_SCANNER_LLM_MODEL", "")).strip()
+    base = (os.environ.get("OPENAI_BASE_URL", "")
+            or os.environ.get("MCP_SCANNER_LLM_BASE_URL", "")
+            or os.environ.get("SKILL_SCANNER_LLM_BASE_URL", "")).strip()
+    legacy_key = os.environ.get("SKILL_SCANNER_LLM_API_KEY", "").strip()
+
+    if provider == "anthropic":
+        key = os.environ.get("ANTHROPIC_API_KEY", "").strip() or legacy_key
+    elif provider in ("openai", "openai-compatible", "custom-openai"):
+        provider = "openai"
+        key = os.environ.get("OPENAI_API_KEY", "").strip() or legacy_key
+    elif provider in ("nv_build", "nv_inference"):
+        key = os.environ.get("NVIDIA_INFERENCE_KEY", "").strip() or legacy_key
+    else:
+        # No provider named -- infer from whichever credential exists.
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            provider, key = "anthropic", os.environ["ANTHROPIC_API_KEY"].strip()
+        elif os.environ.get("OPENAI_API_KEY"):
+            provider, key = "openai", os.environ["OPENAI_API_KEY"].strip()
+        elif os.environ.get("NVIDIA_INFERENCE_KEY"):
+            provider, key = "nv_inference", os.environ["NVIDIA_INFERENCE_KEY"].strip()
+        elif legacy_key:
+            key = legacy_key
+            provider = "anthropic" if legacy_key.startswith("sk-ant-") else "openai"
+        else:
+            key = ""
+    return provider, key, model, base
+
+
+PROVIDER, LLM_KEY, LLM_MODEL_RAW, LLM_BASE_URL = resolve_llm()
+
+
+def _to_litellm_model(provider: str, model: str) -> str:
+    """Map the resolved provider/model to the LiteLLM `provider/model` id the
+    Cisco MCP scanner expects (it defaults to gpt-4o otherwise)."""
     if not model:
-        # last resort: infer from the key prefix, else leave to scanner default
-        return "anthropic/claude-haiku-4-5-20251001" if LLM_KEY.startswith("sk-ant-") else ""
-    # OpenAI-compatible endpoints (OpenRouter, Groq, vLLM, ...) route through
-    # LiteLLM's `openai/` adapter + a base URL, even when the model name itself
-    # contains a slash (e.g. meta-llama/llama-3.3-70b).
-    if provider in ("openai-compatible", "custom-openai"):
-        return model if model.startswith("openai/") else f"openai/{model}"
+        return "anthropic/claude-haiku-4-5-20251001" if provider == "anthropic" else ""
     if "/" in model:
-        return model  # already LiteLLM-prefixed (ollama/..., anthropic/..., openrouter/...)
+        return model  # already prefixed (ollama/..., anthropic/..., openrouter/...)
+    if provider == "openai":
+        # gpt-* is native to LiteLLM; a custom OpenAI-compatible model still
+        # routes through the openai adapter + base URL.
+        return model if model.startswith("gpt-") else f"openai/{model}"
     if provider == "anthropic" or model.startswith("claude"):
         return f"anthropic/{model}"
-    return model  # openai (gpt-* is native to LiteLLM) or unknown -> pass through
+    return model
 
 
-# LiteLLM model + optional base URL, both honoring an explicit MCP_SCANNER_*
-# override and otherwise inherited from the skill scanner's config.
-LLM_MODEL = _resolve_llm_model()
-LLM_BASE_URL = (os.environ.get("MCP_SCANNER_LLM_BASE_URL", "")
-                or os.environ.get("SKILL_SCANNER_LLM_BASE_URL", "")).strip()
+# Explicit MCP_SCANNER_LLM_MODEL wins; otherwise derive from the resolved
+# provider so Anthropic/OpenAI/Ollama/etc. all work without extra config.
+CISCO_LLM_MODEL = (os.environ.get("MCP_SCANNER_LLM_MODEL", "").strip()
+                   or _to_litellm_model(PROVIDER, LLM_MODEL_RAW))
+
+
+def skillspector_llm_usable() -> bool:
+    """Whether SkillSpector's LLM layer can actually run with the configured
+    provider. Its semantic analyzers request structured outputs whose JSON
+    schema (integer/number `minimum`/`maximum`) only SkillSpector's OpenAI and
+    NVIDIA providers accept. Anthropic's OpenAI-compatible endpoint rejects that
+    schema (HTTP 400), so with Anthropic SkillSpector is run static-only --
+    Anthropic still drives the Cisco runtime scan, which uses LiteLLM."""
+    return bool(LLM_KEY and PROVIDER in ("openai", "nv_build", "nv_inference"))
+
+
+def skillspector_env() -> dict:
+    """Environment for SkillSpector: force UTF-8 (its rich terminal renderer
+    crashes on a legacy Windows cp1252 console) and, when the provider's LLM
+    path is usable, expose the provider + key under SkillSpector's native
+    variable names."""
+    e = dict(os.environ)
+    e["PYTHONUTF8"] = "1"
+    e["PYTHONIOENCODING"] = "utf-8"
+    if skillspector_llm_usable():
+        e["SKILLSPECTOR_PROVIDER"] = PROVIDER
+        if PROVIDER == "openai":
+            e["OPENAI_API_KEY"] = LLM_KEY
+            if LLM_BASE_URL:
+                e["OPENAI_BASE_URL"] = LLM_BASE_URL
+        elif PROVIDER in ("nv_build", "nv_inference"):
+            e["NVIDIA_INFERENCE_KEY"] = LLM_KEY
+        if LLM_MODEL_RAW:
+            e["SKILLSPECTOR_MODEL"] = LLM_MODEL_RAW
+    return e
+
+
+def cisco_env() -> dict:
+    """Environment for the Cisco MCP scanner: hand it the LiteLLM model + base
+    URL so its LiteLLM uses the configured provider instead of its gpt-4o
+    default. (The key itself is passed per-invocation, see below.)"""
+    e = dict(os.environ)
+    if CISCO_LLM_MODEL:
+        e["MCP_SCANNER_LLM_MODEL"] = CISCO_LLM_MODEL
+    if LLM_BASE_URL:
+        e["MCP_SCANNER_LLM_BASE_URL"] = LLM_BASE_URL
+    return e
+
 
 DOCKER_IMAGE = "agent-guard-mcp-sandbox"
 # Persistent Docker volume for the in-container uv cache, so a server's heavy
@@ -104,9 +187,15 @@ def die(msg: str, code: int = 2):
     sys.exit(code)
 
 
-def need_scanner():
+def need_skillspector():
+    if SKILLSPECTOR is None:
+        die("skillspector not found on PATH. Run setup.sh / setup.ps1 first.")
+
+
+def need_mcp_scanner():
     if MCP_SCANNER is None:
-        die("cisco-ai-mcp-scanner not found on PATH. Run setup.sh / setup.ps1 first.")
+        die("cisco-ai-mcp-scanner (mcp-scanner) not found on PATH -- needed for "
+            "--sandbox / remote runtime scans. Run setup.sh / setup.ps1 first.")
 
 
 def http_json(url: str) -> dict:
@@ -180,20 +269,102 @@ def fetch_npm(spec: str, dest: Path) -> Path:
     return dest
 
 
-# -- scanning -----------------------------------------------------------------
+# -- Stage 1: SkillSpector static source scan ---------------------------------
 
-def scanner_env() -> dict:
-    """os.environ plus the resolved LLM model + base URL, so the scanner's
-    LiteLLM picks the user's provider instead of its gpt-4o default."""
-    e = dict(os.environ)
-    if LLM_MODEL:
-        e["MCP_SCANNER_LLM_MODEL"] = LLM_MODEL
-    if LLM_BASE_URL:
-        e["MCP_SCANNER_LLM_BASE_URL"] = LLM_BASE_URL
-    return e
+def run_skillspector(src: Path) -> int:
+    """Static scan of MCP source with SkillSpector. Nothing from the package
+    runs. Writes a JSON report to a temp file (robust across platforms; the
+    terminal renderer is unreliable on legacy Windows consoles) and judges it."""
+    need_skillspector()
+    env = skillspector_env()
+    use_llm = skillspector_llm_usable()
+    with tempfile.TemporaryDirectory() as d:
+        report = Path(d) / "report.json"
+        cmd = [SKILLSPECTOR, "scan", str(src),
+               "--format", "json", "--output", str(report)]
+        if not use_llm:
+            cmd.append("--no-llm")
+        if not use_llm and PROVIDER == "anthropic" and LLM_KEY:
+            suffix = ("  [static only -- SkillSpector's LLM path is incompatible "
+                      "with Anthropic; Anthropic still drives --sandbox]")
+        elif not use_llm:
+            suffix = "  [static only -- no LLM provider configured]"
+        else:
+            suffix = ""
+        print(f"  SkillSpector static scan (no execution): {src}{suffix}")
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=SCAN_TIMEOUT, env=env)
+        except subprocess.TimeoutExpired:
+            print("\n" + "=" * 60)
+            print(f"[BLOCK] NO VERDICT -- scan timed out after {SCAN_TIMEOUT}s. Do NOT "
+                  "install. Raise SCAN_MCP_TIMEOUT or review manually.")
+            return 2
+        # Never hide scanner errors (fail closed): surface stderr if present.
+        if r.stderr.strip():
+            print(r.stderr, file=sys.stderr)
+        return verdict_skillspector(report, r.returncode)
 
 
-def run_scanner(cmd: list, label: str, env: dict = None) -> int:
+def verdict_skillspector(report_path: Path, code: int) -> int:
+    """Turn a SkillSpector JSON report into a clear verdict. Fail closed."""
+    print("\n" + "=" * 60)
+    data = None
+    if report_path.exists():
+        try:
+            data = json.loads(report_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            data = None
+    if data is None:
+        print("[BLOCK] NO VERDICT -- SkillSpector produced no parsable report "
+              f"(exit {code}). Do NOT install. Re-run the scan.")
+        return 2
+
+    ra = data.get("risk_assessment") or {}
+    score = ra.get("score")
+    severity = str(ra.get("severity") or "").upper()
+    rec = str(ra.get("recommendation") or "").upper()
+    issues = data.get("issues") or []
+    meta = data.get("metadata") or {}
+
+    if issues:
+        print(f"Findings ({len(issues)}):")
+        for it in issues:
+            loc = it.get("location") or {}
+            where = f"{loc.get('file')}:{loc.get('start_line')}" if loc.get("file") else "?"
+            print(f"  {str(it.get('severity') or '?').upper()}: "
+                  f"{it.get('id') or ''} {it.get('category') or ''} @ {where}")
+            if it.get("explanation"):
+                print(f"      {it['explanation']}")
+
+    if score is None:
+        print("[BLOCK] NO VERDICT -- report has no risk score. Review manually "
+              "before installing.")
+        return 2
+
+    sev_set = {str(it.get("severity") or "").upper() for it in issues}
+    runtime_note = ("\n   Note: a static source scan cannot see MCP tools that are "
+                    "registered only at runtime. Use --sandbox for a live check of "
+                    "an unfamiliar server.")
+    llm_note = ("" if meta.get("llm_available")
+                else "  (static only -- configure a provider for semantic analysis)")
+
+    if (rec == "DO_NOT_INSTALL"
+            or (isinstance(score, (int, float)) and score > 50)
+            or (sev_set & {"HIGH", "CRITICAL"})):
+        print(f"[BLOCK] risk {score}/100 ({severity}) -- {len(issues)} finding(s). "
+              "Review the findings above before installing. Do not install on a whim.")
+        return 1
+
+    extra = f" with {len(issues)} low/medium note(s)" if issues else ""
+    print(f"[SAFE] risk {score}/100 ({severity}){extra}. Installation reasonable."
+          f"{llm_note}{runtime_note}")
+    return 0
+
+
+# -- Cisco runtime paths (remote + Stage 2 sandbox) ---------------------------
+
+def run_cisco(cmd: list, label: str, env: dict = None) -> int:
     """Run an mcp-scanner command with a hard timeout, then judge its output."""
     print(f"  {label}")
     try:
@@ -210,24 +381,13 @@ def run_scanner(cmd: list, label: str, env: dict = None) -> int:
     return verdict(out, r.returncode)
 
 
-def run_behavioral(src: Path) -> int:
-    need_scanner()
-    if not LLM_KEY:
-        die("behavioral source scan needs an LLM key. Set SKILL_SCANNER_LLM_API_KEY "
-            "in .env and `source` it before scanning.")
-    cmd = [MCP_SCANNER, "--llm-api-key", LLM_KEY, "behavioral", str(src),
-           "--format", "summary"]
-    return run_scanner(cmd, f"scanning source (no execution): {src}",
-                       env=scanner_env())
-
-
 def run_remote(url: str) -> int:
-    need_scanner()
+    need_mcp_scanner()
     cmd = [MCP_SCANNER, "remote", "--server-url", url, "--format", "summary"]
     if LLM_KEY:
         cmd[1:1] = ["--llm-api-key", LLM_KEY]
-    return run_scanner(cmd, f"scanning remote MCP (no local code runs): {url}",
-                       env=scanner_env())
+    return run_cisco(cmd, f"scanning remote MCP (no local code runs): {url}",
+                     env=cisco_env())
 
 
 def run_sandbox(command: list) -> int:
@@ -238,21 +398,20 @@ def run_sandbox(command: list) -> int:
     analyser needs the LLM API -- so the threat we contain is host-filesystem
     access (SSH keys, .env, documents), not all egress.
     """
+    need_mcp_scanner()
     if shutil.which("docker") is None:
         die("--sandbox needs Docker, which was not found on PATH.")
     if not LLM_KEY:
-        die("sandbox scan needs SKILL_SCANNER_LLM_API_KEY in the environment.")
+        die("sandbox scan needs an LLM key. Configure a provider in .env "
+            "(e.g. SKILLSPECTOR_PROVIDER=anthropic + ANTHROPIC_API_KEY).")
     build_sandbox_image()
     ensure_cache_volume()
     inner = " ".join(_shquote(c) for c in command)
     # `mcp-scanner` here is the binary *inside* the container (on its PATH).
     # --format is a GLOBAL flag and must precede the `stdio` subcommand.
-    # The key is passed via MCP_SCANNER_LLM_API_KEY (env) rather than the
-    # --llm-api-key flag: the latter hits an UnboundLocalError in the scanner's
-    # stdio path (cli.py), while the env var is read cleanly.
     # Live (stdio) analysis uses yara (local signatures) + llm (semantic
     # analysis of the running server's tools/prompts). The behavioral analyzer
-    # is source-only (Stage 1) and rejects stdio; api/virustotal need paid keys.
+    # is source-only and rejects stdio; api/virustotal need paid keys.
     # Both the LLM key and the stdio timeout are passed as ENV VARS, never as
     # CLI flags: every flag the scanner copies into os.environ inside main()
     # (--llm-api-key, --stdio-timeout) hits an UnboundLocalError there. The env
@@ -293,7 +452,7 @@ def run_sandbox(command: list) -> int:
         "-e", "HOME=/tmp",
         "-e", "UV_CACHE_DIR=/uvcache",
         "-e", f"MCP_SCANNER_LLM_API_KEY={LLM_KEY}",
-        "-e", f"MCP_SCANNER_LLM_MODEL={LLM_MODEL}",
+        "-e", f"MCP_SCANNER_LLM_MODEL={CISCO_LLM_MODEL}",
         "-e", f"MCP_SCANNER_STDIO_TIMEOUT={STDIO_TIMEOUT}",
     ]
     if LLM_BASE_URL:
@@ -302,7 +461,7 @@ def run_sandbox(command: list) -> int:
         DOCKER_IMAGE,
         "sh", "-c", script,
     ]
-    return run_scanner(
+    return run_cisco(
         docker,
         f"Stage 2: live stdio scan of `{inner}` inside Docker sandbox "
         "(no host filesystem access)")
@@ -363,7 +522,9 @@ def _summary_int(output: str, key: str):
 
 
 def verdict(output: str, code: int) -> int:
-    """Turn mcp-scanner summary into a clear verdict. Fail closed."""
+    """Turn an mcp-scanner (Cisco) summary into a clear verdict. Fail closed.
+
+    Used by the runtime paths (remote + Stage 2 sandbox stdio)."""
     print("\n" + "=" * 60)
     unsafe = _summary_int(output, "unsafe items:")
     tools = _summary_int(output, "total tools scanned:")
@@ -376,10 +537,9 @@ def verdict(output: str, code: int) -> int:
     # Source scan found nothing to analyse (tools defined dynamically, or the
     # analyzer can't see them statically). NOT a clean bill of health.
     if tools == 0 and not unsafe:
-        print("[WARN] INCONCLUSIVE -- the source scan found no analyzable tools in "
-              "this package. That is not a safety guarantee; the tools may be "
-              "registered dynamically. Run a live check with --sandbox before "
-              "installing.")
+        print("[WARN] INCONCLUSIVE -- the live scan found no analyzable tools. "
+              "That is not a safety guarantee; the server may register tools "
+              "differently or fail to start. Review manually before installing.")
         return 2
 
     if unsafe is None:
@@ -388,9 +548,7 @@ def verdict(output: str, code: int) -> int:
         return 2
     if unsafe == 0:
         extra = f" ({tools} tool(s) checked)" if tools else ""
-        print(f"[SAFE] -- no unsafe items{extra}. Installation reasonable.\n"
-              "   Reminder: a clean source scan does not prove runtime safety. "
-              "Use --sandbox for a live check if in doubt.")
+        print(f"[SAFE] -- no unsafe items{extra}. Installation reasonable.")
         return 0
     print(f"[BLOCK] {unsafe} UNSAFE item(s) found -- review the findings above before "
           "installing. Do not install on a whim.")
@@ -430,7 +588,7 @@ def main():
             dest = Path(d)
             print(f"-- Stage 1: source scan of {args.package} (no execution) --")
             (fetch_pypi if args.mode == "pypi" else fetch_npm)(args.package, dest)
-            rc = run_behavioral(dest)
+            rc = run_skillspector(dest)
         if args.sandbox:
             if not args.command:
                 die("--sandbox needs a launch command after `--`, "
@@ -440,7 +598,7 @@ def main():
         sys.exit(rc)
 
     if args.mode == "local":
-        sys.exit(run_behavioral(Path(args.path)))
+        sys.exit(run_skillspector(Path(args.path)))
     if args.mode == "remote":
         sys.exit(run_remote(args.url))
     if args.mode == "sandbox":
