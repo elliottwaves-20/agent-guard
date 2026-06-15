@@ -15,8 +15,8 @@ Skills and MCP servers are third-party code executed with your user account's pe
 
 - **Commit-pinned ZIP scanning** — repos are fetched as a ZIP snapshot of one exact commit; `git clone` never touches your machine before a verdict, and the commit that was scanned is the commit that gets installed. No scan/install gap an attacker could slip a push into.
 - **Skills *and* MCP servers** — an MCP server is code that must run to be fully inspected, so naive scanning would execute it. `scan_mcp.py` scans the package **source** first (fetched from the registry, nothing executed), with an optional **Docker-sandboxed** live scan — untrusted MCP code never runs unconfined on your machine.
-- **Layered analysis** — static patterns, AST taint tracking, YARA signatures, live OSV.dev CVE lookup, and optional LLM-powered semantic analysis.
-- **Bring your own LLM** — Anthropic, OpenAI, NVIDIA, or any OpenAI-compatible endpoint (OpenRouter, Groq, Azure, vLLM, LM Studio, local Ollama). The optional runtime MCP scan reuses the same provider automatically.
+- **Layered analysis** — static patterns, AST taint tracking, YARA signatures, live OSV.dev CVE lookup, and LLM-powered semantic analysis when configured.
+- **Best scanner for each layer** — SkillSpector's full LLM-assisted skill/static scan requires OpenAI or NVIDIA credentials; Cisco's optional runtime MCP scan uses LiteLLM and can use any supported provider.
 - **Fail-closed workflow** — scanner errors are never silently treated as "no findings".
 - **Prompt-injection aware** — content of scanned repos is treated as data, never as instructions to the reviewing agent.
 - **Clear verdicts** — ✅ SAFE / ⚠ REVIEW / 🚫 DO NOT INSTALL, with a risk score and file/line for every finding.
@@ -45,7 +45,7 @@ Detection is automatic — only tools whose configs exist are touched. Claude De
 
 - [uv](https://docs.astral.sh/uv/) — installs the scanners in isolated environments (uv ships its own Python, and fetches the Python 3.12 SkillSpector needs)
 - Python 3.10+ — for running `scripts/install_skill.py`, `scripts/scan_skill.py`, and `scripts/scan_mcp.py`
-- An LLM provider of your choice — optional, enables LLM-powered analysis (see [LLM provider support](#llm-provider-support)); without one, skill scans run with `--no-llm`
+- OpenAI or NVIDIA credentials for full SkillSpector LLM coverage; optional Cisco runtime credentials for live MCP checks (see [LLM provider support](#llm-provider-support))
 - [Docker](https://docs.docker.com/get-docker/) — **optional**, only for the MCP sandbox (`scan_mcp.py ... --sandbox`, Stage 2). Skill scans and the default Stage 1 MCP source scan do **not** need Docker.
 
 ## Quick start
@@ -63,7 +63,7 @@ This installs the skill files. The skill drives the [SkillSpector](https://githu
 ```bash
 cd ~/.claude/skills/agent-guard   # or wherever the CLI placed it
 ./setup.sh                          # Windows PowerShell: .\setup.ps1
-cp .env.example .env                # optional: pick an LLM provider
+cp .env.example .env                # set SkillSpector + optional Cisco runtime LLMs
 ```
 
 **Option B — clone and install manually:**
@@ -74,7 +74,7 @@ cd agent-guard
 
 ./setup.sh          # Windows PowerShell: .\setup.ps1
 
-cp .env.example .env   # optional: pick an LLM provider for deeper analysis
+cp .env.example .env   # set SkillSpector + optional Cisco runtime LLMs
 
 # Register agent-guard itself into every detected agent (auto-detects your tools):
 python scripts/install_skill.py skill .
@@ -85,7 +85,7 @@ python scripts/install_skill.py skill .
 ### Scan a GitHub repo before installing
 
 ```bash
-# Load LLM provider config (optional, enables semantic analysis)
+# Load LLM provider config (OpenAI/NVIDIA enables full SkillSpector coverage)
 set -a && source .env && set +a
 
 REPO="user/repo-name"
@@ -135,7 +135,7 @@ python scripts/scan_mcp.py remote https://example.com/mcp
 python scripts/scan_mcp.py pypi mcp-server-name --sandbox -- uvx mcp-server-name
 ```
 
-`scan_mcp.py` reuses the provider you configured in `.env` for both stages. A clean Stage 1 scan does **not** prove runtime safety — reach for `--sandbox` when a server is unfamiliar. Install only after a SAFE verdict.
+Stage 1 uses SkillSpector. For full LLM-assisted Stage 1 coverage, configure OpenAI or NVIDIA under `SKILLSPECTOR_*`. Stage 2 uses Cisco mcp-scanner with its own `MCP_SCANNER_LLM_*` settings and can use any LiteLLM-supported provider. A clean Stage 1 scan does **not** prove runtime safety — reach for `--sandbox` when a server is unfamiliar. Install only after a SAFE verdict.
 
 ### Install after a SAFE verdict
 
@@ -181,18 +181,18 @@ find ~/.claude/skills -maxdepth 2 -name SKILL.md \
 
 ## LLM provider support
 
-Configure one provider in `.env`; the wrappers choose the safe path for each scanner. `scan_skill.py` and the static stage of `scan_mcp.py` use SkillSpector with OpenAI/NVIDIA LLM support when available, and static-only scanning otherwise. `scan_mcp.py` also bridges your choice to the runtime MCP scanner.
+agent-guard has two separate LLM configuration surfaces:
 
-| Provider | `.env` settings | Notes |
-|----------|----------------|-------|
-| **Anthropic** | `SKILLSPECTOR_PROVIDER=anthropic`, `ANTHROPIC_API_KEY`, `SKILLSPECTOR_MODEL=claude-haiku-4-5-20251001` | SkillSpector static-only; Cisco runtime MCP scan uses Anthropic via LiteLLM |
-| **OpenAI** | `SKILLSPECTOR_PROVIDER=openai`, `OPENAI_API_KEY`, `SKILLSPECTOR_MODEL=gpt-4o-mini` | |
-| **OpenAI-compatible / Ollama** | `SKILLSPECTOR_PROVIDER=openai`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `SKILLSPECTOR_MODEL` | OpenRouter, Groq, Azure, vLLM, LM Studio, local Ollama |
-| **NVIDIA** | `SKILLSPECTOR_PROVIDER=nv_inference` *(or `nv_build`)*, `NVIDIA_INFERENCE_KEY` | SkillSpector's native path |
+| Scanner layer | What it covers | LLM configuration |
+|---------------|----------------|-------------------|
+| **NVIDIA SkillSpector** | skill scans and static MCP source scans | OpenAI or NVIDIA key is required for full SkillSpector LLM coverage |
+| **Cisco mcp-scanner** | live MCP runtime scans (`remote` / `--sandbox`) | `MCP_SCANNER_LLM_*`; any LiteLLM-supported provider |
 
-> **SkillSpector's LLM layer works only with OpenAI or NVIDIA.** Its semantic analyzers request structured outputs whose JSON schema Anthropic's OpenAI-compatible endpoint rejects, so with an Anthropic key the skill and static MCP scans run **static-only** (still strong: patterns, taint tracking, YARA, OSV.dev CVE lookup). The Anthropic key still powers the optional runtime MCP scan (`--sandbox` / `remote`) via LiteLLM. For SkillSpector's LLM analysis, use OpenAI or NVIDIA.
+SkillSpector still runs its static layer without a compatible LLM: patterns, taint tracking, YARA, and OSV.dev CVE lookup remain active. That is useful, but it is not the full LLM-assisted SkillSpector check. Configure `SKILLSPECTOR_PROVIDER=openai` with `OPENAI_API_KEY`, or `SKILLSPECTOR_PROVIDER=nv_inference` / `nv_build` with `NVIDIA_INFERENCE_KEY`, for full static/skill coverage.
 
-See `.env.example` for full details. **Verdict quality depends on model quality.** This tool makes security decisions — prefer a capable model. Small local models catch fewer threats; if in doubt, combine a weak LLM verdict with a manual source review. No provider at all is fine too: `--no-llm` runs static patterns, taint tracking, YARA, and the OSV.dev CVE lookup offline.
+Cisco's runtime scanner is independent. Set `MCP_SCANNER_LLM_API_KEY`, `MCP_SCANNER_LLM_MODEL`, and optionally `MCP_SCANNER_LLM_BASE_URL` / `MCP_SCANNER_LLM_API_VERSION` for OpenAI, Anthropic, Gemini, Bedrock, Azure OpenAI, Ollama, or any LiteLLM-supported model.
+
+See `.env.example` for full details. **Verdict quality depends on model quality.** This tool makes security decisions — prefer capable models. Small local models catch fewer threats; if in doubt, combine a weak LLM verdict with a manual source review.
 
 ## Security model
 
@@ -209,7 +209,7 @@ The warnings describe what the skill genuinely does:
 
 - **It runs external binaries.** The skill drives [SkillSpector](https://github.com/NVIDIA/SkillSpector) (skills + static MCP scan) and [cisco-ai-mcp-scanner](https://github.com/cisco-ai-defense/mcp-scanner) (optional live MCP runtime check) — that *is* its job. Both are official, open-source security tools installed isolated via `uv`. SkillSpector is **pinned to an exact commit**: it is Alpha with no releases, so pinning makes "scan = install" apply to the scanner itself (review and bump deliberately); the Cisco MCP scanner is pulled from PyPI at the latest version.
 - **It installs across multiple agents.** The bundled installer links the audited skill into every agent you have — the "one scan, every agent" feature. Scanners read cross-platform installation as expanded reach; here it is the intended behavior, and you can limit it with `--tools`.
-- **It can route data to an LLM.** Optional LLM analysis sends the *scanned* skill's contents to the LLM provider **you** configure (Anthropic, OpenAI, NVIDIA, a local Ollama model, or none at all). No data leaves your machine unless you opt in and choose the provider.
+- **It can route data to an LLM.** SkillSpector sends scanned skill/static-source contents only when you configure a compatible OpenAI or NVIDIA provider. Cisco's runtime MCP scan sends runtime tool/prompt data to the `MCP_SCANNER_LLM_*` provider you configure. No data leaves your machine unless you opt in and choose the provider.
 
 You cannot drive these flags to green without removing the tool's reason to exist. What keeps it trustworthy is everything in the [Security model](#security-model) above: scanned content is treated as data, the workflow fails closed, repos are pinned and ZIP-scanned before any clone, and the skill ships **no hidden or invisible characters** of its own.
 

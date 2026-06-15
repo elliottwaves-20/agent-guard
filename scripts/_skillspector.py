@@ -39,9 +39,10 @@ def need_skillspector():
 
 
 # -- provider-aware LLM resolution --------------------------------------------
-# One provider config drives SkillSpector here and (via scan_mcp.py) the Cisco
-# runtime scanner. resolve_llm() reads SkillSpector-native variables, with a
-# legacy SKILL_SCANNER_* fallback so an older .env keeps working.
+# This provider config is for SkillSpector only. scan_mcp.py has a separate
+# Cisco runtime LLM config based on MCP_SCANNER_LLM_*.
+# resolve_llm() also reads legacy SKILL_SCANNER_* as a fallback so an older .env
+# keeps working.
 
 def resolve_llm():
     """Return (provider, key, model, base_url) from the configured env.
@@ -88,9 +89,9 @@ def skillspector_llm_usable() -> bool:
     """Whether SkillSpector's LLM layer can actually run with the configured
     provider. Its semantic analyzers request structured outputs whose JSON
     schema (integer/number `minimum`/`maximum`) only SkillSpector's OpenAI and
-    NVIDIA providers accept. Anthropic's OpenAI-compatible endpoint rejects that
-    schema (HTTP 400), so with Anthropic SkillSpector is run static-only --
-    Anthropic still drives the Cisco runtime scan, which uses LiteLLM."""
+    NVIDIA providers accept in this pinned integration. Anthropic's
+    OpenAI-compatible endpoint rejects that schema (HTTP 400), so with Anthropic
+    SkillSpector is run static-only."""
     return bool(LLM_KEY and PROVIDER in ("openai", "nv_build", "nv_inference"))
 
 

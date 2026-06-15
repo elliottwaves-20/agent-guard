@@ -79,25 +79,30 @@ Install the scanner binaries, isolated via uv:
 ```
 
 This installs `skillspector` (pinned to an exact commit — it is Alpha, with no
-releases) and `mcp-scanner`. For LLM-powered analysis, copy `.env.example` to
-`.env` **next to this SKILL.md** and configure one provider — Anthropic,
-OpenAI, NVIDIA, or any OpenAI-compatible endpoint incl. local Ollama. Load it
-before scanning:
+releases) and `mcp-scanner`. For full LLM-powered analysis, copy `.env.example`
+to `.env` **next to this SKILL.md** and configure both scanner layers:
+
+- `SKILLSPECTOR_*` with OpenAI or NVIDIA for full SkillSpector skill/static
+  coverage.
+- `MCP_SCANNER_LLM_*` with any LiteLLM-supported provider for Cisco runtime MCP
+  scans.
+
+Load it before scanning:
 
 ```bash
 SKILL_DIR="$HOME/.claude/skills/agent-guard"   # adjust if installed elsewhere
 set -a && source "$SKILL_DIR/.env" && set +a
 ```
 
-Without any provider, skill scans run static-only (patterns, taint, YARA,
-OSV.dev still run). For security verdicts, prefer a capable model — small local
-models catch fewer threats.
+Without OpenAI or NVIDIA for SkillSpector, skill/static scans run static-only
+(patterns, taint, YARA, OSV.dev still run). For security verdicts, prefer a
+capable model — small local models catch fewer threats.
 
 **SkillSpector's LLM layer works only with OpenAI or NVIDIA** — its
 structured-output schema is rejected by Anthropic's OpenAI-compatible endpoint.
-With an Anthropic key the scans run static-only (the static layer is
-unaffected); the Anthropic key still drives the optional runtime MCP scan
-(`scan_mcp.py --sandbox` / `remote`) via the Cisco scanner.
+With an Anthropic key under `SKILLSPECTOR_*`, SkillSpector runs static-only in
+this pinned integration. Cisco runtime scans are configured separately through
+`MCP_SCANNER_LLM_*` and can use any LiteLLM-supported provider.
 
 `scan_skill.py` and `scan_mcp.py` handle Windows UTF-8 mode, JSON verdict
 parsing, and Anthropic's SkillSpector incompatibility automatically. Use the
@@ -131,8 +136,8 @@ python "$SKILL_DIR/scripts/scan_skill.py" "$WORKDIR/src/<skill-dir>"
 echo "scanner exit code: $?"   # 0 = risk<=50, 1 = risk>50, 2 = error
 ```
 
-(Provider and model come from `.env`. With Anthropic, the wrapper runs
-SkillSpector static-only and suppresses the incompatible LLM path.)
+(Provider and model come from `.env`. OpenAI or NVIDIA is required for full
+SkillSpector LLM coverage; otherwise the wrapper runs SkillSpector static-only.)
 
 If the repo contains multiple skills, scan each one for its own verdict
 (SkillSpector aggregates a whole directory into a single report, so scan per
@@ -194,7 +199,7 @@ from the registry and run SkillSpector's static scan on it.
 
 ```bash
 INSTALLER_DIR="$HOME/.claude/skills/agent-guard/scripts"
-set -a && source <.env> && set +a   # optional: enables LLM semantic analysis
+set -a && source <.env> && set +a   # SkillSpector + optional Cisco runtime LLMs
 
 python "$INSTALLER_DIR/scan_mcp.py" pypi <package>       # PyPI MCP
 python "$INSTALLER_DIR/scan_mcp.py" npm <@scope/package> # npm MCP
@@ -213,10 +218,11 @@ python "$INSTALLER_DIR/scan_mcp.py" pypi <package> --sandbox -- uvx <package>
 A clean Stage 1 verdict does not prove runtime safety — use `--sandbox` for
 unfamiliar servers. Only after SAFE: `install_skill.py mcp ...` (see below).
 
-**Stage 2 needs Docker** (running) and an LLM provider. The first `--sandbox`
-run builds a small sandbox image; if Docker is missing, `scan_mcp.py` says so
-and exits — Stage 1 and all skill scans work without it. `scan_mcp.py` reuses
-the provider you configured in `.env` for the runtime scanner automatically.
+**Stage 2 needs Docker** (running) and a Cisco runtime LLM provider. The first
+`--sandbox` run builds a small sandbox image; if Docker is missing,
+`scan_mcp.py` says so and exits — Stage 1 and all skill scans work without it.
+Cisco runtime LLMs are configured with `MCP_SCANNER_LLM_*` and can use any
+LiteLLM-supported provider.
 
 ## Interpreting results
 
@@ -385,5 +391,5 @@ uv tool install package-name --link-mode=copy
 |------|-------------|
 | `python "$SKILL_DIR/scripts/scan_skill.py" <path>` | Scan one skill directory, zip, markdown file, or local path |
 | `python "$SKILL_DIR/scripts/scan_skill.py" --all <dir>` | Scan each `SKILL.md` directory under a tree separately |
-| Static-only fallback | Used automatically when no provider is configured, or when the configured provider is Anthropic |
+| Static-only mode | Used automatically when no OpenAI/NVIDIA provider is configured for SkillSpector |
 | SkillSpector LLM | Used automatically only with OpenAI or NVIDIA provider settings |

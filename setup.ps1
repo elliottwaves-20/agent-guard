@@ -67,4 +67,5 @@ if (Get-Command mcp-scanner -ErrorAction SilentlyContinue) {
 }
 
 Write-Host "`n[OK] Setup complete." -ForegroundColor Green
-Write-Host "     Next (optional): copy .env.example to .env and set SKILLSPECTOR_PROVIDER + its API key"
+Write-Host "     Next: copy .env.example to .env"
+Write-Host "           Set OpenAI/NVIDIA for SkillSpector full coverage; set MCP_SCANNER_LLM_* for Cisco runtime scans"

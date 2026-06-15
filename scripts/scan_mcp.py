@@ -20,9 +20,10 @@ This wrapper enforces the safe order:
     This is the one thing a static scan cannot do: see MCP tools that are only
     registered at runtime. Powered by cisco-ai-mcp-scanner.
 
-LLM analysis is optional. Configure one provider in .env (SKILLSPECTOR_PROVIDER
-+ its key); scan_mcp.py reuses that choice for the Cisco runtime scanner too.
-Without a provider, Stage 1 runs static-only (--no-llm).
+LLM analysis is optional. Stage 1 uses SkillSpector's provider config
+(SKILLSPECTOR_*), while Stage 2 / remote uses Cisco mcp-scanner's LiteLLM config
+(MCP_SCANNER_LLM_*). Without OpenAI/NVIDIA credentials, Stage 1 runs static-only
+(--no-llm).
 
 Usage:
   python scan_mcp.py pypi  <package>[==version]      # fetch sdist, scan source
@@ -50,10 +51,6 @@ import zipfile
 from pathlib import Path
 
 from _skillspector import (
-    LLM_BASE_URL,
-    LLM_KEY,
-    LLM_MODEL_RAW,
-    PROVIDER,
     SCAN_TIMEOUT,
     die,
     run_skillspector as shared_run_skillspector,
@@ -62,36 +59,22 @@ from _skillspector import (
 MCP_SCANNER = shutil.which("mcp-scanner")      # Stage 2 / remote: runtime (Cisco)
 
 
-def _to_litellm_model(provider: str, model: str) -> str:
-    """Map the resolved provider/model to the LiteLLM `provider/model` id the
-    Cisco MCP scanner expects (it defaults to gpt-4o otherwise)."""
-    if not model:
-        return "anthropic/claude-haiku-4-5-20251001" if provider == "anthropic" else ""
-    if "/" in model:
-        return model  # already prefixed (ollama/..., anthropic/..., openrouter/...)
-    if provider == "openai":
-        # gpt-* is native to LiteLLM; a custom OpenAI-compatible model still
-        # routes through the openai adapter + base URL.
-        return model if model.startswith("gpt-") else f"openai/{model}"
-    if provider == "anthropic" or model.startswith("claude"):
-        return f"anthropic/{model}"
-    return model
-
-
-# Explicit MCP_SCANNER_LLM_MODEL wins; otherwise derive from the resolved
-# provider so Anthropic/OpenAI/Ollama/etc. all work without extra config.
-CISCO_LLM_MODEL = (os.environ.get("MCP_SCANNER_LLM_MODEL", "").strip()
-                   or _to_litellm_model(PROVIDER, LLM_MODEL_RAW))
+CISCO_LLM_KEY = os.environ.get("MCP_SCANNER_LLM_API_KEY", "").strip()
+CISCO_LLM_MODEL = os.environ.get("MCP_SCANNER_LLM_MODEL", "").strip()
+CISCO_LLM_BASE_URL = os.environ.get("MCP_SCANNER_LLM_BASE_URL", "").strip()
+CISCO_LLM_API_VERSION = os.environ.get("MCP_SCANNER_LLM_API_VERSION", "").strip()
 
 def cisco_env() -> dict:
     """Environment for the Cisco MCP scanner: hand it the LiteLLM model + base
-    URL so its LiteLLM uses the configured provider instead of its gpt-4o
+    URL so its LiteLLM uses the configured runtime provider instead of its
     default. (The key itself is passed per-invocation, see below.)"""
     e = dict(os.environ)
     if CISCO_LLM_MODEL:
         e["MCP_SCANNER_LLM_MODEL"] = CISCO_LLM_MODEL
-    if LLM_BASE_URL:
-        e["MCP_SCANNER_LLM_BASE_URL"] = LLM_BASE_URL
+    if CISCO_LLM_BASE_URL:
+        e["MCP_SCANNER_LLM_BASE_URL"] = CISCO_LLM_BASE_URL
+    if CISCO_LLM_API_VERSION:
+        e["MCP_SCANNER_LLM_API_VERSION"] = CISCO_LLM_API_VERSION
     return e
 
 
@@ -215,8 +198,8 @@ def run_cisco(cmd: list, label: str, env: dict = None) -> int:
 def run_remote(url: str) -> int:
     need_mcp_scanner()
     cmd = [MCP_SCANNER, "remote", "--server-url", url, "--format", "summary"]
-    if LLM_KEY:
-        cmd[1:1] = ["--llm-api-key", LLM_KEY]
+    if CISCO_LLM_KEY:
+        cmd[1:1] = ["--llm-api-key", CISCO_LLM_KEY]
     return run_cisco(cmd, f"scanning remote MCP (no local code runs): {url}",
                      env=cisco_env())
 
@@ -232,9 +215,9 @@ def run_sandbox(command: list) -> int:
     need_mcp_scanner()
     if shutil.which("docker") is None:
         die("--sandbox needs Docker, which was not found on PATH.")
-    if not LLM_KEY:
-        die("sandbox scan needs an LLM key. Configure a provider in .env "
-            "(e.g. SKILLSPECTOR_PROVIDER=anthropic + ANTHROPIC_API_KEY).")
+    if not CISCO_LLM_KEY:
+        die("sandbox scan needs a Cisco runtime LLM key. Configure "
+            "MCP_SCANNER_LLM_API_KEY + MCP_SCANNER_LLM_MODEL in .env.")
     build_sandbox_image()
     ensure_cache_volume()
     inner = " ".join(_shquote(c) for c in command)
@@ -282,12 +265,14 @@ def run_sandbox(command: list) -> int:
         "-v", f"{CACHE_VOLUME}:/uvcache",
         "-e", "HOME=/tmp",
         "-e", "UV_CACHE_DIR=/uvcache",
-        "-e", f"MCP_SCANNER_LLM_API_KEY={LLM_KEY}",
+        "-e", f"MCP_SCANNER_LLM_API_KEY={CISCO_LLM_KEY}",
         "-e", f"MCP_SCANNER_LLM_MODEL={CISCO_LLM_MODEL}",
         "-e", f"MCP_SCANNER_STDIO_TIMEOUT={STDIO_TIMEOUT}",
     ]
-    if LLM_BASE_URL:
-        docker += ["-e", f"MCP_SCANNER_LLM_BASE_URL={LLM_BASE_URL}"]
+    if CISCO_LLM_BASE_URL:
+        docker += ["-e", f"MCP_SCANNER_LLM_BASE_URL={CISCO_LLM_BASE_URL}"]
+    if CISCO_LLM_API_VERSION:
+        docker += ["-e", f"MCP_SCANNER_LLM_API_VERSION={CISCO_LLM_API_VERSION}"]
     docker += [
         DOCKER_IMAGE,
         "sh", "-c", script,

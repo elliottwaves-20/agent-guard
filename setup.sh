@@ -77,4 +77,5 @@ fi
 
 echo ""
 echo "[OK] Setup complete."
-echo "     Next (optional): cp .env.example .env  -- then set SKILLSPECTOR_PROVIDER + its API key"
+echo "     Next: cp .env.example .env"
+echo "           Set OpenAI/NVIDIA for SkillSpector full coverage; set MCP_SCANNER_LLM_* for Cisco runtime scans"
