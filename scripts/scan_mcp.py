@@ -49,57 +49,17 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-SKILLSPECTOR = shutil.which("skillspector")   # Stage 1: static source scan
+from _skillspector import (
+    LLM_BASE_URL,
+    LLM_KEY,
+    LLM_MODEL_RAW,
+    PROVIDER,
+    SCAN_TIMEOUT,
+    die,
+    run_skillspector as shared_run_skillspector,
+)
+
 MCP_SCANNER = shutil.which("mcp-scanner")      # Stage 2 / remote: runtime (Cisco)
-
-
-# -- LLM resolution -----------------------------------------------------------
-# One provider config drives both scanners. SkillSpector reads its own native
-# env (SKILLSPECTOR_PROVIDER + the provider's key var); the Cisco runtime
-# scanner wants a LiteLLM `provider/model` id + key. resolve_llm() reads the
-# SkillSpector-native variables (with a legacy SKILL_SCANNER_* fallback so an
-# older .env keeps working) and the *_env() helpers feed each scanner the shape
-# it expects.
-
-def resolve_llm():
-    """Return (provider, key, model, base_url) from the configured env.
-
-    Precedence: SkillSpector-native vars, then legacy Cisco SKILL_SCANNER_*.
-    If no provider is named, infer it from whichever credential is present.
-    """
-    provider = (os.environ.get("SKILLSPECTOR_PROVIDER", "")
-                or os.environ.get("SKILL_SCANNER_LLM_PROVIDER", "")).strip().lower()
-    model = (os.environ.get("SKILLSPECTOR_MODEL", "")
-             or os.environ.get("SKILL_SCANNER_LLM_MODEL", "")).strip()
-    base = (os.environ.get("OPENAI_BASE_URL", "")
-            or os.environ.get("MCP_SCANNER_LLM_BASE_URL", "")
-            or os.environ.get("SKILL_SCANNER_LLM_BASE_URL", "")).strip()
-    legacy_key = os.environ.get("SKILL_SCANNER_LLM_API_KEY", "").strip()
-
-    if provider == "anthropic":
-        key = os.environ.get("ANTHROPIC_API_KEY", "").strip() or legacy_key
-    elif provider in ("openai", "openai-compatible", "custom-openai"):
-        provider = "openai"
-        key = os.environ.get("OPENAI_API_KEY", "").strip() or legacy_key
-    elif provider in ("nv_build", "nv_inference"):
-        key = os.environ.get("NVIDIA_INFERENCE_KEY", "").strip() or legacy_key
-    else:
-        # No provider named -- infer from whichever credential exists.
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            provider, key = "anthropic", os.environ["ANTHROPIC_API_KEY"].strip()
-        elif os.environ.get("OPENAI_API_KEY"):
-            provider, key = "openai", os.environ["OPENAI_API_KEY"].strip()
-        elif os.environ.get("NVIDIA_INFERENCE_KEY"):
-            provider, key = "nv_inference", os.environ["NVIDIA_INFERENCE_KEY"].strip()
-        elif legacy_key:
-            key = legacy_key
-            provider = "anthropic" if legacy_key.startswith("sk-ant-") else "openai"
-        else:
-            key = ""
-    return provider, key, model, base
-
-
-PROVIDER, LLM_KEY, LLM_MODEL_RAW, LLM_BASE_URL = resolve_llm()
 
 
 def _to_litellm_model(provider: str, model: str) -> str:
@@ -123,38 +83,6 @@ def _to_litellm_model(provider: str, model: str) -> str:
 CISCO_LLM_MODEL = (os.environ.get("MCP_SCANNER_LLM_MODEL", "").strip()
                    or _to_litellm_model(PROVIDER, LLM_MODEL_RAW))
 
-
-def skillspector_llm_usable() -> bool:
-    """Whether SkillSpector's LLM layer can actually run with the configured
-    provider. Its semantic analyzers request structured outputs whose JSON
-    schema (integer/number `minimum`/`maximum`) only SkillSpector's OpenAI and
-    NVIDIA providers accept. Anthropic's OpenAI-compatible endpoint rejects that
-    schema (HTTP 400), so with Anthropic SkillSpector is run static-only --
-    Anthropic still drives the Cisco runtime scan, which uses LiteLLM."""
-    return bool(LLM_KEY and PROVIDER in ("openai", "nv_build", "nv_inference"))
-
-
-def skillspector_env() -> dict:
-    """Environment for SkillSpector: force UTF-8 (its rich terminal renderer
-    crashes on a legacy Windows cp1252 console) and, when the provider's LLM
-    path is usable, expose the provider + key under SkillSpector's native
-    variable names."""
-    e = dict(os.environ)
-    e["PYTHONUTF8"] = "1"
-    e["PYTHONIOENCODING"] = "utf-8"
-    if skillspector_llm_usable():
-        e["SKILLSPECTOR_PROVIDER"] = PROVIDER
-        if PROVIDER == "openai":
-            e["OPENAI_API_KEY"] = LLM_KEY
-            if LLM_BASE_URL:
-                e["OPENAI_BASE_URL"] = LLM_BASE_URL
-        elif PROVIDER in ("nv_build", "nv_inference"):
-            e["NVIDIA_INFERENCE_KEY"] = LLM_KEY
-        if LLM_MODEL_RAW:
-            e["SKILLSPECTOR_MODEL"] = LLM_MODEL_RAW
-    return e
-
-
 def cisco_env() -> dict:
     """Environment for the Cisco MCP scanner: hand it the LiteLLM model + base
     URL so its LiteLLM uses the configured provider instead of its gpt-4o
@@ -173,23 +101,10 @@ DOCKER_IMAGE = "agent-guard-mcp-sandbox"
 # only downloaded packages -- no host filesystem is exposed.
 CACHE_VOLUME = "agent-guard-mcp-uvcache"
 
-# Hard cap on a single scanner invocation, so a hanging scan never blocks forever.
-# Generous, because the FIRST sandbox run of a heavy server downloads its deps.
-SCAN_TIMEOUT = int(os.environ.get("SCAN_MCP_TIMEOUT", "600"))
 # How long the scanner waits for a stdio MCP to start. The default (60s) is too
 # short for servers whose first `uvx`/`npx` launch must download heavy deps
 # (pandas, numpy, ...) inside a fresh container.
 STDIO_TIMEOUT = int(os.environ.get("SCAN_MCP_STDIO_TIMEOUT", "240"))
-
-
-def die(msg: str, code: int = 2):
-    print(f"ERROR: {msg}", file=sys.stderr)
-    sys.exit(code)
-
-
-def need_skillspector():
-    if SKILLSPECTOR is None:
-        die("skillspector not found on PATH. Run setup.sh / setup.ps1 first.")
 
 
 def need_mcp_scanner():
@@ -275,91 +190,7 @@ def run_skillspector(src: Path) -> int:
     """Static scan of MCP source with SkillSpector. Nothing from the package
     runs. Writes a JSON report to a temp file (robust across platforms; the
     terminal renderer is unreliable on legacy Windows consoles) and judges it."""
-    need_skillspector()
-    env = skillspector_env()
-    use_llm = skillspector_llm_usable()
-    with tempfile.TemporaryDirectory() as d:
-        report = Path(d) / "report.json"
-        cmd = [SKILLSPECTOR, "scan", str(src),
-               "--format", "json", "--output", str(report)]
-        if not use_llm:
-            cmd.append("--no-llm")
-        if not use_llm and PROVIDER == "anthropic" and LLM_KEY:
-            suffix = ("  [static only -- SkillSpector's LLM path is incompatible "
-                      "with Anthropic; Anthropic still drives --sandbox]")
-        elif not use_llm:
-            suffix = "  [static only -- no LLM provider configured]"
-        else:
-            suffix = ""
-        print(f"  SkillSpector static scan (no execution): {src}{suffix}")
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=SCAN_TIMEOUT, env=env)
-        except subprocess.TimeoutExpired:
-            print("\n" + "=" * 60)
-            print(f"[BLOCK] NO VERDICT -- scan timed out after {SCAN_TIMEOUT}s. Do NOT "
-                  "install. Raise SCAN_MCP_TIMEOUT or review manually.")
-            return 2
-        # Never hide scanner errors (fail closed): surface stderr if present.
-        if r.stderr.strip():
-            print(r.stderr, file=sys.stderr)
-        return verdict_skillspector(report, r.returncode)
-
-
-def verdict_skillspector(report_path: Path, code: int) -> int:
-    """Turn a SkillSpector JSON report into a clear verdict. Fail closed."""
-    print("\n" + "=" * 60)
-    data = None
-    if report_path.exists():
-        try:
-            data = json.loads(report_path.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            data = None
-    if data is None:
-        print("[BLOCK] NO VERDICT -- SkillSpector produced no parsable report "
-              f"(exit {code}). Do NOT install. Re-run the scan.")
-        return 2
-
-    ra = data.get("risk_assessment") or {}
-    score = ra.get("score")
-    severity = str(ra.get("severity") or "").upper()
-    rec = str(ra.get("recommendation") or "").upper()
-    issues = data.get("issues") or []
-    meta = data.get("metadata") or {}
-
-    if issues:
-        print(f"Findings ({len(issues)}):")
-        for it in issues:
-            loc = it.get("location") or {}
-            where = f"{loc.get('file')}:{loc.get('start_line')}" if loc.get("file") else "?"
-            print(f"  {str(it.get('severity') or '?').upper()}: "
-                  f"{it.get('id') or ''} {it.get('category') or ''} @ {where}")
-            if it.get("explanation"):
-                print(f"      {it['explanation']}")
-
-    if score is None:
-        print("[BLOCK] NO VERDICT -- report has no risk score. Review manually "
-              "before installing.")
-        return 2
-
-    sev_set = {str(it.get("severity") or "").upper() for it in issues}
-    runtime_note = ("\n   Note: a static source scan cannot see MCP tools that are "
-                    "registered only at runtime. Use --sandbox for a live check of "
-                    "an unfamiliar server.")
-    llm_note = ("" if meta.get("llm_available")
-                else "  (static only -- configure a provider for semantic analysis)")
-
-    if (rec == "DO_NOT_INSTALL"
-            or (isinstance(score, (int, float)) and score > 50)
-            or (sev_set & {"HIGH", "CRITICAL"})):
-        print(f"[BLOCK] risk {score}/100 ({severity}) -- {len(issues)} finding(s). "
-              "Review the findings above before installing. Do not install on a whim.")
-        return 1
-
-    extra = f" with {len(issues)} low/medium note(s)" if issues else ""
-    print(f"[SAFE] risk {score}/100 ({severity}){extra}. Installation reasonable."
-          f"{llm_note}{runtime_note}")
-    return 0
+    return shared_run_skillspector(src, runtime_hint=True)
 
 
 # -- Cisco runtime paths (remote + Stage 2 sandbox) ---------------------------

@@ -44,7 +44,7 @@ Detection is automatic — only tools whose configs exist are touched. Claude De
 ## Prerequisites
 
 - [uv](https://docs.astral.sh/uv/) — installs the scanners in isolated environments (uv ships its own Python, and fetches the Python 3.12 SkillSpector needs)
-- Python 3.10+ — for running `scripts/install_skill.py` and `scripts/scan_mcp.py`
+- Python 3.10+ — for running `scripts/install_skill.py`, `scripts/scan_skill.py`, and `scripts/scan_mcp.py`
 - An LLM provider of your choice — optional, enables LLM-powered analysis (see [LLM provider support](#llm-provider-support)); without one, skill scans run with `--no-llm`
 - [Docker](https://docs.docker.com/get-docker/) — **optional**, only for the MCP sandbox (`scan_mcp.py ... --sandbox`, Stage 2). Skill scans and the default Stage 1 MCP source scan do **not** need Docker.
 
@@ -99,9 +99,9 @@ SHA=$(curl -fsSL "https://api.github.com/repos/${REPO}/commits/HEAD" \
 curl -fsSL "https://github.com/${REPO}/archive/${SHA}.zip" -o "$WORKDIR/scan.zip"
 unzip -q "$WORKDIR/scan.zip" -d "$WORKDIR/src"
 
-# Scan the extracted skill directory. PYTHONUTF8=1 keeps the report rendering on
-# Windows (harmless elsewhere); provider/model come from .env, or add --no-llm.
-PYTHONUTF8=1 skillspector scan "$WORKDIR/src"/* --format terminal
+# Scan the extracted skill directory. The wrapper handles UTF-8, provider quirks,
+# and fail-closed [SAFE] / [BLOCK] verdict parsing.
+python scripts/scan_skill.py --all "$WORKDIR/src"
 
 # Cleanup (keep $SHA for installation)
 rm -rf "$WORKDIR"
@@ -109,7 +109,7 @@ rm -rf "$WORKDIR"
 
 Scanner errors or empty output mean **no verdict** — never treat a failed scan as safe. A non-zero exit *with* a report is a real verdict (SkillSpector exits 1 when the risk score is above 50).
 
-> **Windows:** `skillspector`'s terminal report uses Unicode that crashes on a legacy cp1252 console. Prefix the command with `PYTHONUTF8=1` (as above), or use `--format json --output report.json`, which is robust on every platform.
+The wrapper writes SkillSpector JSON to a temporary report, so Windows console encoding issues and Anthropic's incompatible SkillSpector LLM path are handled automatically.
 
 ### Scan an MCP server before installing
 
@@ -176,16 +176,16 @@ SkillSpector aggregates a whole directory into one report, so scan each skill on
 ```bash
 find ~/.claude/skills -maxdepth 2 -name SKILL.md \
   | xargs -I{} dirname {} | sort -u \
-  | while read -r d; do echo "== $d =="; PYTHONUTF8=1 skillspector scan "$d" --no-llm --format terminal; done
+  | while read -r d; do echo "== $d =="; python scripts/scan_skill.py "$d"; done
 ```
 
 ## LLM provider support
 
-The LLM analyzer works with any provider — configure it once in `.env`, the scan commands stay the same. `scan_mcp.py` bridges your choice to the runtime MCP scanner too.
+Configure one provider in `.env`; the wrappers choose the safe path for each scanner. `scan_skill.py` and the static stage of `scan_mcp.py` use SkillSpector with OpenAI/NVIDIA LLM support when available, and static-only scanning otherwise. `scan_mcp.py` also bridges your choice to the runtime MCP scanner.
 
 | Provider | `.env` settings | Notes |
 |----------|----------------|-------|
-| **Anthropic** | `SKILLSPECTOR_PROVIDER=anthropic`, `ANTHROPIC_API_KEY`, `SKILLSPECTOR_MODEL=claude-haiku-4-5-20251001` | fast + cheap for scanning |
+| **Anthropic** | `SKILLSPECTOR_PROVIDER=anthropic`, `ANTHROPIC_API_KEY`, `SKILLSPECTOR_MODEL=claude-haiku-4-5-20251001` | SkillSpector static-only; Cisco runtime MCP scan uses Anthropic via LiteLLM |
 | **OpenAI** | `SKILLSPECTOR_PROVIDER=openai`, `OPENAI_API_KEY`, `SKILLSPECTOR_MODEL=gpt-4o-mini` | |
 | **OpenAI-compatible / Ollama** | `SKILLSPECTOR_PROVIDER=openai`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `SKILLSPECTOR_MODEL` | OpenRouter, Groq, Azure, vLLM, LM Studio, local Ollama |
 | **NVIDIA** | `SKILLSPECTOR_PROVIDER=nv_inference` *(or `nv_build`)*, `NVIDIA_INFERENCE_KEY` | SkillSpector's native path |

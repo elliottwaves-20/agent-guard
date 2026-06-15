@@ -89,9 +89,9 @@ SKILL_DIR="$HOME/.claude/skills/agent-guard"   # adjust if installed elsewhere
 set -a && source "$SKILL_DIR/.env" && set +a
 ```
 
-Without any provider, run skill scans with `--no-llm` (static only — patterns,
-taint, YARA, OSV.dev still run). For security verdicts, prefer a capable model
-— small local models catch fewer threats.
+Without any provider, skill scans run static-only (patterns, taint, YARA,
+OSV.dev still run). For security verdicts, prefer a capable model — small local
+models catch fewer threats.
 
 **SkillSpector's LLM layer works only with OpenAI or NVIDIA** — its
 structured-output schema is rejected by Anthropic's OpenAI-compatible endpoint.
@@ -99,10 +99,9 @@ With an Anthropic key the scans run static-only (the static layer is
 unaffected); the Anthropic key still drives the optional runtime MCP scan
 (`scan_mcp.py --sandbox` / `remote`) via the Cisco scanner.
 
-**Windows note:** prefix `skillspector` with `PYTHONUTF8=1` (as shown below).
-Its terminal report uses Unicode that crashes on a legacy cp1252 console; UTF-8
-mode fixes it and is harmless on macOS/Linux. Alternatively use
-`--format json --output report.json`, which is robust everywhere.
+`scan_skill.py` and `scan_mcp.py` handle Windows UTF-8 mode, JSON verdict
+parsing, and Anthropic's SkillSpector incompatibility automatically. Use the
+wrappers below instead of calling `skillspector scan` directly.
 
 ## Scan modes
 
@@ -128,11 +127,12 @@ Locate the skill directories and scan (stderr stays visible — rule 2):
 ```bash
 find "$WORKDIR/src" -name "SKILL.md" -not -path "*/node_modules/*"
 
-PYTHONUTF8=1 skillspector scan "$WORKDIR/src/<skill-dir>" --format terminal
+python "$SKILL_DIR/scripts/scan_skill.py" "$WORKDIR/src/<skill-dir>"
 echo "scanner exit code: $?"   # 0 = risk<=50, 1 = risk>50, 2 = error
 ```
 
-(Provider and model come from `.env`. No provider? Add `--no-llm`.)
+(Provider and model come from `.env`. With Anthropic, the wrapper runs
+SkillSpector static-only and suppresses the incompatible LLM path.)
 
 If the repo contains multiple skills, scan each one for its own verdict
 (SkillSpector aggregates a whole directory into a single report, so scan per
@@ -143,7 +143,7 @@ find "$WORKDIR/src" -name "SKILL.md" -not -path "*/node_modules/*" \
   | xargs -I{} dirname {} | sort -u \
   | while read -r d; do
       echo "== $d =="
-      PYTHONUTF8=1 skillspector scan "$d" --format terminal
+      python "$SKILL_DIR/scripts/scan_skill.py" "$d"
     done
 ```
 
@@ -164,7 +164,7 @@ find "$HOME/.claude/skills" -maxdepth 2 -name "SKILL.md" \
   | xargs -I{} dirname {} | sort -u \
   | while read -r d; do
       echo "== $d =="
-      PYTHONUTF8=1 skillspector scan "$d" --no-llm --format terminal
+      python "$SKILL_DIR/scripts/scan_skill.py" "$d"
     done
 ```
 
@@ -179,7 +179,7 @@ find "$HOME/.claude/plugins/cache" -name "SKILL.md" -not -path "*/node_modules/*
 ### 3. Scan a local path
 
 ```bash
-PYTHONUTF8=1 skillspector scan "<path>" --format terminal
+python "$SKILL_DIR/scripts/scan_skill.py" "<path>"
 ```
 
 ### 4. Scan an MCP server before installing
@@ -379,14 +379,11 @@ uv tool install package-name --link-mode=copy
 **Never:** `pip install` for MCP dependencies. Never global node modules when
 `npx` suffices.
 
-## Analyzer options (skillspector scan)
+## Analyzer behavior (scan_skill.py / SkillSpector)
 
-| Flag | When to use |
+| Wrapper mode | When to use |
 |------|-------------|
-| *(default)* | Static patterns + taint + YARA + OSV.dev CVE lookup, plus LLM if a provider is configured in `.env` |
-| `--no-llm` | Static only — faster, no provider needed |
-| `--format terminal` | Human-readable table (default); on Windows prefix `PYTHONUTF8=1` |
-| `--format json --output report.json` | Machine-readable; robust on every platform |
-| `--format sarif --output report.sarif` | For CI / code-scanning integration |
-| `--yara-rules-dir DIR` | Load additional custom YARA rules |
-| `--verbose` | Show detailed progress |
+| `python "$SKILL_DIR/scripts/scan_skill.py" <path>` | Scan one skill directory, zip, markdown file, or local path |
+| `python "$SKILL_DIR/scripts/scan_skill.py" --all <dir>` | Scan each `SKILL.md` directory under a tree separately |
+| Static-only fallback | Used automatically when no provider is configured, or when the configured provider is Anthropic |
+| SkillSpector LLM | Used automatically only with OpenAI or NVIDIA provider settings |
