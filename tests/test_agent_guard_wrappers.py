@@ -1313,6 +1313,23 @@ class ScanCliRouterTests(unittest.TestCase):
                 "capability-process-spawn": [{"match": "system("}],
             }}), 0)
 
+    def test_guarddog_verdict_install_hook_capability_blocks(self):
+        # Distilled from a REAL malicious sample (DataDog
+        # malicious-software-packages-dataset, pypi/malicious_intent/0wneg):
+        # GuardDog 3.0 fires ONLY capability rules on it. An install-time hook
+        # executes code at `pip install` -- it must block, or the pure
+        # capability/heuristic split waves real malware through.
+        self.assertEqual(
+            self.scan_cli.guarddog_verdict({"results": {
+                "capability-process-hooks": [{
+                    "location": "0wneg-0.9.0/setup.py:86",
+                    "match": "cmdclass={'develop': ..., 'install':",
+                    "message": "has_python_hook rule matched",
+                }],
+                "capability-filesystem-read": [{"match": ".read("}],
+                "threat-runtime-obfuscation-pyarmor": {},
+            }}), 1)
+
     def test_guarddog_verdict_malware_heuristic_blocks_despite_capabilities(self):
         self.assertEqual(
             self.scan_cli.guarddog_verdict({"results": {

@@ -158,6 +158,18 @@ def guarddog_command(ecosystem: str, package: str, version: str = None) -> list:
 # reviewer sees them, but a file-reading HTTP library is not malware.
 CAPABILITY_RULE_PREFIX = "capability-"
 
+# Exception: some capabilities ARE the attack vector. An install-time hook
+# (setup.py cmdclass install/develop override) executes code the moment the
+# user runs `pip install` -- exactly the step this scanner gates. GuardDog 2.x
+# classified this as the `cmd-overwrite` malware heuristic; 3.0 files it under
+# capabilities, where a pure prefix split would wave real malware through
+# (verified against DataDog's own malicious-software-packages-dataset: sample
+# 0wneg fires ONLY capability-process-hooks). These rules block like malware
+# heuristics.
+BLOCKING_CAPABILITY_RULES = {
+    "capability-process-hooks",
+}
+
 
 def guarddog_verdict(report: dict) -> int:
     """Map a GuardDog JSON report onto the agent-guard exit-code contract.
@@ -171,9 +183,9 @@ def guarddog_verdict(report: dict) -> int:
     results = report.get("results") or {}
     flagged = {k: v for k, v in results.items() if v}
     malicious = {k: v for k, v in flagged.items()
-                 if not k.startswith(CAPABILITY_RULE_PREFIX)}
-    capabilities = {k: v for k, v in flagged.items()
-                    if k.startswith(CAPABILITY_RULE_PREFIX)}
+                 if not k.startswith(CAPABILITY_RULE_PREFIX)
+                 or k in BLOCKING_CAPABILITY_RULES}
+    capabilities = {k: v for k, v in flagged.items() if k not in malicious}
 
     if errors:
         print(f"GuardDog rule errors ({len(errors)}):")
@@ -181,9 +193,14 @@ def guarddog_verdict(report: dict) -> int:
             print(f"  {rule}: {err}")
 
     if malicious:
-        print(f"Malware-heuristic findings ({len(malicious)} rule(s)):")
+        print(f"Blocking findings ({len(malicious)} rule(s)):")
         for rule, finding in malicious.items():
             print(f"  {rule}: {finding}")
+        if any(r in BLOCKING_CAPABILITY_RULES for r in malicious):
+            print("  NOTE: capability-process-hooks means code runs AT INSTALL "
+                  "TIME (setup.py install/develop hook) -- the classic PyPI "
+                  "malware vector. Legitimate build tooling uses it too; read "
+                  "the hook before deciding.")
     if capabilities:
         print(f"Capabilities (informational, {len(capabilities)} rule(s)):")
         for rule, finding in capabilities.items():
@@ -214,9 +231,9 @@ def guarddog_verdict(report: dict) -> int:
               "were produced. That is not a clean result. Review manually.")
         return 2
     if malicious:
-        print(f"[BLOCK] GuardDog flagged {len(malicious)} malware-heuristic "
-              "issue(s) -- review the findings above before installing. Do not "
-              "install on a whim.")
+        print(f"[BLOCK] GuardDog flagged {len(malicious)} blocking issue(s) -- "
+              "review the findings above before installing. Do not install on "
+              "a whim.")
         return 1
     if capabilities:
         print("[SAFE] no malware heuristics fired. The capability notes above "

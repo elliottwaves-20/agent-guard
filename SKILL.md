@@ -350,10 +350,12 @@ Notes the agent must respect:
   Docker Desktop must be running). On Linux/macOS a native `guarddog` on PATH
   is used first.
 - GuardDog `capability-*` findings are informational (nearly every library
-  reads files); only malware-heuristic rules produce BLOCK. Still read the
-  capability list and flag anything implausible for the package's purpose to
-  the user (a linter opening network sockets is suspicious; an HTTP client
-  reading files is not).
+  reads files); only malware-heuristic rules produce BLOCK. Exception:
+  `capability-process-hooks` (setup.py install/develop hook = code execution
+  at `pip install` time, the classic PyPI malware vector) blocks like a
+  malware heuristic. Still read the capability list and flag anything
+  implausible for the package's purpose to the user (a linter opening network
+  sockets is suspicious; an HTTP client reading files is not).
 - `binary` needs `VIRUSTOTAL_API_KEY`. VirusTotal only recognises **known**
   malware hashes — tell the user a clean result on a novel binary is weak
   evidence, and prefer signed releases of well-known projects.
