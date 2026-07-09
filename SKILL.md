@@ -98,8 +98,9 @@ SKILL_DIR="$HOME/.claude/skills/agent-guard"   # adjust if installed elsewhere
 set -a && source "$SKILL_DIR/.env" && set +a
 ```
 
-The wrappers also auto-load `.env` from the skill/repo directory, the current
-working directory, or `AGENT_GUARD_ENV_FILE` if you keep secrets elsewhere.
+The wrappers also auto-load the user's own `.env` (created from `.env.example`,
+gitignored — never part of the repo) from the skill/repo directory, the current
+working directory, or `AGENT_GUARD_ENV_FILE` if secrets are kept elsewhere.
 Manual `source` is useful when running mixed shell commands that also need the
 same variables.
 

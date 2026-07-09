@@ -103,8 +103,9 @@ bash setup.sh                       # Windows PowerShell: .\setup.ps1
 cp .env.example .env                # set SkillSpector + optional Cisco runtime LLMs
 ```
 
-The wrappers auto-load `.env` from the skill/repo directory when present. For a
-custom location, set `AGENT_GUARD_ENV_FILE=/path/to/.env`.
+The wrappers auto-load **your own** `.env` (created from `.env.example`,
+gitignored — never part of the repo) from the skill/repo directory when
+present. For a custom location, set `AGENT_GUARD_ENV_FILE=/path/to/.env`.
 
 **No API keys yet?** Scans still work: without LLM credentials SkillSpector
 runs its full static layer (64 patterns, AST taint tracking, YARA, live OSV.dev
@@ -125,8 +126,9 @@ cp .env.example .env   # set SkillSpector + optional Cisco runtime LLMs
 python scripts/install_skill.py skill .
 ```
 
-The scan wrappers auto-load `.env` from the repo directory, the current working
-directory, or `AGENT_GUARD_ENV_FILE` if you keep secrets elsewhere.
+The scan wrappers auto-load **your own** `.env` (created from `.env.example`,
+gitignored — never part of the repo) from the repo directory, the current
+working directory, or `AGENT_GUARD_ENV_FILE` if you keep secrets elsewhere.
 
 **Smoke test** — verify the whole chain (uv tools, resolver, scanner) with a
 small, known-harmless skill:
