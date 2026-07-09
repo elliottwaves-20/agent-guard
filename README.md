@@ -56,7 +56,7 @@ Many people now work across several agents in parallel, not least because of per
 | Tool | Skills | MCP servers |
 |------|--------|-------------|
 | Claude Code | `~/.claude/skills/` | `claude mcp add -s user` → `~/.claude.json` |
-| Claude Desktop | `~/.claude/skills/` *(shared with Claude Code)* | `%APPDATA%/Claude/claude_desktop_config.json` |
+| Claude Desktop | `~/.claude/skills/` *(shared with Claude Code)* | Windows: `%APPDATA%/Claude/` · macOS: `~/Library/Application Support/Claude/` · Linux: `$XDG_CONFIG_HOME` or `~/.config/Claude/` — `claude_desktop_config.json` |
 | Codex | `~/.codex/skills/` | `~/.codex/config.toml` |
 | Antigravity / Gemini | `~/.gemini/config/skills/` | `~/.gemini/config/mcp_config.json` |
 | Hermes (Nous Research) | `~/.hermes/skills/` | manual — `mcp_servers:` block in Hermes `config.yaml` |
@@ -80,6 +80,17 @@ Optional, depending on what you scan or install:
 - Node.js/npm — optional. Needed if you install or run npm MCP servers through `npx`, install the Firecrawl CLI with npm, or use the Node Playwright rendered-page fallback for protected marketplaces.
 - Firecrawl CLI or Node Playwright — optional renderers for JavaScript-heavy/protected marketplace pages. Direct GitHub/archive/raw SKILL.md/npm/PyPI URLs work without them.
 - Git — optional, but needed for `install_skill.py mcp-git` / `uv tool install --from git+...` and for manual clone/checkout workflows after a SAFE verdict.
+
+Platform notes:
+
+- **macOS / Linux** are fully supported: run `bash setup.sh`; symlinks work
+  natively, and Claude Desktop configs are detected at their platform paths
+  (see the table above).
+- **Windows on ARM64**: `yara-python` (a SkillSpector dependency) publishes no
+  `win_arm64` wheels, so the setup scripts detect ARM64 and install
+  SkillSpector with an x86-64 Python that Windows 11 runs under transparent
+  x64 emulation — prebuilt wheels then work without a C compiler. Everything
+  else (Cisco scanner, Docker sandbox, installer) runs natively on ARM64.
 
 ## Quick start
 

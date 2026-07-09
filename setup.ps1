@@ -28,13 +28,24 @@ Write-Host "`nInstalling SkillSpector (skills + static MCP scan), pinned @ $sha1
 # --python 3.12: SkillSpector requires 3.12/3.13; we pin 3.12 (uv fetches it)
 # for prebuilt yara-python wheels. --link-mode=copy keeps it safe when the uv
 # cache/target sit in a synced folder (OneDrive); harmless otherwise.
+#
+# Windows ARM64: yara-python publishes no win_arm64 wheels, so a native ARM64
+# Python would need a C compiler + libyara. Windows 11 on ARM emulates x64
+# transparently, so we request an x86-64 CPython for the SkillSpector tool env
+# there -- prebuilt win_amd64 wheels then install cleanly.
+$ssPython = "3.12"
+$arch = $env:PROCESSOR_ARCHITECTURE
+if ($arch -eq "ARM64") {
+    $ssPython = "cpython-3.12-windows-x86_64-none"
+    Write-Host "  Windows ARM64 detected: using x86-64 Python (emulated) for prebuilt yara-python wheels"
+}
 $ssSpec = "git+$SkillSpectorRepo@$SkillSpectorSha"
 $ssInstalled = uv tool list 2>$null | Select-String -Quiet "^skillspector"
 if ($ssInstalled) {
     Write-Host "  skillspector: already installed -- re-pinning to $sha12"
-    uv tool install --force $ssSpec --python 3.12 --link-mode=copy
+    uv tool install --force $ssSpec --python $ssPython --link-mode=copy
 } else {
-    uv tool install $ssSpec --python 3.12 --link-mode=copy
+    uv tool install $ssSpec --python $ssPython --link-mode=copy
 }
 
 Write-Host "`nInstalling cisco-ai-mcp-scanner (optional runtime MCP check)..." -ForegroundColor Cyan

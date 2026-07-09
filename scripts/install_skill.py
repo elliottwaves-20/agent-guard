@@ -25,7 +25,8 @@ Usage:
 
 Supported tools (auto-detected):
   - Claude Code        (~/.claude/  -- MCPs registered via `claude mcp add`)
-  - Claude Desktop     (%APPDATA%/Claude/claude_desktop_config.json)
+  - Claude Desktop     (%APPDATA%/Claude/, ~/Library/Application Support/Claude/,
+                        or $XDG_CONFIG_HOME|~/.config/Claude/ -- per platform)
   - Codex              (~/.codex/config.toml)
   - Antigravity/Gemini (~/.gemini/config/mcp_config.json)
   - Hermes             (~/.hermes/skills -- skills only; MCPs via config.yaml)
@@ -53,12 +54,24 @@ except ModuleNotFoundError:  # Python 3.10: automatic pyproject inference is opt
 HOME    = Path.home()
 APPDATA = Path(os.environ.get("APPDATA", HOME / "AppData" / "Roaming"))
 
+
+def claude_desktop_config_path(platform: str = sys.platform) -> Path:
+    """Claude Desktop config location per platform."""
+    if platform == "win32":
+        return APPDATA / "Claude" / "claude_desktop_config.json"
+    if platform == "darwin":
+        return (HOME / "Library" / "Application Support" / "Claude"
+                / "claude_desktop_config.json")
+    return (Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+            / "Claude" / "claude_desktop_config.json")
+
+
 # ── Config paths ──────────────────────────────────────────────────────────────
 
 CLAUDE_CODE_DIR    = HOME / ".claude"
 CLAUDE_CODE_SKILLS = CLAUDE_CODE_DIR / "skills"
 
-CLAUDE_DESKTOP_CONFIG = APPDATA / "Claude" / "claude_desktop_config.json"
+CLAUDE_DESKTOP_CONFIG = claude_desktop_config_path()
 
 CODEX_DIR    = HOME / ".codex"
 CODEX_CONFIG = CODEX_DIR / "config.toml"

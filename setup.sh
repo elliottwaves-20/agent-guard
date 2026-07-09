@@ -30,18 +30,32 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) LINK_ARGS="--link-mode=copy" ;;
 esac
 
-echo ""
-echo "Installing SkillSpector (skills + static MCP scan), pinned @ ${SKILLSPECTOR_SHA:0:12}..."
 # --python 3.12: SkillSpector requires 3.12/3.13; we pin 3.12 (uv fetches it)
 # because yara-python ships prebuilt wheels there -- no C compiler needed.
+#
+# Windows ARM64 (Git Bash): yara-python publishes no win_arm64 wheels. Windows
+# 11 on ARM emulates x64 transparently, so request an x86-64 CPython for the
+# SkillSpector tool env there -- prebuilt win_amd64 wheels install cleanly.
+SS_PYTHON="3.12"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if [ "${PROCESSOR_ARCHITECTURE:-}" = "ARM64" ]; then
+      SS_PYTHON="cpython-3.12-windows-x86_64-none"
+      echo "  Windows ARM64 detected: using x86-64 Python (emulated) for prebuilt yara-python wheels"
+    fi
+    ;;
+esac
+
+echo ""
+echo "Installing SkillSpector (skills + static MCP scan), pinned @ ${SKILLSPECTOR_SHA:0:12}..."
 SS_SPEC="git+${SKILLSPECTOR_REPO}@${SKILLSPECTOR_SHA}"
 if uv tool list 2>/dev/null | grep -q "^skillspector"; then
   echo "  skillspector: already installed -- re-pinning to ${SKILLSPECTOR_SHA:0:12}"
   # shellcheck disable=SC2086  # LINK_ARGS is intentionally word-split (single flag or empty)
-  uv tool install --force "$SS_SPEC" --python 3.12 $LINK_ARGS
+  uv tool install --force "$SS_SPEC" --python "$SS_PYTHON" $LINK_ARGS
 else
   # shellcheck disable=SC2086
-  uv tool install "$SS_SPEC" --python 3.12 $LINK_ARGS
+  uv tool install "$SS_SPEC" --python "$SS_PYTHON" $LINK_ARGS
 fi
 
 echo ""

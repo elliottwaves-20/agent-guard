@@ -1184,6 +1184,45 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             self.assertNotIn("--args ARG", doc)
 
 
+class ClaudeDesktopConfigPathTests(unittest.TestCase):
+    def test_windows_uses_appdata(self):
+        installer = importlib.import_module("install_skill")
+        path = installer.claude_desktop_config_path("win32")
+        self.assertEqual(
+            path, installer.APPDATA / "Claude" / "claude_desktop_config.json"
+        )
+
+    def test_macos_uses_application_support(self):
+        installer = importlib.import_module("install_skill")
+        path = installer.claude_desktop_config_path("darwin")
+        self.assertEqual(
+            path,
+            installer.HOME / "Library" / "Application Support" / "Claude"
+            / "claude_desktop_config.json",
+        )
+
+    def test_linux_uses_xdg_config_home_with_fallback(self):
+        installer = importlib.import_module("install_skill")
+        old = os.environ.get("XDG_CONFIG_HOME")
+        try:
+            os.environ["XDG_CONFIG_HOME"] = "/custom/config"
+            self.assertEqual(
+                installer.claude_desktop_config_path("linux"),
+                Path("/custom/config") / "Claude" / "claude_desktop_config.json",
+            )
+            del os.environ["XDG_CONFIG_HOME"]
+            self.assertEqual(
+                installer.claude_desktop_config_path("linux"),
+                installer.HOME / ".config" / "Claude"
+                / "claude_desktop_config.json",
+            )
+        finally:
+            if old is not None:
+                os.environ["XDG_CONFIG_HOME"] = old
+            else:
+                os.environ.pop("XDG_CONFIG_HOME", None)
+
+
 class ScanMcpCliParsingTests(unittest.TestCase):
     def test_split_launch_command_extracts_tokens_after_double_dash(self):
         scan_mcp = importlib.import_module("scan_mcp")
