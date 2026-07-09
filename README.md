@@ -75,14 +75,14 @@ Detection is automatic — only tools whose configs exist are touched. Claude De
 Required for the normal scan/install workflow:
 
 - [uv](https://docs.astral.sh/uv/) — installs SkillSpector and Cisco mcp-scanner in isolated tool environments. uv also fetches the Python 3.12 runtime that SkillSpector needs.
-- Python 3.10+ — runs the agent-guard wrapper scripts: `scripts/install_skill.py`, `scripts/scan_skill.py`, `scripts/scan_mcp.py`, and `scripts/scan_url.py`.
+- Python 3.10+ — runs the agent-guard wrapper scripts: `scripts/install_skill.py`, `scripts/scan_skill.py`, `scripts/scan_mcp.py`, `scripts/scan_cli.py`, and `scripts/scan_url.py`.
 - OpenAI or NVIDIA credentials for full SkillSpector LLM coverage. Without them, skill and static MCP source scans still run static-only.
 - A LiteLLM-compatible runtime provider for Cisco live MCP checks: `MCP_SCANNER_LLM_API_KEY` plus `MCP_SCANNER_LLM_MODEL`. This can be OpenAI, Anthropic, Gemini, Bedrock, Azure OpenAI, Ollama, or another LiteLLM-supported provider.
 
 Optional, depending on what you scan or install:
 
-- [Docker](https://docs.docker.com/get-docker/) — only for Docker-isolated live stdio MCP checks (`scan_mcp.py ... --sandbox`). Skill scans and default Stage 1 MCP source scans do not need Docker. The Docker daemon must be **running** before a sandbox scan (on Windows/macOS: start Docker Desktop first); `failed to connect to the docker API` means it is not.
-- `VIRUSTOTAL_API_KEY` — optional malware-reputation checks for bundled binaries, archives, PDFs, images, and similar non-source files. VirusTotal's Public API is free for registered users but rate-limited; see [LLM provider support](#llm-provider-support).
+- [Docker](https://docs.docker.com/get-docker/) — needed for Docker-isolated live stdio MCP checks (`scan_mcp.py ... --sandbox`), for GuardDog package scans (`scan_cli.py npm/pypi/go`) on Windows where Docker is GuardDog's only supported install (Linux/macOS can use a native `guarddog` on PATH instead), and for the optional malcontent binary analysis (`scan_cli.py binary --deep`). Skill scans, default Stage 1 MCP source scans, and `scan_cli.py script`/`cargo` do not need Docker. The Docker daemon must be **running** first (on Windows/macOS: start Docker Desktop); `failed to connect to the docker API` means it is not.
+- `VIRUSTOTAL_API_KEY` — required for `scan_cli.py binary` (release-binary hash reputation) and optional malware-reputation checks for bundled binaries, archives, PDFs, images, and similar non-source files in MCP scans. VirusTotal's Public API is free for registered users but rate-limited (4 lookups/min); see [LLM provider support](#llm-provider-support).
 - Node.js/npm — optional. Needed if you install or run npm MCP servers through `npx`, install the Firecrawl CLI with npm, or use the Node Playwright rendered-page fallback for protected marketplaces.
 - Firecrawl CLI or Node Playwright — optional renderers for JavaScript-heavy/protected marketplace pages. Direct GitHub/archive/raw SKILL.md/npm/PyPI URLs work without them.
 - Git — optional, but needed for `install_skill.py mcp-git` / `uv tool install --from git+...` and for manual clone/checkout workflows after a SAFE verdict.
