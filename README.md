@@ -6,6 +6,29 @@
 
 Skills and MCP servers are third-party code executed with your user account's permissions. A malicious one can read your SSH keys, grab `.env` files and browser sessions, exfiltrate data — or hijack your AI agent through a poisoned SKILL.md (prompt injection). This skill makes **scan first, install after** the default workflow, powered by [NVIDIA SkillSpector](https://github.com/NVIDIA/SkillSpector) (skills + the static MCP source scan) and Cisco's [mcp-scanner](https://github.com/cisco-ai-defense/mcp-scanner) (the optional live MCP runtime check).
 
+## Contents
+
+- [Two scanners, each where it is strongest](#two-scanners-each-where-it-is-strongest)
+- [What you get](#what-you-get)
+- [One scan, every agent](#one-scan-every-agent)
+- [Supported tools (auto-detected)](#supported-tools-auto-detected)
+- [Prerequisites](#prerequisites)
+- [Quick start](#quick-start)
+- [Usage](#usage)
+  - [Scan a GitHub repo before installing](#scan-a-github-repo-before-installing)
+  - [Scan a skill catalog](#scan-a-skill-catalog)
+  - [Scan any URL](#scan-any-url)
+  - [Audit downloaded or installed items](#audit-downloaded-or-installed-items)
+  - [Exit codes](#exit-codes)
+  - [Scan an MCP server before installing](#scan-an-mcp-server-before-installing)
+  - [Install after a SAFE verdict](#install-after-a-safe-verdict)
+  - [Audit all installed skills](#audit-all-installed-skills)
+- [LLM provider support](#llm-provider-support)
+- [Security model](#security-model)
+- [Why this skill triggers capability warnings](#why-this-skill-triggers-capability-warnings)
+- [MCP isolation rules](#mcp-isolation-rules)
+- [Severity guide](#severity-guide)
+
 ## Two scanners, each where it is strongest
 
 - **[NVIDIA SkillSpector](https://github.com/NVIDIA/SkillSpector)** handles skill scans and the **static** MCP source scan: one tool, 64 vulnerability patterns across 16 categories (prompt injection, data exfiltration, privilege escalation, MCP tool poisoning / least-privilege, supply chain with **live OSV.dev CVE lookup**), AST taint tracking, YARA signatures, and optional LLM semantic analysis with risk scoring (0–100).
@@ -52,13 +75,17 @@ Required for the normal scan/install workflow:
 
 Optional, depending on what you scan or install:
 
-- [Docker](https://docs.docker.com/get-docker/) — only for Docker-isolated live stdio MCP checks (`scan_mcp.py ... --sandbox`). Skill scans and default Stage 1 MCP source scans do not need Docker.
+- [Docker](https://docs.docker.com/get-docker/) — only for Docker-isolated live stdio MCP checks (`scan_mcp.py ... --sandbox`). Skill scans and default Stage 1 MCP source scans do not need Docker. The Docker daemon must be **running** before a sandbox scan (on Windows/macOS: start Docker Desktop first); `failed to connect to the docker API` means it is not.
 - `VIRUSTOTAL_API_KEY` — optional malware-reputation checks for bundled binaries, archives, PDFs, images, and similar non-source files. VirusTotal's Public API is free for registered users but rate-limited; see [LLM provider support](#llm-provider-support).
 - Node.js/npm — optional. Needed if you install or run npm MCP servers through `npx`, install the Firecrawl CLI with npm, or use the Node Playwright rendered-page fallback for protected marketplaces.
 - Firecrawl CLI or Node Playwright — optional renderers for JavaScript-heavy/protected marketplace pages. Direct GitHub/archive/raw SKILL.md/npm/PyPI URLs work without them.
 - Git — optional, but needed for `install_skill.py mcp-git` / `uv tool install --from git+...` and for manual clone/checkout workflows after a SAFE verdict.
 
 ## Quick start
+
+> **Windows:** run the bash examples in this README from **Git Bash** (bundled
+> with Git for Windows). PowerShell users: use `.\setup.ps1` for setup; most
+> other examples are bash-flavored.
 
 **Option A — via [skills.sh](https://skills.sh) (any of 70+ agents):**
 
@@ -72,12 +99,17 @@ This installs the skill files. The skill drives the [SkillSpector](https://githu
 
 ```bash
 cd ~/.claude/skills/agent-guard   # or wherever the CLI placed it
-./setup.sh                          # Windows PowerShell: .\setup.ps1
+bash setup.sh                       # Windows PowerShell: .\setup.ps1
 cp .env.example .env                # set SkillSpector + optional Cisco runtime LLMs
 ```
 
 The wrappers auto-load `.env` from the skill/repo directory when present. For a
 custom location, set `AGENT_GUARD_ENV_FILE=/path/to/.env`.
+
+**No API keys yet?** Scans still work: without LLM credentials SkillSpector
+runs its full static layer (64 patterns, AST taint tracking, YARA, live OSV.dev
+CVE lookup) — only the LLM semantic layer and the Cisco runtime check need keys.
+Add keys later for full coverage.
 
 **Option B — clone and install manually:**
 
@@ -85,7 +117,7 @@ custom location, set `AGENT_GUARD_ENV_FILE=/path/to/.env`.
 git clone https://github.com/elliottwaves-20/agent-guard
 cd agent-guard
 
-./setup.sh          # Windows PowerShell: .\setup.ps1
+bash setup.sh       # Windows PowerShell: .\setup.ps1
 
 cp .env.example .env   # set SkillSpector + optional Cisco runtime LLMs
 
@@ -95,6 +127,17 @@ python scripts/install_skill.py skill .
 
 The scan wrappers auto-load `.env` from the repo directory, the current working
 directory, or `AGENT_GUARD_ENV_FILE` if you keep secrets elsewhere.
+
+**Smoke test** — verify the whole chain (uv tools, resolver, scanner) with a
+small, known-harmless skill:
+
+```bash
+python scripts/scan_url.py "https://github.com/anthropics/skills/tree/main/skills/brand-guidelines" --dry-run
+```
+
+Expected: the skill resolves to a commit-pinned snapshot and the scan ends with
+`[SAFE] risk 0/100` plus an install hint. Exit code `2` instead means a
+setup/config problem — see [Exit codes](#exit-codes).
 
 Some marketplaces protect listing pages with JavaScript or bot checks. Direct
 source URLs still work without extra tooling, but protected marketplace pages
@@ -270,6 +313,17 @@ from the relevant agent config before restarting the affected agent.
 
 Scanner errors or empty output mean **no verdict** — never treat a failed scan as safe. A non-zero exit *with* a report is a real verdict (SkillSpector exits 1 when the risk score is above 50).
 
+### Exit codes
+
+A non-zero exit is usually a **verdict, not a tool failure** — important when
+wiring agent-guard into scripts or CI:
+
+| Exit code | Meaning | Action |
+|-----------|---------|--------|
+| `0` | SAFE verdict | Install is reasonable |
+| `1` | BLOCK/REVIEW verdict — real findings were reported | Read the findings, decide deliberately |
+| `2` | **No verdict** — scanner/LLM/config error, fail-closed | Fix the cause and re-run; never install |
+
 The wrapper writes SkillSpector JSON to a temporary report, so Windows console encoding issues and Anthropic's incompatible SkillSpector LLM path are handled automatically.
 
 ### Scan an MCP server before installing
@@ -296,6 +350,10 @@ python scripts/scan_mcp.py remote https://example.com/mcp
 python scripts/scan_mcp.py pypi mcp-server-name --sandbox -- uvx mcp-server-name
 ```
 
+The Docker daemon must be running (start Docker Desktop on Windows/macOS). The
+first sandbox run builds the scan image and pre-fetches dependencies, which can
+take a few minutes; later runs reuse the image and are much faster.
+
 Stage 1 uses SkillSpector. For full LLM-assisted Stage 1 coverage, configure OpenAI or NVIDIA under `SKILLSPECTOR_*`. Stage 2 uses Cisco mcp-scanner with `MCP_SCANNER_LLM_*` for LLM/behavioral analysis. If you set `VIRUSTOTAL_API_KEY`, Cisco mcp-scanner can also check bundled binaries, archives, PDFs, and similar non-source files against VirusTotal by hash. A clean Stage 1 scan does **not** prove runtime safety — reach for `--sandbox` when a server is unfamiliar. Install only after a SAFE verdict.
 
 ### Install after a SAFE verdict
@@ -319,9 +377,14 @@ python scripts/install_skill.py skill ~/path/to/workspace/repo-name --tools clau
 python scripts/install_skill.py mcp \
   --name "my-server" \
   --command "uvx" \
-  --args "package-name" \
+  --arg "package-name" \
   --env "API_KEY=your-key"
 ```
+
+Pass each server argument as its own repeated `--arg`. The legacy `--args` form
+consumes *everything* after it (including `--env` and `--dry-run`), so the
+installer rejects installer options placed after `--args` instead of silently
+misconfiguring the server.
 
 **MCP server (npm, isolated via npx):**
 
@@ -360,7 +423,7 @@ python scripts/install_skill.py mcp-remote \
 **Dry run first** to preview every change:
 
 ```bash
-python scripts/install_skill.py mcp --name foo --command uvx --args bar --dry-run
+python scripts/install_skill.py mcp --name foo --command uvx --arg bar --dry-run
 python scripts/install_skill.py mcp-git --name foo --git-url git+https://github.com/user/repo@sha --package foo --dry-run
 python scripts/install_skill.py mcp-remote --name foo --url https://example.com/mcp --dry-run
 python scripts/install_skill.py skill <path> --dry-run

@@ -1176,6 +1176,13 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertNotIn("mcp-scanner virustotal", readme)
         self.assertIn("agent-guard does not require this", env_example)
 
+        # Install examples must use repeated --arg: the legacy --args REMAINDER
+        # form swallows --env/--dry-run and the installer rejects that order.
+        for doc in (readme, skill):
+            self.assertNotIn('--args "', doc)
+            self.assertNotIn("--args bar", doc)
+            self.assertNotIn("--args ARG", doc)
+
 
 class ScanMcpCliParsingTests(unittest.TestCase):
     def test_split_launch_command_extracts_tokens_after_double_dash(self):
