@@ -21,9 +21,11 @@ Skills and MCP servers are third-party code executed with your user account's pe
   - [Audit downloaded or installed items](#audit-downloaded-or-installed-items)
   - [Exit codes](#exit-codes)
   - [Scan an MCP server before installing](#scan-an-mcp-server-before-installing)
+  - [Scan a CLI tool before installing](#scan-a-cli-tool-before-installing)
   - [Install after a SAFE verdict](#install-after-a-safe-verdict)
   - [Audit all installed skills](#audit-all-installed-skills)
 - [LLM provider support](#llm-provider-support)
+- [Detection limits — what a SAFE verdict does *not* mean](#detection-limits--what-a-safe-verdict-does-not-mean)
 - [Security model](#security-model)
 - [Why this skill triggers capability warnings](#why-this-skill-triggers-capability-warnings)
 - [MCP isolation rules](#mcp-isolation-rules)
@@ -369,6 +371,38 @@ take a few minutes; later runs reuse the image and are much faster.
 
 Stage 1 uses SkillSpector. For full LLM-assisted Stage 1 coverage, configure OpenAI or NVIDIA under `SKILLSPECTOR_*`. Stage 2 uses Cisco mcp-scanner with `MCP_SCANNER_LLM_*` for LLM/behavioral analysis. If you set `VIRUSTOTAL_API_KEY`, Cisco mcp-scanner can also check bundled binaries, archives, PDFs, and similar non-source files against VirusTotal by hash. A clean Stage 1 scan does **not** prove runtime safety — reach for `--sandbox` when a server is unfamiliar. Install only after a SAFE verdict.
 
+### Scan a CLI tool before installing
+
+Agents increasingly install plain command-line tools instead of MCP servers — npm/PyPI/Go packages, cargo crates, GitHub release binaries, and `curl | bash` installers. `scan_cli.py` gives those installs the same scan-first workflow by routing each source to the professional scanner best suited for it (agent-guard never writes its own detection):
+
+```bash
+# npm / PyPI / Go packages -> Datadog GuardDog (heuristics + YARA + registry metadata):
+python scripts/scan_cli.py npm left-pad
+python scripts/scan_cli.py pypi requests==2.32.0
+python scripts/scan_cli.py go github.com/user/module
+
+# GitHub release binary -> download (never executed), SHA256, VirusTotal hash check:
+python scripts/scan_cli.py binary https://github.com/user/tool/releases/download/v1.0/tool.exe
+# --deep adds a malcontent capability analysis (Docker):
+python scripts/scan_cli.py binary <url> --deep
+
+# curl | bash installer -> SkillSpector static scan; the script is never executed:
+python scripts/scan_cli.py script https://example.com/install.sh
+
+# cargo crate -> static source scan fallback (GuardDog has no cargo support):
+python scripts/scan_cli.py cargo ripgrep@14.1.0
+```
+
+Exit codes follow the same contract as every other agent-guard scanner: `0` SAFE, `1` BLOCK verdict, `2` no verdict (fail closed).
+
+Requirements per mode:
+
+- **npm / pypi / go** use [GuardDog](https://github.com/DataDog/guarddog). It runs natively if `guarddog` is on PATH (Linux/macOS: `pipx install guarddog`); on **Windows, Docker is GuardDog's only supported install**, so the wrapper falls back to the official image `ghcr.io/datadog/guarddog` automatically (first scan pulls it — start Docker Desktop first). GuardDog's `capability-*` rules are transparency notes ("can read files / spawn processes") that fire on nearly every real library — the wrapper prints them but only lets **malware-heuristic** rules drive the BLOCK verdict; review the capability list for anything implausible for the package's purpose.
+- **binary** needs `VIRUSTOTAL_API_KEY` (free tier: 4 lookups/min). `--deep` needs Docker for [malcontent](https://github.com/chainguard-dev/malcontent).
+- **script** and **cargo** use the SkillSpector static scan already set up by `setup.sh` / `setup.ps1`.
+
+**Complementary runtime gates (not integrated, recommended alongside):** a scan-first verdict and an install-time gate catch different things. [Socket Firewall Free (`sfw`)](https://github.com/SocketDev/sfw-free) wraps package managers (`sfw npm install X`, `sfw pip install X`, `sfw cargo fetch`) and blocks known-malicious packages at install time using Socket's live threat feed — a second net behind any GuardDog verdict. [tirith](https://github.com/sheeki03/tirith) hooks the shell itself and intercepts pipe-to-shell, homograph URLs, and typosquats before any command runs (AGPL-3.0; daemon mode is Unix-only, PowerShell hooks on Windows).
+
 ### Install after a SAFE verdict
 
 Install the same commit that was scanned:
@@ -490,6 +524,22 @@ python scripts/scan_mcp.py virustotal .
 Advanced / enterprise: Cisco mcp-scanner also supports Cisco AI Defense's hosted inspect API analyzer through `MCP_SCANNER_API_KEY` and optional `MCP_SCANNER_ENDPOINT`. agent-guard does not require this, and most personal setups should ignore it unless they already have Cisco AI Defense access.
 
 See `.env.example` for full details. **Verdict quality depends on model quality.** This tool makes security decisions — prefer capable models. Small local models catch fewer threats; if in doubt, combine a weak LLM verdict with a manual source review.
+
+## Detection limits — what a SAFE verdict does *not* mean
+
+No scanner — not agent-guard, not the professional tools it wraps — can guarantee a package is harmless. A SAFE verdict means **"nothing known-bad was found"**, never "proven safe". The specific, honest limits per stage:
+
+| Stage | Limit |
+|-------|-------|
+| VirusTotal (`binary`, MCP non-source files) | Recognises only **known** malware hashes. A novel or targeted binary passes unnoticed. Prefer signed releases of well-known projects. |
+| malcontent (`binary --deep`) | Capability analysis, not proof. **Windows PE coverage is weaker than Linux ELF** — treat a clean `.exe` result with extra care. |
+| GuardDog (`npm`/`pypi`/`go`) | Heuristics + YARA over known attack patterns. A clean result is not proof of harmlessness, and GuardDog does not cover cargo. `capability-*` findings are printed as informational and do **not** block — a malicious package whose only tell is an implausible capability needs your judgment on that list. |
+| cargo fallback | **Static source scan only.** Registry metadata — maintainer changes, publish anomalies, typosquat rankings — is not checked. Use `sfw cargo install <crate>` as an install-time net. |
+| `script` scan | **Static.** A second-stage payload the installer downloads at runtime is invisible; scan those URLs separately. |
+| SkillSpector static scans | Cannot see behavior that only appears at runtime (MCP: use `--sandbox`). Static-only mode (no LLM configured) misses semantic attacks that pattern rules don't encode. |
+| Live MCP sandbox scan | Contains host-filesystem access, **not** network egress; the LLM-based analysis is itself probabilistic. |
+
+Where a stage in a scan output has such a limit, the wrapper prints it inline (`LIMIT:` / `NOTE:` lines) — so the verdict and its caveat always travel together.
 
 ## Security model
 

@@ -81,3 +81,6 @@ Write-Host "`n[OK] Setup complete." -ForegroundColor Green
 Write-Host "     Next: copy .env.example to .env"
 Write-Host "           Set OpenAI/NVIDIA for SkillSpector full coverage; set MCP_SCANNER_LLM_* for Cisco runtime scans"
 Write-Host "           Optional: set VIRUSTOTAL_API_KEY for binary/archive malware reputation checks"
+Write-Host "           CLI-tool scans (scan_cli.py npm/pypi/go) use Datadog GuardDog via the"
+Write-Host "           official Docker image ghcr.io/datadog/guarddog (pulled lazily on first"
+Write-Host "           scan; Docker is GuardDog's only supported install on Windows)"

@@ -14,11 +14,16 @@ description: >
   installer into Claude Code, Claude Desktop, Codex, Antigravity/Gemini,
   Hermes, and OpenClaw at once — or a chosen subset via --tools. Scan once,
   install everywhere: one audit instead of one per agent, ideal when working
-  across multiple agents because of rate limits. Use whenever the user provides
-  a GitHub URL for a skill/plugin/MCP, wants to install one, asks "is this
-  safe", "scan this skill", "check before install", "audit my skills",
-  "überprüfe", "scanne", "ist das sicher" — or any variation. Always invoke
-  proactively before installing anything; never install without scanning first.
+  across multiple agents because of rate limits. Also scans plain CLI tools
+  before installation: npm/PyPI/Go packages via Datadog GuardDog, GitHub
+  release binaries via SHA256 + VirusTotal (optionally malcontent), curl|bash
+  install scripts and cargo crates via the SkillSpector static scan. Use
+  whenever the user provides a GitHub URL for a skill/plugin/MCP, wants to
+  install one — or any CLI tool, npm/PyPI package, release binary, or install
+  script — asks "is this safe", "scan this skill", "scan this package",
+  "check before install", "audit my skills", "überprüfe", "scanne", "ist das
+  sicher" — or any variation. Always invoke proactively before installing
+  anything; never install without scanning first.
 ---
 
 # agent-guard — scan first, install after
@@ -319,6 +324,44 @@ Advanced / enterprise: Cisco mcp-scanner also supports Cisco AI Defense's
 hosted inspect API analyzer through `MCP_SCANNER_API_KEY` and optional
 `MCP_SCANNER_ENDPOINT`. agent-guard does not require this, and personal setups
 should ignore it unless the user already has Cisco AI Defense access.
+
+### 5. Scan a CLI tool before installing
+
+Agents also install plain command-line tools (npm/PyPI/Go packages, cargo
+crates, release binaries, `curl | bash` installers). `scan_cli.py` routes each
+source to the professional scanner best suited for it — same exit-code
+contract (0 SAFE / 1 BLOCK / 2 no verdict, fail closed):
+
+```bash
+python "$SKILL_DIR/scripts/scan_cli.py" npm <package>[@version]     # GuardDog
+python "$SKILL_DIR/scripts/scan_cli.py" pypi <package>[==version]   # GuardDog
+python "$SKILL_DIR/scripts/scan_cli.py" go <module>                 # GuardDog
+python "$SKILL_DIR/scripts/scan_cli.py" binary <release-url>        # SHA256 + VirusTotal
+python "$SKILL_DIR/scripts/scan_cli.py" binary <release-url> --deep # + malcontent (Docker)
+python "$SKILL_DIR/scripts/scan_cli.py" script <installer-url>      # static scan, never run
+python "$SKILL_DIR/scripts/scan_cli.py" cargo <crate>[@version]     # static fallback
+```
+
+Notes the agent must respect:
+
+- **Never run an installer script or binary before its scan.** `script` and
+  `binary` download the artifact but never execute it.
+- GuardDog needs Docker on Windows (official image is pulled automatically;
+  Docker Desktop must be running). On Linux/macOS a native `guarddog` on PATH
+  is used first.
+- GuardDog `capability-*` findings are informational (nearly every library
+  reads files); only malware-heuristic rules produce BLOCK. Still read the
+  capability list and flag anything implausible for the package's purpose to
+  the user (a linter opening network sockets is suspicious; an HTTP client
+  reading files is not).
+- `binary` needs `VIRUSTOTAL_API_KEY`. VirusTotal only recognises **known**
+  malware hashes — tell the user a clean result on a novel binary is weak
+  evidence, and prefer signed releases of well-known projects.
+- cargo has no GuardDog coverage: the fallback is a static source scan without
+  registry metadata. Recommend Socket Firewall (`sfw cargo install <crate>`)
+  as an install-time net.
+- A `script` scan is static; if the installer fetches second-stage scripts at
+  runtime, scan those URLs too.
 
 ## Interpreting results
 

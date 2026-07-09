@@ -1249,5 +1249,237 @@ class ScanMcpCliParsingTests(unittest.TestCase):
         self.assertEqual(command, ["npx", "-y", "some-server", "--", "--flag"])
 
 
+class ScanCliRouterTests(unittest.TestCase):
+    def setUp(self):
+        self.scan_cli = importlib.import_module("scan_cli")
+
+    # -- spec parsing ----------------------------------------------------------
+
+    def test_split_version_plain_and_versioned(self):
+        self.assertEqual(self.scan_cli._split_version("ripgrep", ("@",)),
+                         ("ripgrep", None))
+        self.assertEqual(self.scan_cli._split_version("ripgrep@14.1.0", ("@",)),
+                         ("ripgrep", "14.1.0"))
+
+    def test_split_version_pypi_double_equals(self):
+        self.assertEqual(
+            self.scan_cli._split_version("requests==2.32.0", ("==", "@")),
+            ("requests", "2.32.0"))
+
+    def test_split_version_keeps_npm_scope(self):
+        self.assertEqual(
+            self.scan_cli._split_version("@scope/pkg@1.2.3", ("@",)),
+            ("@scope/pkg", "1.2.3"))
+        self.assertEqual(
+            self.scan_cli._split_version("@scope/pkg", ("@",)),
+            ("@scope/pkg", None))
+
+    # -- JSON extraction -------------------------------------------------------
+
+    def test_extract_json_tolerates_surrounding_noise(self):
+        text = 'pulling image...\n{"issues": 0, "results": {}}\ndone'
+        self.assertEqual(self.scan_cli._extract_json(text),
+                         {"issues": 0, "results": {}})
+
+    def test_extract_json_returns_none_on_garbage(self):
+        self.assertIsNone(self.scan_cli._extract_json("no json here"))
+        self.assertIsNone(self.scan_cli._extract_json(""))
+
+    # -- GuardDog verdict mapping (fail closed) --------------------------------
+
+    def test_guarddog_verdict_safe_on_zero_issues(self):
+        self.assertEqual(
+            self.scan_cli.guarddog_verdict({"issues": 0, "results": {}}), 0)
+
+    def test_guarddog_verdict_blocks_on_findings(self):
+        self.assertEqual(
+            self.scan_cli.guarddog_verdict(
+                {"issues": 2, "results": {"exfiltrate": ["bad"]}}), 1)
+
+    def test_guarddog_verdict_counts_results_when_issue_count_missing(self):
+        self.assertEqual(
+            self.scan_cli.guarddog_verdict(
+                {"results": {"exec-base64": ["hit"], "clean-rule": []}}), 1)
+        self.assertEqual(
+            self.scan_cli.guarddog_verdict({"results": {"clean-rule": []}}), 0)
+
+    def test_guarddog_verdict_capability_rules_alone_do_not_block(self):
+        # GuardDog 3.0 capability-* rules are transparency notes that fire on
+        # nearly every real library (e.g. `requests` reads files). They must
+        # not turn every ordinary package into a BLOCK.
+        self.assertEqual(
+            self.scan_cli.guarddog_verdict({"results": {
+                "capability-filesystem-read": [{"match": ".read("}],
+                "capability-process-spawn": [{"match": "system("}],
+            }}), 0)
+
+    def test_guarddog_verdict_malware_heuristic_blocks_despite_capabilities(self):
+        self.assertEqual(
+            self.scan_cli.guarddog_verdict({"results": {
+                "capability-filesystem-read": [{"match": ".read("}],
+                "exfiltrate-sensitive-data": [{"match": "curl"}],
+            }}), 1)
+
+    def test_guarddog_verdict_issue_count_without_results_blocks(self):
+        # No per-rule results to classify -> conservative: any finding blocks.
+        self.assertEqual(self.scan_cli.guarddog_verdict({"issues": 3}), 1)
+
+    def test_guarddog_verdict_fails_closed_on_empty_report(self):
+        self.assertEqual(self.scan_cli.guarddog_verdict({}), 2)
+
+    def test_guarddog_verdict_fails_closed_on_errors_without_findings(self):
+        self.assertEqual(
+            self.scan_cli.guarddog_verdict(
+                {"issues": 0, "results": {}, "errors": {"rule": "boom"}}), 2)
+
+    # -- GuardDog invocation ---------------------------------------------------
+
+    def test_guarddog_command_prefers_native_binary(self):
+        original = self.scan_cli.shutil.which
+        try:
+            self.scan_cli.shutil.which = lambda name: (
+                "/usr/bin/guarddog" if name == "guarddog" else None)
+            cmd = self.scan_cli.guarddog_command("pypi", "requests", "2.32.0")
+        finally:
+            self.scan_cli.shutil.which = original
+        self.assertEqual(cmd, ["/usr/bin/guarddog", "pypi", "scan", "requests",
+                               "--output-format", "json",
+                               "--version", "2.32.0"])
+
+    def test_guarddog_command_falls_back_to_docker(self):
+        original = self.scan_cli.shutil.which
+        try:
+            self.scan_cli.shutil.which = lambda name: (
+                "docker" if name == "docker" else None)
+            cmd = self.scan_cli.guarddog_command("npm", "left-pad")
+        finally:
+            self.scan_cli.shutil.which = original
+        self.assertEqual(cmd[:4], ["docker", "run", "--rm",
+                                   self.scan_cli.GUARDDOG_IMAGE])
+        self.assertEqual(cmd[4:], ["npm", "scan", "left-pad",
+                                   "--output-format", "json"])
+
+    def test_guarddog_command_dies_without_guarddog_or_docker(self):
+        original = self.scan_cli.shutil.which
+        try:
+            self.scan_cli.shutil.which = lambda name: None
+            with self.assertRaises(SystemExit) as ctx:
+                self.scan_cli.guarddog_command("pypi", "requests")
+        finally:
+            self.scan_cli.shutil.which = original
+        self.assertEqual(ctx.exception.code, 2)
+
+    # -- malcontent verdict ----------------------------------------------------
+
+    def test_malcontent_verdict_blocks_on_high_or_critical(self):
+        self.assertEqual(self.scan_cli.malcontent_verdict(
+            {"Files": {"tool.exe": {"RiskLevel": "HIGH"}}}), 1)
+        self.assertEqual(self.scan_cli.malcontent_verdict(
+            {"Files": {"tool.exe": {"RiskLevel": "CRITICAL"}}}), 1)
+
+    def test_malcontent_verdict_safe_on_low_risk(self):
+        self.assertEqual(self.scan_cli.malcontent_verdict(
+            {"Files": {"tool.exe": {"RiskLevel": "LOW"}}}), 0)
+
+    def test_malcontent_verdict_fails_closed_without_files(self):
+        self.assertEqual(self.scan_cli.malcontent_verdict({"Files": {}}), 2)
+        self.assertEqual(self.scan_cli.malcontent_verdict({}), 2)
+
+    # -- binary flow -----------------------------------------------------------
+
+    def test_run_binary_hashes_then_delegates_to_virustotal(self):
+        calls = {}
+        original_download = self.scan_cli._download
+        original_vt = self.scan_cli.run_virustotal
+        try:
+            def fake_download(url, dest):
+                Path(dest).write_bytes(b"binary-bytes")
+                calls["url"] = url
+                return Path(dest)
+
+            self.scan_cli._download = fake_download
+            self.scan_cli.run_virustotal = (
+                lambda path, max_files=10: calls.setdefault("vt", Path(path)) and 0)
+            rc = self.scan_cli.run_binary(
+                "https://example.com/releases/tool.exe", deep=False)
+        finally:
+            self.scan_cli._download = original_download
+            self.scan_cli.run_virustotal = original_vt
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls["url"], "https://example.com/releases/tool.exe")
+        self.assertEqual(calls["vt"].name, "tool.exe")
+
+    def test_run_binary_deep_combines_verdicts_fail_closed(self):
+        original_download = self.scan_cli._download
+        original_vt = self.scan_cli.run_virustotal
+        original_mal = self.scan_cli.run_malcontent
+        try:
+            self.scan_cli._download = (
+                lambda url, dest: Path(dest).write_bytes(b"x") or Path(dest))
+            self.scan_cli.run_virustotal = lambda path, max_files=10: 0
+            self.scan_cli.run_malcontent = lambda path: 1
+            rc = self.scan_cli.run_binary("https://example.com/t.exe", deep=True)
+        finally:
+            self.scan_cli._download = original_download
+            self.scan_cli.run_virustotal = original_vt
+            self.scan_cli.run_malcontent = original_mal
+        self.assertEqual(rc, 1)
+
+    # -- cargo fallback --------------------------------------------------------
+
+    def test_run_cargo_prints_limit_note_and_delegates_to_static_scan(self):
+        import contextlib
+        import io as _io
+
+        original_fetch = self.scan_cli.fetch_crate
+        original_scan = self.scan_cli.run_skillspector
+        calls = {}
+        try:
+            self.scan_cli.fetch_crate = (
+                lambda spec, dest: calls.setdefault("spec", spec)
+                and ("ripgrep", "14.1.0"))
+            self.scan_cli.run_skillspector = (
+                lambda src: calls.setdefault("scanned", Path(src)) and 0)
+            buf = _io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = self.scan_cli.run_cargo("ripgrep@14.1.0")
+        finally:
+            self.scan_cli.fetch_crate = original_fetch
+            self.scan_cli.run_skillspector = original_scan
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls["spec"], "ripgrep@14.1.0")
+        out = buf.getvalue()
+        self.assertIn("GuardDog does not support cargo", out)
+        self.assertIn("registry metadata", out)
+        self.assertIn("sfw cargo install", out)
+
+    # -- script flow -----------------------------------------------------------
+
+    def test_run_script_documents_static_limit_and_scans_download(self):
+        import contextlib
+        import io as _io
+
+        original_download = self.scan_cli._download
+        original_scan = self.scan_cli.run_skillspector
+        calls = {}
+        try:
+            def fake_download(url, dest):
+                Path(dest).write_text("echo hi", encoding="utf-8")
+                return Path(dest)
+
+            self.scan_cli._download = fake_download
+            self.scan_cli.run_skillspector = (
+                lambda src: calls.setdefault("scanned", Path(src)) and 0)
+            buf = _io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = self.scan_cli.run_script("https://example.com/install.sh")
+        finally:
+            self.scan_cli._download = original_download
+            self.scan_cli.run_skillspector = original_scan
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls["scanned"].name, "install.sh")
+        self.assertIn("STATIC scan", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
