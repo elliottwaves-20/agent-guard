@@ -2,13 +2,13 @@
 
 [![skills.sh](https://skills.sh/b/elliottwaves-20/agent-guard)](https://skills.sh/elliottwaves-20/agent-guard)
 
-**Scan any AI agent skill, plugin, or MCP server for malicious code — before it ever runs on your machine.**
+**Scan any AI agent skill, plugin, MCP server, or CLI tool for malicious code — before it ever runs on your machine.**
 
-Skills and MCP servers are third-party code executed with your user account's permissions. A malicious one can read your SSH keys, grab `.env` files and browser sessions, exfiltrate data — or hijack your AI agent through a poisoned SKILL.md (prompt injection). This skill makes **scan first, install after** the default workflow, powered by [NVIDIA SkillSpector](https://github.com/NVIDIA/SkillSpector) (skills + the static MCP source scan) and Cisco's [mcp-scanner](https://github.com/cisco-ai-defense/mcp-scanner) (the optional live MCP runtime check).
+Skills, MCP servers, and the CLI tools agents install (npm/PyPI/Go packages, cargo crates, release binaries, `curl | bash` installers) are third-party code executed with your user account's permissions. A malicious one can read your SSH keys, grab `.env` files and browser sessions, exfiltrate data — or hijack your AI agent through a poisoned SKILL.md (prompt injection). This skill makes **scan first, install after** the default workflow, powered by [NVIDIA SkillSpector](https://github.com/NVIDIA/SkillSpector) (skills + static source scans), Cisco's [mcp-scanner](https://github.com/cisco-ai-defense/mcp-scanner) (the optional live MCP runtime check), and Datadog's [GuardDog](https://github.com/DataDog/guarddog) plus VirusTotal/[malcontent](https://github.com/chainguard-dev/malcontent) (CLI tools — see [Scan a CLI tool before installing](#scan-a-cli-tool-before-installing)).
 
 ## Contents
 
-- [Two scanners, each where it is strongest](#two-scanners-each-where-it-is-strongest)
+- [The right professional scanner for each target](#the-right-professional-scanner-for-each-target)
 - [What you get](#what-you-get)
 - [One scan, every agent](#one-scan-every-agent)
 - [Supported tools (auto-detected)](#supported-tools-auto-detected)
@@ -31,15 +31,19 @@ Skills and MCP servers are third-party code executed with your user account's pe
 - [MCP isolation rules](#mcp-isolation-rules)
 - [Severity guide](#severity-guide)
 
-## Two scanners, each where it is strongest
+## The right professional scanner for each target
 
-- **[NVIDIA SkillSpector](https://github.com/NVIDIA/SkillSpector)** handles skill scans and the **static** MCP source scan: one tool, 64 vulnerability patterns across 16 categories (prompt injection, data exfiltration, privilege escalation, MCP tool poisoning / least-privilege, supply chain with **live OSV.dev CVE lookup**), AST taint tracking, YARA signatures, and optional LLM semantic analysis with risk scoring (0–100).
+agent-guard never writes its own detection — it routes every install target to the professional scanner best suited for it and turns the result into one consistent fail-closed verdict:
+
+- **[NVIDIA SkillSpector](https://github.com/NVIDIA/SkillSpector)** handles skill scans and the **static** MCP source scan: one tool, 64 vulnerability patterns across 16 categories (prompt injection, data exfiltration, privilege escalation, MCP tool poisoning / least-privilege, supply chain with **live OSV.dev CVE lookup**), AST taint tracking, YARA signatures, and optional LLM semantic analysis with risk scoring (0–100). Also covers `curl | bash` install scripts and cargo crate sources.
 - **[cisco-ai-mcp-scanner](https://github.com/cisco-ai-defense/mcp-scanner)** handles the optional **live runtime** MCP check. A static scan cannot see MCP tools that a server registers only at runtime; `scan_mcp.py --sandbox` starts the server inside a throwaway Docker container (no host filesystem access) to inspect them.
+- **[Datadog GuardDog](https://github.com/DataDog/guarddog)** handles **CLI-tool package scans** (npm, PyPI, Go): malware heuristics + YARA over package source and registry metadata, via the official Docker image on Windows.
+- **VirusTotal + [malcontent](https://github.com/chainguard-dev/malcontent)** handle **release binaries**: hash reputation against 70+ AV vendors, optionally (`--deep`) a capability analysis of what the binary can actually do.
 
 ## What you get
 
 - **Commit-pinned ZIP scanning** — repos are fetched as a ZIP snapshot of one exact commit; `git clone` never touches your machine before a verdict, and the commit that was scanned is the commit that gets installed. No scan/install gap an attacker could slip a push into.
-- **Skills *and* MCP servers** — an MCP server is code that must run to be fully inspected, so naive scanning would execute it. `scan_mcp.py` scans the package **source** first (fetched from the registry, nothing executed), with an optional **Docker-sandboxed** live scan — untrusted MCP code never runs unconfined on your machine.
+- **Skills, MCP servers, *and* CLI tools** — an MCP server is code that must run to be fully inspected, so naive scanning would execute it. `scan_mcp.py` scans the package **source** first (fetched from the registry, nothing executed), with an optional **Docker-sandboxed** live scan — untrusted MCP code never runs unconfined on your machine. `scan_cli.py` extends the same scan-first gate to the CLI tools agents install: npm/PyPI/Go packages, cargo crates, release binaries, and `curl | bash` installers, all downloaded but **never executed** before their verdict.
 - **Layered analysis** — static patterns, AST taint tracking, YARA signatures, live OSV.dev CVE lookup, and LLM-powered semantic analysis when configured.
 - **Best scanner for each layer** — SkillSpector's full LLM-assisted skill/static scan requires OpenAI or NVIDIA credentials; Cisco's optional runtime MCP scan uses LiteLLM and can use any supported provider.
 - **Fail-closed workflow** — scanner errors are never silently treated as "no findings".

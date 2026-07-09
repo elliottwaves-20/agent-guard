@@ -40,17 +40,24 @@ Code, Codex, Gemini/Antigravity, Hermes, OpenClaw, and any other compatible
 agent — and the installer deploys the same audited commit to all of them in
 one step.
 
-Two scanners do the work, each where it is strongest:
+Professional scanners do the work, each where it is strongest:
 
 - **[NVIDIA SkillSpector](https://github.com/NVIDIA/SkillSpector)** — skill
   scans and the **static** MCP source scan. One tool for both, with 64
   vulnerability patterns (prompt injection, data exfiltration, privilege
   escalation, MCP tool poisoning / least-privilege, supply chain with live
-  OSV.dev CVE lookup), taint tracking, YARA, and optional LLM analysis.
+  OSV.dev CVE lookup), taint tracking, YARA, and optional LLM analysis. Also
+  covers `curl | bash` install scripts and cargo crate sources.
 - **[cisco-ai-mcp-scanner](https://github.com/cisco-ai-defense/mcp-scanner)** —
   the optional **live runtime** MCP check (`scan_mcp.py --sandbox` / `remote`).
   A static scan cannot see MCP tools that a server only registers at runtime;
   this starts the server in a sandbox to inspect them.
+- **[Datadog GuardDog](https://github.com/DataDog/guarddog)** — CLI-tool
+  package scans (npm/PyPI/Go) via `scan_cli.py`; malware heuristics + YARA,
+  run through the official Docker image on Windows.
+- **VirusTotal + [malcontent](https://github.com/chainguard-dev/malcontent)**
+  — release binaries via `scan_cli.py binary`: hash reputation, optionally
+  (`--deep`) a capability analysis.
 
 ## Core security rules (apply to every workflow below)
 
