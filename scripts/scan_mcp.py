@@ -21,9 +21,10 @@ This wrapper enforces the safe order:
     registered at runtime. Powered by cisco-ai-mcp-scanner.
 
 LLM analysis is optional. Stage 1 uses SkillSpector's provider config
-(SKILLSPECTOR_*), while Stage 2 / remote uses Cisco mcp-scanner's LiteLLM config
-(MCP_SCANNER_LLM_*). Without OpenAI/NVIDIA credentials, Stage 1 runs static-only
-(--no-llm).
+(SKILLSPECTOR_*; by default a coding-agent CLI such as claude_cli, no API key),
+while Stage 2 / remote uses Cisco mcp-scanner's LiteLLM config
+(MCP_SCANNER_LLM_*, API key required -- Cisco has no CLI-subscription path).
+Without any usable SkillSpector provider, Stage 1 runs static-only (--no-llm).
 
 Usage:
   python scan_mcp.py pypi  <package>[==version]      # fetch sdist, scan source

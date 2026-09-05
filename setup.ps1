@@ -8,10 +8,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# SkillSpector is Alpha: no releases/tags and not on PyPI. We pin an exact
-# commit so "scan = install" applies to the scanner itself. Bump deliberately.
+# SkillSpector ships tagged GitHub releases but is not on PyPI. We pin the exact
+# commit behind a release tag (tags can move, commits cannot) so "scan = install"
+# applies to the scanner itself. Bump deliberately; keep the tag comment in sync.
 $SkillSpectorRepo = "https://github.com/NVIDIA/SkillSpector"
-$SkillSpectorSha  = "cff7ecc4f2881d9e23ea4bb801a6353e1dbe39e6"
+$SkillSpectorSha  = "b7241089d7ec15d8b30df980dacbb428214732b9"   # v2.11.0
 
 Write-Host "Checking prerequisites..." -ForegroundColor Cyan
 
@@ -79,7 +80,8 @@ if (Get-Command mcp-scanner -ErrorAction SilentlyContinue) {
 
 Write-Host "`n[OK] Setup complete." -ForegroundColor Green
 Write-Host "     Next: copy .env.example to .env"
-Write-Host "           Set OpenAI/NVIDIA for SkillSpector full coverage; set MCP_SCANNER_LLM_* for Cisco runtime scans"
+Write-Host "           SkillSpector LLM: defaults to your coding-agent CLI (claude/codex/gemini login, no API key);"
+Write-Host "           hosted providers (anthropic/openai/nv_build/...) work with a key. MCP_SCANNER_LLM_* for Cisco runtime scans."
 Write-Host "           Optional: set VIRUSTOTAL_API_KEY for binary/archive malware reputation checks"
 Write-Host "           CLI-tool scans (scan_cli.py npm/pypi/go) use Datadog GuardDog via the"
 Write-Host "           official Docker image ghcr.io/datadog/guarddog (pulled lazily on first"

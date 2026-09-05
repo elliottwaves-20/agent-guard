@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import sys
 import tempfile
@@ -12,29 +13,253 @@ sys.path.insert(0, str(SCRIPTS))
 
 
 class SkillSpectorWrapperTests(unittest.TestCase):
-    def test_anthropic_provider_disables_skillspector_llm(self):
+    def _resolve(self, env: dict, on_path=()):
+        """Reload _skillspector under a controlled environment and PATH.
+
+        `on_path` lists the binaries shutil.which should "find". Returns
+        (provider, ready, reason, skillspector_env) captured under that setup;
+        the module is reloaded with the real environment afterwards."""
+        import shutil
         old_env = os.environ.copy()
+        old_which = shutil.which
         try:
             os.environ.clear()
-            os.environ.update({
-                "AGENT_GUARD_NO_DOTENV": "1",
-                "SKILLSPECTOR_PROVIDER": "anthropic",
-                "ANTHROPIC_API_KEY": "sk-ant-test",
-                "SKILLSPECTOR_MODEL": "anthropic-test-model",
-            })
-            module = importlib.import_module("_skillspector")
-            module = importlib.reload(module)
-
-            self.assertFalse(module.skillspector_llm_usable())
-            env = module.skillspector_env()
-            self.assertEqual(env["PYTHONUTF8"], "1")
-            self.assertEqual(env["PYTHONIOENCODING"], "utf-8")
-            self.assertNotIn("SKILLSPECTOR_PROVIDER", env)
-            self.assertNotIn("ANTHROPIC_API_KEY", env)
+            os.environ.update({"AGENT_GUARD_NO_DOTENV": "1", **env})
+            shutil.which = lambda name, *a, **k: (f"/fake/bin/{name}"
+                                                  if name in on_path else None)
+            module = importlib.reload(importlib.import_module("_skillspector"))
+            return (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
+                    module.skillspector_env())
         finally:
+            shutil.which = old_which
             os.environ.clear()
             os.environ.update(old_env)
             importlib.reload(importlib.import_module("_skillspector"))
+
+    def test_anthropic_provider_enables_skillspector_llm(self):
+        provider, ready, _reason, env = self._resolve({
+            "SKILLSPECTOR_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "SKILLSPECTOR_MODEL": "claude-test-model",
+        })
+        self.assertEqual(provider, "anthropic")
+        self.assertTrue(ready)
+        self.assertEqual(env["PYTHONUTF8"], "1")
+        self.assertEqual(env["PYTHONIOENCODING"], "utf-8")
+        self.assertEqual(env["SKILLSPECTOR_PROVIDER"], "anthropic")
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-ant-test")
+        self.assertEqual(env["SKILLSPECTOR_MODEL"], "claude-test-model")
+
+    def test_claude_cli_provider_requires_the_binary_on_path(self):
+        provider, ready, reason, env = self._resolve(
+            {"SKILLSPECTOR_PROVIDER": "claude_cli"}, on_path=())
+        self.assertEqual(provider, "claude_cli")
+        self.assertFalse(ready)
+        self.assertIn("not on PATH", reason)
+        self.assertNotIn("SKILLSPECTOR_PROVIDER", env)
+
+        provider, ready, reason, env = self._resolve(
+            {"SKILLSPECTOR_PROVIDER": "claude_cli"}, on_path=("claude",))
+        self.assertTrue(ready)
+        self.assertIn("claude CLI", reason)
+        self.assertEqual(env["SKILLSPECTOR_PROVIDER"], "claude_cli")
+
+    def test_provider_aliases_map_to_skillspector_ids(self):
+        provider, ready, _reason, _env = self._resolve(
+            {"SKILLSPECTOR_PROVIDER": "codex"}, on_path=("codex",))
+        self.assertEqual(provider, "codex_cli")
+        self.assertTrue(ready)
+
+    def test_explicit_key_provider_requires_its_credential(self):
+        provider, ready, reason, _env = self._resolve(
+            {"SKILLSPECTOR_PROVIDER": "nv_build"})
+        self.assertEqual(provider, "nv_build")
+        self.assertFalse(ready)
+        self.assertIn("NVIDIA_INFERENCE_KEY", reason)
+
+        provider, ready, _reason, env = self._resolve({
+            "SKILLSPECTOR_PROVIDER": "nv_build",
+            "NVIDIA_INFERENCE_KEY": "nvapi-test",
+        })
+        self.assertTrue(ready)
+        self.assertEqual(env["SKILLSPECTOR_PROVIDER"], "nv_build")
+
+    def test_autodetect_prefers_api_key_then_coding_agent_cli(self):
+        provider, ready, _reason, _env = self._resolve(
+            {"OPENAI_API_KEY": "sk-test"}, on_path=("claude",))
+        self.assertEqual((provider, ready), ("openai", True))
+
+        provider, ready, reason, env = self._resolve({}, on_path=("codex", "claude"))
+        self.assertEqual((provider, ready), ("claude_cli", True))
+        self.assertIn("auto-detected", reason)
+        self.assertEqual(env["SKILLSPECTOR_PROVIDER"], "claude_cli")
+
+        provider, ready, reason, env = self._resolve({}, on_path=())
+        self.assertEqual((provider, ready), ("", False))
+        self.assertNotIn("SKILLSPECTOR_PROVIDER", env)
+
+    def test_foreign_model_is_dropped_for_vendor_cli_providers(self):
+        import contextlib
+        import io as _io
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _p, ready, _r, env = self._resolve({
+                "SKILLSPECTOR_PROVIDER": "claude_cli",
+                "SKILLSPECTOR_MODEL": "gpt-5.4-nano",
+            }, on_path=("claude",))
+        self.assertTrue(ready)
+        self.assertNotIn("SKILLSPECTOR_MODEL", env)
+        self.assertIn("does not belong to provider claude_cli", buf.getvalue())
+
+        _p, _ready, _r, env = self._resolve({
+            "SKILLSPECTOR_PROVIDER": "claude_cli",
+            "SKILLSPECTOR_MODEL": "claude-sonnet-5",
+        }, on_path=("claude",))
+        self.assertEqual(env["SKILLSPECTOR_MODEL"], "claude-sonnet-5")
+
+        _p, _ready, _r, env = self._resolve({
+            "SKILLSPECTOR_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-test",
+            "SKILLSPECTOR_MODEL": "anything-goes",
+        })
+        self.assertEqual(env["SKILLSPECTOR_MODEL"], "anything-goes")
+
+    def test_static_only_override_wins_over_available_providers(self):
+        provider, ready, reason, env = self._resolve({
+            "AGENT_GUARD_STATIC_ONLY": "1",
+            "SKILLSPECTOR_PROVIDER": "claude_cli",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+        }, on_path=("claude",))
+        self.assertFalse(ready)
+        self.assertIn("AGENT_GUARD_STATIC_ONLY", reason)
+        self.assertNotIn("SKILLSPECTOR_PROVIDER", env)
+
+    def _write_report(self, path: Path, **overrides):
+        report = {
+            "risk_assessment": {"score": 0, "severity": "LOW",
+                                "recommendation": "SAFE",
+                                "max_issue_severity": "NONE"},
+            "issues": [],
+            "metadata": {"llm_requested": True, "llm_available": True,
+                         "llm_calls_attempted": 4, "llm_calls_succeeded": 4},
+            "execution_successful": True,
+            "analysis_completeness": {"is_complete": True,
+                                      "execution_successful": True,
+                                      "coverage_percent": 100.0,
+                                      "entirely_uninspected_files": 0,
+                                      "partially_inspected_files": 0,
+                                      "ledger_exceptions": []},
+        }
+        for key, value in overrides.items():
+            if isinstance(value, dict) and isinstance(report.get(key), dict):
+                report[key].update(value)
+            else:
+                report[key] = value
+        path.write_text(json.dumps(report), encoding="utf-8")
+
+    def test_verdict_blocks_when_execution_failed(self):
+        module = importlib.import_module("_skillspector")
+        with tempfile.TemporaryDirectory() as d:
+            report = Path(d) / "report.json"
+            self._write_report(report, execution_successful=False,
+                               analysis_completeness={
+                                   "execution_successful": False,
+                                   "ledger_exceptions": ["static_yara: boom"]})
+            self.assertEqual(module.verdict_skillspector(report, 0), 2)
+
+    def test_verdict_uses_max_issue_severity_gate(self):
+        module = importlib.import_module("_skillspector")
+        with tempfile.TemporaryDirectory() as d:
+            report = Path(d) / "report.json"
+            self._write_report(report, risk_assessment={
+                "score": 10, "severity": "LOW", "recommendation": "SAFE",
+                "max_issue_severity": "HIGH"})
+            self.assertEqual(module.verdict_skillspector(report, 0), 1)
+
+    def test_verdict_safe_on_complete_clean_report(self):
+        module = importlib.import_module("_skillspector")
+        with tempfile.TemporaryDirectory() as d:
+            report = Path(d) / "report.json"
+            self._write_report(report)
+            self.assertEqual(module.verdict_skillspector(report, 0), 0)
+
+    def test_boot_widens_skillspector_workflow_budget(self):
+        import dataclasses
+        import types
+
+        boot = importlib.import_module("_skillspector_boot")
+
+        @dataclasses.dataclass(slots=True)
+        class Budget:
+            max_seconds: float = 60.0
+            max_bytes: int = 1
+            started_at: float | None = None
+
+        fake_state = types.ModuleType("skillspector.state")
+        fake_state.MAX_WORKFLOW_SECONDS = 60.0
+        fake_state.WorkflowResourceBudget = Budget
+        fake_pkg = types.ModuleType("skillspector")
+        fake_pkg.state = fake_state
+        saved = {k: sys.modules.get(k) for k in ("skillspector", "skillspector.state")}
+        try:
+            sys.modules["skillspector"] = fake_pkg
+            sys.modules["skillspector.state"] = fake_state
+
+            self.assertFalse(boot.apply_workflow_budget(0))
+            self.assertFalse(boot.apply_workflow_budget(30))   # upstream already >= 30
+            self.assertIs(fake_state.WorkflowResourceBudget, Budget)
+
+            self.assertTrue(boot.apply_workflow_budget(540))
+            budget = fake_state.WorkflowResourceBudget()
+            self.assertEqual(budget.max_seconds, 540)
+            self.assertEqual(budget.max_bytes, 1)
+            self.assertIsInstance(budget, Budget)
+            explicit = fake_state.WorkflowResourceBudget(max_seconds=5)
+            self.assertEqual(explicit.max_seconds, 5)
+            self.assertEqual(fake_state.MAX_WORKFLOW_SECONDS, 540)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+
+    def test_scan_env_carries_workflow_budget_and_boot_command(self):
+        module = importlib.import_module("_skillspector")
+        env = module.skillspector_env()
+        self.assertEqual(env["SKILLSPECTOR_MAX_WORKFLOW_SECONDS"], str(module.WORKFLOW_BUDGET))
+        self.assertGreaterEqual(module.WORKFLOW_BUDGET, 60)
+        self.assertLess(module.WORKFLOW_BUDGET, module.SCAN_TIMEOUT)
+
+        original_cmd = module.SKILLSPECTOR_CMD
+        original_python = module.skillspector_python
+        try:
+            module.SKILLSPECTOR_CMD = None
+            module.skillspector_python = lambda: "/fake/tool/python"
+            self.assertEqual(module.skillspector_command(),
+                             ["/fake/tool/python", str(module.BOOT)])
+            module.SKILLSPECTOR_CMD = None
+            module.skillspector_python = lambda: None
+            self.assertEqual(module.skillspector_command(), [module.SKILLSPECTOR])
+        finally:
+            module.SKILLSPECTOR_CMD = original_cmd
+            module.skillspector_python = original_python
+
+    def test_llm_run_incomplete_detects_partial_llm_coverage(self):
+        module = importlib.import_module("_skillspector")
+        self.assertEqual(module.llm_run_incomplete(
+            {"metadata": {"llm_requested": False}}), "")
+        self.assertEqual(module.llm_run_incomplete(
+            {"metadata": {"llm_requested": True, "llm_available": True,
+                          "llm_calls_attempted": 4, "llm_calls_succeeded": 4}}), "")
+        self.assertIn("unavailable", module.llm_run_incomplete(
+            {"metadata": {"llm_requested": True, "llm_available": False}}))
+        self.assertIn("1 of 4", module.llm_run_incomplete(
+            {"metadata": {"llm_requested": True, "llm_available": True,
+                          "llm_calls_attempted": 4, "llm_calls_succeeded": 3}}))
+        self.assertIn("quota", module.llm_run_incomplete(
+            {"metadata": {"llm_requested": True, "llm_available": True,
+                          "llm_error": "quota exceeded"}}))
 
     def test_scan_mcp_delegates_static_scan_to_shared_wrapper_with_runtime_hint(self):
         scan_mcp = importlib.import_module("scan_mcp")
@@ -263,34 +488,30 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 self.stdout = ""
                 self.stderr = stderr
 
-        original_provider = module.PROVIDER
-        original_key = module.LLM_KEY
-        original_model = module.LLM_MODEL_RAW
-        original_scanner = module.SKILLSPECTOR
-        original_run = module.subprocess.run
-        original_sleep = module.time.sleep
-        original_retries = module.LLM_RETRIES
+        original_state = (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
+                          module.SKILLSPECTOR, module.subprocess.run,
+                          module.time.sleep, module.LLM_RETRIES)
         try:
             module.PROVIDER = "openai"
-            module.LLM_KEY = "sk-test"
-            module.LLM_MODEL_RAW = "gpt-test"
+            module.LLM_READY = True
+            module.LLM_REASON = "openai (API key)"
             module.SKILLSPECTOR = "skillspector"
+            module.SKILLSPECTOR_CMD = ["skillspector"]
             module.LLM_RETRIES = 1
             module.time.sleep = lambda seconds: None
 
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
+                self.assertNotIn("--no-llm", cmd)
                 report_path = Path(cmd[cmd.index("--output") + 1])
                 if len(calls) == 1:
-                    return Result(
-                        "semantic_security_discovery failed: "
-                        "Error code: 429 rate_limit_exceeded"
-                    )
-                report_path.write_text(
-                    '{"risk_assessment":{"score":0,"severity":"LOW",'
-                    '"recommendation":"SAFE"},"issues":[],"metadata":{"llm_available":true}}',
-                    encoding="utf-8",
-                )
+                    # Degraded run: SkillSpector still writes a report, but the
+                    # metadata says the LLM layer did not complete.
+                    self._write_report(report_path, metadata={
+                        "llm_available": False,
+                        "llm_error": "rate_limit_exceeded"})
+                    return Result("Error code: 429 rate_limit_exceeded")
+                self._write_report(report_path)
                 return Result()
 
             module.subprocess.run = fake_run
@@ -301,15 +522,90 @@ class SkillSpectorWrapperTests(unittest.TestCase):
 
                 self.assertEqual(module.run_skillspector(src), 0)
         finally:
-            module.PROVIDER = original_provider
-            module.LLM_KEY = original_key
-            module.LLM_MODEL_RAW = original_model
-            module.SKILLSPECTOR = original_scanner
-            module.subprocess.run = original_run
-            module.time.sleep = original_sleep
-            module.LLM_RETRIES = original_retries
+            (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
+             module.SKILLSPECTOR, module.subprocess.run,
+             module.time.sleep, module.LLM_RETRIES) = original_state
 
         self.assertEqual(len(calls), 2)
+
+    def test_skillspector_blocks_on_partial_llm_run_after_retries(self):
+        module = importlib.import_module("_skillspector")
+        calls = []
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        original_state = (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
+                          module.SKILLSPECTOR, module.subprocess.run,
+                          module.time.sleep, module.LLM_RETRIES)
+        try:
+            module.PROVIDER = "claude_cli"
+            module.LLM_READY = True
+            module.LLM_REASON = "claude CLI (local login)"
+            module.SKILLSPECTOR = "skillspector"
+            module.SKILLSPECTOR_CMD = ["skillspector"]
+            module.LLM_RETRIES = 1
+            module.time.sleep = lambda seconds: None
+
+            def fake_run(cmd, **kwargs):
+                calls.append(cmd)
+                report_path = Path(cmd[cmd.index("--output") + 1])
+                self._write_report(report_path, metadata={
+                    "llm_calls_attempted": 4, "llm_calls_succeeded": 3})
+                return Result()
+
+            module.subprocess.run = fake_run
+            with tempfile.TemporaryDirectory() as src_dir:
+                src = Path(src_dir)
+                (src / "SKILL.md").write_text("---\nname: partial\n---\n",
+                                               encoding="utf-8")
+                self.assertEqual(module.run_skillspector(src), 2)
+        finally:
+            (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
+             module.SKILLSPECTOR, module.subprocess.run,
+             module.time.sleep, module.LLM_RETRIES) = original_state
+
+        self.assertEqual(len(calls), 2)
+
+    def test_static_only_scan_passes_no_llm_flag(self):
+        module = importlib.import_module("_skillspector")
+        calls = []
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        original_state = (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
+                          module.SKILLSPECTOR, module.subprocess.run)
+        try:
+            module.PROVIDER = ""
+            module.LLM_READY = False
+            module.LLM_REASON = "no LLM provider configured"
+            module.SKILLSPECTOR = "skillspector"
+            module.SKILLSPECTOR_CMD = ["skillspector"]
+
+            def fake_run(cmd, **kwargs):
+                calls.append(cmd)
+                report_path = Path(cmd[cmd.index("--output") + 1])
+                self._write_report(report_path, metadata={
+                    "llm_requested": False, "llm_available": False})
+                return Result()
+
+            module.subprocess.run = fake_run
+            with tempfile.TemporaryDirectory() as src_dir:
+                src = Path(src_dir)
+                (src / "SKILL.md").write_text("---\nname: static\n---\n",
+                                               encoding="utf-8")
+                self.assertEqual(module.run_skillspector(src), 0)
+        finally:
+            (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
+             module.SKILLSPECTOR, module.subprocess.run) = original_state
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--no-llm", calls[0])
 
     def test_virustotal_verdict_fails_closed_on_throttled_or_failed_lookups(self):
         scan_mcp = importlib.import_module("scan_mcp")
@@ -342,28 +638,12 @@ class SkillSpectorWrapperTests(unittest.TestCase):
 
         self.assertEqual(scan_mcp.verdict(output, 0), 2)
 
-    def test_explicit_skillspector_provider_ignores_legacy_model(self):
-        old_env = os.environ.copy()
-        try:
-            os.environ.clear()
-            os.environ.update({
-                "AGENT_GUARD_NO_DOTENV": "1",
-                "SKILLSPECTOR_PROVIDER": "nv_build",
-                "NVIDIA_INFERENCE_KEY": "nvapi-test",
-                "SKILL_SCANNER_LLM_MODEL": "legacy-test-model",
-                "MCP_SCANNER_LLM_BASE_URL": "https://runtime.example/v1",
-            })
-            module = importlib.reload(importlib.import_module("_skillspector"))
-
-            self.assertTrue(module.skillspector_llm_usable())
-            self.assertEqual(module.PROVIDER, "nv_build")
-            self.assertEqual(module.LLM_MODEL_RAW, "")
-            self.assertEqual(module.LLM_BASE_URL, "")
-            self.assertNotIn("SKILLSPECTOR_MODEL", module.skillspector_env())
-        finally:
-            os.environ.clear()
-            os.environ.update(old_env)
-            importlib.reload(importlib.import_module("_skillspector"))
+    def test_legacy_skill_scanner_vars_are_no_longer_read(self):
+        provider, ready, _reason, _env = self._resolve({
+            "SKILL_SCANNER_LLM_PROVIDER": "openai",
+            "SKILL_SCANNER_LLM_API_KEY": "sk-legacy",
+        })
+        self.assertEqual((provider, ready), ("", False))
 
     def test_agent_guard_env_file_autoloads_without_overriding_process_env(self):
         old_env = os.environ.copy()
@@ -371,9 +651,9 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             env_file = Path(env_dir) / ".env"
             env_file.write_text(
                 "\n".join([
-                    "SKILLSPECTOR_PROVIDER=openai",
+                    "SKILLSPECTOR_PROVIDER=openai   # inline comment",
                     "OPENAI_API_KEY=from-file",
-                    "SKILLSPECTOR_MODEL=from-file-model",
+                    'SKILLSPECTOR_MODEL="from-file-model"',
                 ]),
                 encoding="utf-8",
             )
@@ -386,32 +666,13 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 module = importlib.reload(importlib.import_module("_skillspector"))
 
                 self.assertEqual(module.PROVIDER, "openai")
-                self.assertEqual(module.LLM_KEY, "from-process")
-                self.assertEqual(module.LLM_MODEL_RAW, "from-file-model")
+                self.assertTrue(module.LLM_READY)
+                self.assertEqual(os.environ["OPENAI_API_KEY"], "from-process")
+                self.assertEqual(os.environ["SKILLSPECTOR_MODEL"], "from-file-model")
             finally:
                 os.environ.clear()
                 os.environ.update(old_env)
                 importlib.reload(importlib.import_module("_skillspector"))
-
-    def test_llm_scan_tree_filters_binary_lock_and_large_files(self):
-        module = importlib.import_module("_skillspector")
-        with tempfile.TemporaryDirectory() as src_dir, tempfile.TemporaryDirectory() as dst_dir:
-            src = Path(src_dir)
-            dst = Path(dst_dir)
-            (src / "server.py").write_text("print('ok')\n", encoding="utf-8")
-            (src / "uv.lock").write_text("lock\n", encoding="utf-8")
-            (src / "assets").mkdir()
-            (src / "assets" / "demo.gif").write_bytes(b"GIF89a")
-            (src / "large.txt").write_text("x" * (module.LLM_MAX_FILE_BYTES + 1),
-                                            encoding="utf-8")
-
-            skipped = module._copy_llm_scan_tree(src, dst)
-
-            self.assertEqual(skipped, 3)
-            self.assertTrue((dst / "server.py").is_file())
-            self.assertFalse((dst / "uv.lock").exists())
-            self.assertFalse((dst / "assets" / "demo.gif").exists())
-            self.assertFalse((dst / "large.txt").exists())
 
     def test_install_skill_rejects_directory_without_skill_manifest(self):
         installer = importlib.import_module("install_skill")
@@ -1169,7 +1430,11 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertNotIn("PYTHONUTF8=1 skillspector scan", readme)
         self.assertNotIn("PYTHONUTF8=1 skillspector scan", skill)
         self.assertNotIn("fast + cheap for scanning", readme)
-        self.assertIn("OpenAI or NVIDIA key is required for full SkillSpector LLM coverage", readme)
+        self.assertNotIn("OpenAI or NVIDIA key is required", readme)
+        self.assertNotIn("OpenAI or NVIDIA", skill)
+        self.assertIn("`claude_cli`", readme)
+        self.assertIn("AGENT_GUARD_STATIC_ONLY", readme)
+        self.assertIn("SKILLSPECTOR_PROVIDER=claude_cli", env_example)
         self.assertIn("MCP_SCANNER_LLM_MODEL", readme)
         self.assertIn("VirusTotal is optional but useful for private users", readme)
         self.assertIn("python scripts/scan_mcp.py virustotal", readme)
@@ -1442,33 +1707,49 @@ class ScanCliRouterTests(unittest.TestCase):
             self.scan_cli.run_malcontent = original_mal
         self.assertEqual(rc, 1)
 
-    # -- cargo fallback --------------------------------------------------------
+    # -- cargo (GuardDog crates + static) -------------------------------------
 
-    def test_run_cargo_prints_limit_note_and_delegates_to_static_scan(self):
+    def _run_cargo_with(self, guarddog_rc: int, skillspector_rc: int):
         import contextlib
         import io as _io
 
         original_fetch = self.scan_cli.fetch_crate
         original_scan = self.scan_cli.run_skillspector
+        original_gd = self.scan_cli.run_guarddog
         calls = {}
         try:
             self.scan_cli.fetch_crate = (
                 lambda spec, dest: calls.setdefault("spec", spec)
                 and ("ripgrep", "14.1.0"))
             self.scan_cli.run_skillspector = (
-                lambda src: calls.setdefault("scanned", Path(src)) and 0)
+                lambda src: (calls.setdefault("scanned", Path(src)), skillspector_rc)[1])
+            self.scan_cli.run_guarddog = (
+                lambda eco, spec: calls.setdefault("guarddog", (eco, spec)) and guarddog_rc)
             buf = _io.StringIO()
             with contextlib.redirect_stdout(buf):
                 rc = self.scan_cli.run_cargo("ripgrep@14.1.0")
         finally:
             self.scan_cli.fetch_crate = original_fetch
             self.scan_cli.run_skillspector = original_scan
+            self.scan_cli.run_guarddog = original_gd
+        return rc, calls, buf.getvalue()
+
+    def test_run_cargo_runs_guarddog_crates_and_static_scan(self):
+        rc, calls, out = self._run_cargo_with(0, 0)
         self.assertEqual(rc, 0)
+        self.assertEqual(calls["guarddog"], ("crates", "ripgrep@14.1.0"))
         self.assertEqual(calls["spec"], "ripgrep@14.1.0")
-        out = buf.getvalue()
-        self.assertIn("GuardDog does not support cargo", out)
-        self.assertIn("registry metadata", out)
+        self.assertIn("scanned", calls)
+        self.assertIn("GuardDog crates scan", out)
         self.assertIn("sfw cargo install", out)
+        self.assertIn("[SAFE] cargo combined verdict", out)
+
+    def test_run_cargo_combines_verdicts_fail_closed(self):
+        self.assertEqual(self._run_cargo_with(0, 1)[0], 1)
+        self.assertEqual(self._run_cargo_with(1, 2)[0], 1)
+        self.assertEqual(self._run_cargo_with(2, 0)[0], 2)
+        self.assertEqual(self.scan_cli.combine_verdicts(0, 0), 0)
+        self.assertEqual(self.scan_cli.combine_verdicts(2, 1), 1)
 
     # -- script flow -----------------------------------------------------------
 

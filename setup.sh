@@ -8,10 +8,11 @@
 
 set -euo pipefail
 
-# SkillSpector is Alpha: no releases/tags and not on PyPI. We pin an exact
-# commit so "scan = install" applies to the scanner itself. Bump deliberately.
+# SkillSpector ships tagged GitHub releases but is not on PyPI. We pin the exact
+# commit behind a release tag (tags can move, commits cannot) so "scan = install"
+# applies to the scanner itself. Bump deliberately; keep the tag comment in sync.
 SKILLSPECTOR_REPO="https://github.com/NVIDIA/SkillSpector"
-SKILLSPECTOR_SHA="cff7ecc4f2881d9e23ea4bb801a6353e1dbe39e6"
+SKILLSPECTOR_SHA="b7241089d7ec15d8b30df980dacbb428214732b9"   # v2.11.0
 
 echo "Checking prerequisites..."
 
@@ -92,7 +93,8 @@ fi
 echo ""
 echo "[OK] Setup complete."
 echo "     Next: cp .env.example .env"
-echo "           Set OpenAI/NVIDIA for SkillSpector full coverage; set MCP_SCANNER_LLM_* for Cisco runtime scans"
+echo "           SkillSpector LLM: defaults to your coding-agent CLI (claude/codex/gemini login, no API key);"
+echo "           hosted providers (anthropic/openai/nv_build/...) work with a key. MCP_SCANNER_LLM_* for Cisco runtime scans."
 echo "           Optional: set VIRUSTOTAL_API_KEY for binary/archive malware reputation checks"
 echo "           CLI-tool scans (scan_cli.py npm/pypi/go) use Datadog GuardDog:"
 echo "           native 'guarddog' on PATH if present, else the official Docker"

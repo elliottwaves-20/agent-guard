@@ -120,16 +120,23 @@ def present_labels(present: dict) -> list:
 
 
 def workspace_default() -> Path:
-    """Find the best default workspace for permanent clones."""
-    candidates = [
-        HOME / "OneDrive" / "Dokumente" / "Github",
-        HOME / "OneDrive" / "Documents" / "Github",
+    """Find the best default workspace for permanent clones.
+
+    AGENT_GUARD_WORKSPACE wins when set. Otherwise the usual places are
+    probed, including a Documents folder under OneDrive in any locale."""
+    explicit = os.environ.get("AGENT_GUARD_WORKSPACE", "").strip()
+    if explicit:
+        p = Path(explicit).expanduser()
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    candidates = sorted((HOME / "OneDrive").glob("*/Github")) if (HOME / "OneDrive").is_dir() else []
+    candidates += [
         HOME / "Documents" / "Github",
         HOME / "Github",
         HOME / "repos",
     ]
     for p in candidates:
-        if p.exists():
+        if p.is_dir():
             return p
     # Fallback: create ~/Github
     fallback = HOME / "Github"

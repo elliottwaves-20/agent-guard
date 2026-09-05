@@ -10,6 +10,14 @@ This module centralises the provider-aware LLM resolution, the cross-platform
 invocation (forcing UTF-8 so SkillSpector's report renders on legacy Windows
 consoles), and the fail-closed verdict, so both wrappers share one source of
 truth for how a scan is run and judged.
+
+LLM providers: SkillSpector's semantic analyzers run against whatever
+SKILLSPECTOR_PROVIDER names. The recommended default is a coding-agent CLI
+(claude_cli / codex_cli / gemini_cli): the scanner starts the CLI as a separate
+tool-less process, feeds the untrusted content via stdin, and validates the
+answer against a JSON schema -- so the scanning LLM stays isolated from the
+agent that later installs the skill, and no API key is needed. Hosted API
+providers (anthropic, openai, nv_build, ...) remain fully supported.
 """
 
 import json
@@ -45,6 +53,8 @@ def load_env_file(path: Path) -> None:
         key = key.strip()
         if not key or key in os.environ:
             continue
+        # Strip an inline "# comment" (only when separated by whitespace) and quotes.
+        value = value.split(" #", 1)[0].split("\t#", 1)[0]
         value = value.strip().strip('"').strip("'")
         os.environ[key] = value
 
@@ -74,36 +84,28 @@ def load_agent_guard_env() -> None:
 load_agent_guard_env()
 
 SKILLSPECTOR = shutil.which("skillspector")
+BOOT = Path(__file__).with_name("_skillspector_boot.py")
+SKILLSPECTOR_CMD: list | None = None   # resolved lazily by skillspector_command()
 
 # Hard cap on a single scan, so a hanging scan never blocks forever.
 # (SCAN_MCP_TIMEOUT kept for backwards compatibility with the old MCP-only knob.)
 SCAN_TIMEOUT = int(os.environ.get("AGENT_GUARD_SCAN_TIMEOUT")
                    or os.environ.get("SCAN_MCP_TIMEOUT", "600"))
 
-LLM_MAX_FILE_BYTES = int(os.environ.get("AGENT_GUARD_LLM_MAX_FILE_BYTES", "200000"))
-LLM_SKIP_NAMES = {
-    "uv.lock",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-}
-LLM_SKIP_SUFFIXES = {
-    ".7z", ".avif", ".bin", ".bmp", ".bz2", ".class", ".dll", ".dylib",
-    ".exe", ".gif", ".gz", ".ico", ".jar", ".jpeg", ".jpg", ".mp4", ".pdf",
-    ".png", ".pyc", ".so", ".tar", ".tgz", ".webp", ".whl", ".zip",
-}
-LLM_FAILURE_MARKERS = (
-    "semantic_security_discovery failed:",
-    "semantic_quality_policy failed:",
-    "semantic_developer_intent failed:",
-    "LLM call failed",
-)
+# SkillSpector's aggregate deadline for one scan (upstream default: 60 s, which
+# CLI providers exhaust on medium-sized skills). Applied through
+# _skillspector_boot.py; upstream PR #468 adopts the same variable name.
+WORKFLOW_BUDGET = int(os.environ.get("SKILLSPECTOR_MAX_WORKFLOW_SECONDS")
+                      or str(max(60, SCAN_TIMEOUT - 60)))
+
+# stderr markers of a transient provider failure worth retrying (rate limits).
 LLM_TRANSIENT_FAILURE_MARKERS = (
     "rate_limit_exceeded",
     "Rate limit reached",
     "HTTP 429",
     "429",
     "tokens per min",
+    "overloaded",
 )
 LLM_RETRIES = int(os.environ.get("AGENT_GUARD_LLM_RETRIES", "3"))
 LLM_RETRY_BASE_DELAY = int(os.environ.get("AGENT_GUARD_LLM_RETRY_BASE_DELAY", "20"))
@@ -119,141 +121,234 @@ def need_skillspector():
         die("skillspector not found on PATH. Run setup.sh / setup.ps1 first.")
 
 
+def skillspector_python() -> str | None:
+    """Python interpreter of SkillSpector's uv tool environment, or None."""
+    uv = shutil.which("uv")
+    if uv is None:
+        return None
+    try:
+        tool_dir = subprocess.run([uv, "tool", "dir"], capture_output=True,
+                                  text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if tool_dir.returncode != 0 or not tool_dir.stdout.strip():
+        return None
+    root = Path(tool_dir.stdout.strip()) / "skillspector"
+    for candidate in (root / "Scripts" / "python.exe", root / "bin" / "python"):
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def skillspector_command() -> list:
+    """Command prefix that runs SkillSpector: the bootstrap inside its own
+    tool environment when available (raises the workflow budget), otherwise
+    the plain `skillspector` executable."""
+    global SKILLSPECTOR_CMD
+    if SKILLSPECTOR_CMD is not None:
+        return list(SKILLSPECTOR_CMD)
+    py = skillspector_python() if BOOT.is_file() else None
+    if py:
+        SKILLSPECTOR_CMD = [py, str(BOOT)]
+    else:
+        print("  NOTE: SkillSpector tool environment not found; running the plain "
+              "`skillspector` binary with its built-in 60s workflow budget.")
+        SKILLSPECTOR_CMD = [SKILLSPECTOR]
+    return list(SKILLSPECTOR_CMD)
+
+
 # -- provider-aware LLM resolution --------------------------------------------
 # This provider config is for SkillSpector only. scan_mcp.py has a separate
-# Cisco runtime LLM config based on MCP_SCANNER_LLM_*.
-# resolve_llm() also reads legacy SKILL_SCANNER_* as a fallback so an older .env
-# keeps working.
+# Cisco runtime LLM config based on MCP_SCANNER_LLM_* (LiteLLM; no CLI path).
 
-def resolve_llm():
-    """Return (provider, key, model, base_url) from the configured env.
+# Coding-agent CLIs SkillSpector can drive with the user's existing login.
+# Order = auto-detection preference.
+CLI_PROVIDERS = {
+    "claude_cli": "claude",
+    "codex_cli": "codex",
+    "gemini_cli": "gemini",
+}
 
-    Precedence: SkillSpector-native vars, then legacy Cisco SKILL_SCANNER_*.
-    If no provider is named, infer it from whichever credential is present.
+# Hosted providers and the env vars they need.
+KEY_PROVIDERS = {
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+    "nv_build": ("NVIDIA_INFERENCE_KEY",),
+    "nv_inference": ("NVIDIA_INFERENCE_KEY",),
+    "anthropic_proxy": ("ANTHROPIC_PROXY_API_KEY", "ANTHROPIC_PROXY_ENDPOINT_URL"),
+    "azure_openai": ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"),
+    "openai_compatible": ("SKILLSPECTOR_COMPAT_API_KEY", "SKILLSPECTOR_COMPAT_BASE_URL"),
+}
+# Auto-detection only considers the unambiguous key providers, in this order.
+KEY_AUTODETECT_ORDER = ("anthropic", "openai", "nv_build")
+
+# Providers that resolve credentials on their own (boto3 chain / local service).
+IMPLICIT_PROVIDERS = {"bedrock", "ollama"}
+
+PROVIDER_ALIASES = {
+    "claude": "claude_cli",
+    "codex": "codex_cli",
+    "gemini": "gemini_cli",
+    "openai-compatible": "openai_compatible",
+    "custom-openai": "openai_compatible",
+}
+
+# A SKILLSPECTOR_MODEL is forwarded verbatim to the provider. For the vendor
+# CLIs and the native Anthropic provider a model from a different vendor can
+# only fail (e.g. a leftover `gpt-*` from an old OpenAI setup makes `claude
+# --model gpt-...` exit 1 on every call). If the model does not carry the
+# vendor's marker it is dropped and the provider default is used instead.
+PROVIDER_MODEL_MARKERS = {
+    "claude_cli": ("claude",),
+    "anthropic": ("claude",),
+    "codex_cli": ("gpt", "codex", "o1", "o3", "o4"),
+    "gemini_cli": ("gemini",),
+}
+
+
+def model_matches_provider(provider: str, model: str) -> bool:
+    markers = PROVIDER_MODEL_MARKERS.get(provider)
+    if not markers or not model:
+        return True
+    lowered = model.lower()
+    return any(marker in lowered for marker in markers)
+
+
+# SkillSpector warns once per analyzer slot that the empty model id (= "use the
+# CLI's own default") has no token-limit entry in its registry. That is
+# expected for CLI providers and says nothing about the scan; it is the one
+# stderr line the wrapper filters. Real errors and every other warning pass.
+_EMPTY_MODEL_NOISE = (
+    "No token-limit info for model ''",
+    "Model '' (slot:",
+)
+
+
+def _static_only_forced() -> bool:
+    return os.environ.get("AGENT_GUARD_STATIC_ONLY", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def resolve_llm() -> tuple[str, bool, str]:
+    """Return (provider, ready, reason).
+
+    `provider` is the SkillSpector provider id that will be used ("" when
+    nothing is configured); `ready` says whether SkillSpector's LLM layer can
+    run with it; `reason` is a short human-readable note for the scan banner.
+
+    Resolution order:
+      1. AGENT_GUARD_STATIC_ONLY=1 forces static-only (nothing leaves the box).
+      2. An explicit SKILLSPECTOR_PROVIDER is honoured and validated: a CLI
+         provider needs its binary on PATH, a hosted one its credential(s).
+      3. Otherwise auto-detect: a hosted credential in the environment wins
+         (explicit intent), then the first coding-agent CLI on PATH.
     """
-    explicit_provider = os.environ.get("SKILLSPECTOR_PROVIDER", "").strip().lower()
-    provider = (explicit_provider
-                or os.environ.get("SKILL_SCANNER_LLM_PROVIDER", "")).strip().lower()
-    model = os.environ.get("SKILLSPECTOR_MODEL", "").strip()
-    if not model and not explicit_provider:
-        model = os.environ.get("SKILL_SCANNER_LLM_MODEL", "").strip()
-    base = os.environ.get("OPENAI_BASE_URL", "").strip()
-    if not base and not explicit_provider:
-        base = (os.environ.get("MCP_SCANNER_LLM_BASE_URL", "")
-                or os.environ.get("SKILL_SCANNER_LLM_BASE_URL", "")).strip()
-    legacy_key = os.environ.get("SKILL_SCANNER_LLM_API_KEY", "").strip()
+    if _static_only_forced():
+        return "", False, "AGENT_GUARD_STATIC_ONLY is set"
 
-    if provider == "anthropic":
-        key = os.environ.get("ANTHROPIC_API_KEY", "").strip() or legacy_key
-    elif provider in ("openai", "openai-compatible", "custom-openai"):
-        provider = "openai"
-        key = os.environ.get("OPENAI_API_KEY", "").strip() or legacy_key
-    elif provider in ("nv_build", "nv_inference"):
-        key = os.environ.get("NVIDIA_INFERENCE_KEY", "").strip() or legacy_key
-    else:
-        # No provider named -- infer from whichever credential exists.
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            provider, key = "anthropic", os.environ["ANTHROPIC_API_KEY"].strip()
-        elif os.environ.get("OPENAI_API_KEY"):
-            provider, key = "openai", os.environ["OPENAI_API_KEY"].strip()
-        elif os.environ.get("NVIDIA_INFERENCE_KEY"):
-            provider, key = "nv_inference", os.environ["NVIDIA_INFERENCE_KEY"].strip()
-        elif legacy_key:
-            key = legacy_key
-            provider = "anthropic" if legacy_key.startswith("sk-ant-") else "openai"
-        else:
-            key = ""
-    return provider, key, model, base
+    explicit = os.environ.get("SKILLSPECTOR_PROVIDER", "").strip().lower()
+    explicit = PROVIDER_ALIASES.get(explicit, explicit)
+
+    if explicit:
+        if explicit in CLI_PROVIDERS:
+            binary = CLI_PROVIDERS[explicit]
+            if shutil.which(binary):
+                return explicit, True, f"{binary} CLI (local login)"
+            return explicit, False, (f"SKILLSPECTOR_PROVIDER={explicit} but "
+                                     f"'{binary}' is not on PATH")
+        if explicit in KEY_PROVIDERS:
+            missing = [v for v in KEY_PROVIDERS[explicit]
+                       if not os.environ.get(v, "").strip()]
+            if not missing:
+                return explicit, True, f"{explicit} (API key)"
+            return explicit, False, (f"SKILLSPECTOR_PROVIDER={explicit} but "
+                                     f"{', '.join(missing)} is not set")
+        if explicit in IMPLICIT_PROVIDERS:
+            return explicit, True, f"{explicit} (provider-managed credentials)"
+        return explicit, False, f"unknown SKILLSPECTOR_PROVIDER={explicit}"
+
+    for provider in KEY_AUTODETECT_ORDER:
+        if all(os.environ.get(v, "").strip() for v in KEY_PROVIDERS[provider]):
+            return provider, True, f"{provider} (API key, auto-detected)"
+    for provider, binary in CLI_PROVIDERS.items():
+        if shutil.which(binary):
+            return provider, True, f"{binary} CLI (local login, auto-detected)"
+    return "", False, "no LLM provider configured"
 
 
-PROVIDER, LLM_KEY, LLM_MODEL_RAW, LLM_BASE_URL = resolve_llm()
+PROVIDER, LLM_READY, LLM_REASON = resolve_llm()
 
 
 def skillspector_llm_usable() -> bool:
-    """Whether SkillSpector's LLM layer can actually run with the configured
-    provider. Its semantic analyzers request structured outputs whose JSON
-    schema (integer/number `minimum`/`maximum`) only SkillSpector's OpenAI and
-    NVIDIA providers accept in this pinned integration. Anthropic's
-    OpenAI-compatible endpoint rejects that schema (HTTP 400), so with Anthropic
-    SkillSpector is run static-only."""
-    return bool(LLM_KEY and PROVIDER in ("openai", "nv_build", "nv_inference"))
+    """Whether SkillSpector's LLM layer will run for this scan."""
+    return LLM_READY
 
 
 def skillspector_env() -> dict:
     """Environment for SkillSpector: force UTF-8 (its rich terminal renderer
-    crashes on a legacy Windows cp1252 console) and, when the provider's LLM
-    path is usable, expose the provider + key under SkillSpector's native
-    variable names."""
+    crashes on a legacy Windows cp1252 console) and pin the resolved provider
+    under SkillSpector's native variable name. When the LLM layer is not
+    usable the provider variable is dropped so SkillSpector does not try (and
+    fail) on its own default; the scan is run with --no-llm."""
     e = dict(os.environ)
     e["PYTHONUTF8"] = "1"
     e["PYTHONIOENCODING"] = "utf-8"
-    if not skillspector_llm_usable():
-        for name in (
-                "SKILLSPECTOR_PROVIDER",
-                "SKILLSPECTOR_MODEL",
-                "ANTHROPIC_API_KEY",
-                "OPENAI_API_KEY",
-                "OPENAI_BASE_URL",
-                "NVIDIA_INFERENCE_KEY"):
-            e.pop(name, None)
-        return e
-
-    if skillspector_llm_usable():
+    e["SKILLSPECTOR_MAX_WORKFLOW_SECONDS"] = str(WORKFLOW_BUDGET)
+    if LLM_READY:
         e["SKILLSPECTOR_PROVIDER"] = PROVIDER
-        if PROVIDER == "openai":
-            e["OPENAI_API_KEY"] = LLM_KEY
-            if LLM_BASE_URL:
-                e["OPENAI_BASE_URL"] = LLM_BASE_URL
-        elif PROVIDER in ("nv_build", "nv_inference"):
-            e["NVIDIA_INFERENCE_KEY"] = LLM_KEY
-        if LLM_MODEL_RAW:
-            e["SKILLSPECTOR_MODEL"] = LLM_MODEL_RAW
+        model = e.get("SKILLSPECTOR_MODEL", "").strip()
+        if model and not model_matches_provider(PROVIDER, model):
+            print(f"  NOTE: SKILLSPECTOR_MODEL={model} does not belong to provider "
+                  f"{PROVIDER}; ignoring it and using the provider's default model.")
+            e.pop("SKILLSPECTOR_MODEL", None)
+    else:
+        e.pop("SKILLSPECTOR_PROVIDER", None)
     return e
 
 
-def _llm_should_skip_file(path: Path) -> bool:
-    if path.name in LLM_SKIP_NAMES:
-        return True
-    if path.suffix.lower() in LLM_SKIP_SUFFIXES:
-        return True
-    try:
-        return path.stat().st_size > LLM_MAX_FILE_BYTES
-    except OSError:
-        return True
-
-
-def _copy_llm_scan_tree(src: Path, dest: Path) -> int:
-    skipped = 0
-    for item in src.rglob("*"):
-        rel = item.relative_to(src)
-        target = dest / rel
-        if item.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-            continue
-        if not item.is_file():
-            continue
-        if _llm_should_skip_file(item):
-            skipped += 1
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(item, target)
-    return skipped
-
-
-def _has_llm_failure(stderr: str) -> bool:
-    return any(marker in stderr for marker in LLM_FAILURE_MARKERS)
+def _filter_stderr(stderr: str) -> str:
+    kept = [line for line in stderr.splitlines()
+            if not any(marker in line for marker in _EMPTY_MODEL_NOISE)]
+    return "\n".join(kept)
 
 
 def _has_transient_llm_failure(stderr: str) -> bool:
     return any(marker in stderr for marker in LLM_TRANSIENT_FAILURE_MARKERS)
 
 
+def _load_report(report_path: Path):
+    if not report_path.exists():
+        return None
+    try:
+        return json.loads(report_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+
+
+def llm_run_incomplete(data) -> str:
+    """Return a reason string when an LLM-requested scan did not get full LLM
+    coverage (report metadata, SkillSpector >= 2.10), else ""."""
+    meta = (data or {}).get("metadata") or {}
+    if not meta.get("llm_requested"):
+        return ""
+    if meta.get("llm_error"):
+        return str(meta["llm_error"])
+    if not meta.get("llm_available"):
+        return "LLM provider unavailable"
+    attempted = meta.get("llm_calls_attempted")
+    succeeded = meta.get("llm_calls_succeeded")
+    if isinstance(attempted, int) and isinstance(succeeded, int) and succeeded < attempted:
+        return f"{attempted - succeeded} of {attempted} LLM calls failed"
+    return ""
+
+
 # -- static scan + verdict ----------------------------------------------------
 
 def run_skillspector(src: Path, runtime_hint: bool = False) -> int:
-    """Static SkillSpector scan of `src` (a dir / zip / .md / file). Nothing is
-    executed. Writes a JSON report to a temp file (robust across platforms; the
-    terminal renderer is unreliable on legacy Windows consoles) and judges it.
+    """SkillSpector scan of `src` (a dir / zip / .md / file). Nothing from the
+    scanned target is executed. Writes a JSON report to a temp file (robust
+    across platforms; the terminal renderer is unreliable on legacy Windows
+    consoles) and judges it.
 
     `runtime_hint=True` adds the MCP-specific note that a static scan cannot see
     tools a server registers only at runtime (set by the MCP wrapper, not for
@@ -263,29 +358,20 @@ def run_skillspector(src: Path, runtime_hint: bool = False) -> int:
     use_llm = skillspector_llm_usable()
     with tempfile.TemporaryDirectory() as d:
         report = Path(d) / "report.json"
-        scan_src = src
-        skipped = 0
-        if use_llm and src.is_dir():
-            scan_src = Path(d) / "llm-source"
-            skipped = _copy_llm_scan_tree(src, scan_src)
-
-        cmd = [SKILLSPECTOR, "scan", str(scan_src),
-               "--format", "json", "--output", str(report)]
+        cmd = skillspector_command() + ["scan", str(src),
+                                        "--format", "json", "--output", str(report)]
         if not use_llm:
             cmd.append("--no-llm")
-        if not use_llm and PROVIDER == "anthropic" and LLM_KEY:
-            suffix = ("  [static only -- SkillSpector's LLM path is incompatible "
-                      "with Anthropic]")
-        elif not use_llm:
-            suffix = "  [static only -- no LLM provider configured]"
+            suffix = f"  [static only -- {LLM_REASON}]"
         else:
-            suffix = ""
+            suffix = f"  [LLM: {LLM_REASON}]"
         print(f"  SkillSpector scan (no execution): {src}{suffix}")
-        if use_llm and skipped:
-            print(f"  LLM source filter: skipped {skipped} binary/generated/large file(s)")
         attempts = LLM_RETRIES + 1 if use_llm else 1
         r = None
+        data = None
         for attempt in range(1, attempts + 1):
+            if report.exists():
+                report.unlink()
             try:
                 r = subprocess.run(cmd, capture_output=True, text=True,
                                    encoding="utf-8", errors="replace",
@@ -295,37 +381,38 @@ def run_skillspector(src: Path, runtime_hint: bool = False) -> int:
                 print(f"[BLOCK] NO VERDICT -- scan timed out after {SCAN_TIMEOUT}s. Do NOT "
                       "install. Raise AGENT_GUARD_SCAN_TIMEOUT or review manually.")
                 return 2
-            if not (use_llm and _has_llm_failure(r.stderr)
-                    and _has_transient_llm_failure(r.stderr)
-                    and attempt < attempts):
+            data = _load_report(report)
+            if not use_llm or attempt >= attempts:
+                break
+            incomplete = llm_run_incomplete(data) if data is not None else ""
+            transient = _has_transient_llm_failure(r.stderr)
+            if not incomplete and not transient:
                 break
             delay = LLM_RETRY_BASE_DELAY * attempt
-            print(
-                f"  SkillSpector LLM hit a transient provider limit; "
-                f"retrying in {delay}s ({attempt}/{attempts - 1})..."
-            )
+            print(f"  SkillSpector LLM run incomplete "
+                  f"({incomplete or 'transient provider error'}); "
+                  f"retrying in {delay}s ({attempt}/{attempts - 1})...")
             time.sleep(delay)
         # Never hide scanner errors (fail closed): surface stderr if present.
-        if r.stderr.strip():
-            print(_console_err_text(r.stderr), file=sys.stderr)
-        if use_llm and _has_llm_failure(r.stderr):
-            print("\n" + "=" * 60)
-            print("[BLOCK] NO VERDICT -- SkillSpector LLM analysis failed. Do NOT "
-                  "install based on a partial LLM run; retry with a working "
-                  "OpenAI/NVIDIA model or run explicit static-only policy.")
-            return 2
+        stderr = _filter_stderr(r.stderr)
+        if stderr.strip():
+            print(_console_err_text(stderr), file=sys.stderr)
+        if use_llm and data is not None:
+            incomplete = llm_run_incomplete(data)
+            if incomplete:
+                print("\n" + "=" * 60)
+                print(f"[BLOCK] NO VERDICT -- SkillSpector LLM analysis incomplete "
+                      f"({incomplete}). Do NOT install based on a partial LLM run; "
+                      "fix the provider (see .env.example) or set "
+                      "AGENT_GUARD_STATIC_ONLY=1 for an explicit static-only policy.")
+                return 2
         return verdict_skillspector(report, r.returncode, runtime_hint)
 
 
 def verdict_skillspector(report_path: Path, code: int, runtime_hint: bool = False) -> int:
     """Turn a SkillSpector JSON report into a clear verdict. Fail closed."""
     print("\n" + "=" * 60)
-    data = None
-    if report_path.exists():
-        try:
-            data = json.loads(report_path.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            data = None
+    data = _load_report(report_path)
     if data is None:
         print("[BLOCK] NO VERDICT -- SkillSpector produced no parsable report "
               f"(exit {code}). Do NOT install. Re-run the scan.")
@@ -335,8 +422,22 @@ def verdict_skillspector(report_path: Path, code: int, runtime_hint: bool = Fals
     score = ra.get("score")
     severity = str(ra.get("severity") or "").upper()
     rec = str(ra.get("recommendation") or "").upper()
+    max_sev = str(ra.get("max_issue_severity") or "").upper()
     issues = data.get("issues") or []
     meta = data.get("metadata") or {}
+    completeness = data.get("analysis_completeness") or {}
+
+    # SkillSpector >= 2.5: a report with execution_successful=false is a
+    # validation failure, not a clean result -- even if it carries a score.
+    exec_ok = data.get("execution_successful")
+    if exec_ok is None:
+        exec_ok = completeness.get("execution_successful")
+    if exec_ok is False:
+        print("[BLOCK] NO VERDICT -- SkillSpector reports execution_successful=false. "
+              "Do NOT install. Analyzer exceptions:")
+        for exc in completeness.get("ledger_exceptions") or []:
+            print(f"  - {_console_text(exc)}")
+        return 2
 
     if issues:
         print(f"Findings ({len(issues)}):")
@@ -353,13 +454,25 @@ def verdict_skillspector(report_path: Path, code: int, runtime_hint: bool = Fals
               "before installing.")
         return 2
 
+    # Coverage caveats travel with the verdict (fail-closed reporting).
+    uninspected = completeness.get("entirely_uninspected_files") or 0
+    partial = completeness.get("partially_inspected_files") or 0
+    if completeness and (uninspected or partial or completeness.get("is_complete") is False):
+        cov = completeness.get("coverage_percent")
+        print(f"  LIMIT: analysis coverage {cov}% -- {uninspected} file(s) not inspected, "
+              f"{partial} partially. The verdict covers inspected files only.")
+        for lim in completeness.get("limitations") or []:
+            print(f"    - {_console_text(lim)}")
+        for exc in completeness.get("scope_exclusions") or []:
+            print(f"    - excluded: {_console_text(exc)}")
+
     sev_set = {str(it.get("severity") or "").upper() for it in issues}
+    if max_sev:
+        sev_set.add(max_sev)
     if meta.get("llm_available"):
         llm_note = ""
-    elif PROVIDER == "anthropic":
-        llm_note = "  (static only -- SkillSpector LLM needs OpenAI/NVIDIA)"
     else:
-        llm_note = "  (static only -- configure a provider for semantic analysis)"
+        llm_note = f"  (static only -- {LLM_REASON})"
     runtime_note = ("\n   Note: a static source scan cannot see MCP tools that are "
                     "registered only at runtime. Use --sandbox for a live check of "
                     "an unfamiliar server.") if runtime_hint else ""

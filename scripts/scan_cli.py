@@ -18,12 +18,12 @@ detection:
                        --deep adds a malcontent capability scan via Docker.
   script <url>      -> download (never executed), SkillSpector static scan.
                        Made for `curl | bash` installers: read it, never run it.
-  cargo <crate>     -> GuardDog does not support cargo. Fallback: fetch the
-                       crate source from crates.io and run the SkillSpector
-                       static scan. Registry metadata (maintainer changes,
-                       publish anomalies) is NOT checked -- documented in the
-                       output, with a pointer to Socket Firewall (sfw) as an
-                       install-time net.
+  cargo <crate>     -> Datadog GuardDog `crates` scan (GuardDog >= 3.2.0:
+                       heuristics + YARA + registry metadata) PLUS a
+                       SkillSpector static scan of the crate source fetched
+                       from crates.io (taint tracking, YARA, OSV.dev). The
+                       worse verdict wins; Socket Firewall (sfw) is still
+                       recommended as an install-time net.
 
 Exit codes (same contract as scan_skill.py / scan_mcp.py):
   0 = SAFE verdict       (nothing known-bad found -- NOT a guarantee)
@@ -387,16 +387,37 @@ def fetch_crate(spec: str, dest: Path) -> tuple:
     return name, version
 
 
+def combine_verdicts(*codes: int) -> int:
+    """Fail-closed merge of several stage exit codes: any BLOCK (1) wins over
+    any NO VERDICT (2), which wins over SAFE (0)."""
+    if 1 in codes:
+        return 1
+    if 2 in codes:
+        return 2
+    return 0
+
+
 def run_cargo(spec: str) -> int:
-    print("  LIMIT: GuardDog does not support cargo. This is a STATIC source "
-          "scan only -- registry metadata (maintainer changes, publish "
-          "anomalies, typosquat rankings) is NOT checked. Consider Socket "
-          "Firewall as an install-time net: `sfw cargo install <crate>`.")
+    """cargo crate: GuardDog `crates` scan + SkillSpector static source scan."""
+    print("  cargo crate: GuardDog crates scan (heuristics + registry metadata) "
+          "followed by a SkillSpector static scan of the crate source.")
+    print("  NOTE: GuardDog's crates rules are newer and thinner than its "
+          "npm/PyPI rules. Consider Socket Firewall as an install-time net: "
+          "`sfw cargo install <crate>`.")
+    print("\n-- stage 1: GuardDog --")
+    gd = run_guarddog("crates", spec)
+    print("\n-- stage 2: SkillSpector static source scan --")
     with tempfile.TemporaryDirectory() as d:
         dest = Path(d)
         name, version = fetch_crate(spec, dest)
         print(f"  static scan of {name} {version} (no execution)")
-        return run_skillspector(dest)
+        ss = run_skillspector(dest)
+    rc = combine_verdicts(gd, ss)
+    print("\n" + "=" * 60)
+    label = {0: "SAFE", 1: "BLOCK", 2: "NO VERDICT"}[rc]
+    print(f"[{label}] cargo combined verdict -> exit {rc} "
+          f"(GuardDog exit {gd}, SkillSpector exit {ss}).")
+    return rc
 
 
 # -- CLI -------------------------------------------------------------------------
@@ -423,7 +444,7 @@ def main():
     sp.add_argument("url")
 
     sp = sub.add_parser("cargo",
-                        help="crates.io crate -> static source scan (fallback)")
+                        help="crates.io crate -> GuardDog crates scan + static source scan")
     sp.add_argument("crate", help="crate name, optionally with @version")
 
     args = p.parse_args()

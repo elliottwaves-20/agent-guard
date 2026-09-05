@@ -6,10 +6,12 @@ Wraps NVIDIA SkillSpector so skill scans get the same provider-aware, clean,
 cross-platform handling as the MCP wrapper:
   - UTF-8 is forced (SkillSpector's terminal report crashes on a legacy Windows
     cp1252 console otherwise),
-  - the LLM layer is used only with a provider SkillSpector supports
-    (OpenAI / NVIDIA); with Anthropic it runs static-only -- the static layer
-    (patterns, taint, YARA, OSV.dev) is unaffected,
-  - a fail-closed [SAFE] / [BLOCK] verdict is parsed from JSON.
+  - the LLM layer runs through the configured SKILLSPECTOR_PROVIDER -- by
+    default a coding-agent CLI (claude_cli / codex_cli / gemini_cli) using the
+    user's existing login, or any hosted provider with an API key; without a
+    usable provider it runs static-only (patterns, taint, YARA, OSV.dev),
+  - a fail-closed [SAFE] / [BLOCK] verdict is parsed from JSON, including
+    SkillSpector's execution/coverage ledger and LLM-completeness metadata.
 
 A skill is only *read*, never executed, so this never runs the scanned code.
 
