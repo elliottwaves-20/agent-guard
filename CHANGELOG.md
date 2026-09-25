@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- The MCP sandbox (Stage 2) now records the target's network traffic. A
+  capture container (Alpine and tcpdump pinned by digest and version) owns the
+  network namespace and the target joins it. Only the PyPI and npm registries
+  are allowed by default; `--allow-host HOST[:PORT]` or
+  `AGENT_GUARD_SANDBOX_ALLOW` add more. Any other DNS lookup (even a failed
+  one), connection, UDP datagram or ICMP packet blocks the verdict and is
+  listed. A capture that does not start, drops packets or is cut short gives
+  no verdict. `--no-network` runs the target with no network. uv may no
+  longer download Python builds and npm skips its update check inside the
+  sandbox, so neither reaches for hosts outside the list.
+- The sandbox image no longer installs `cisco-ai-mcp-scanner` (unpinned and
+  unused: the analyzer runs on the host) and is tagged by the hash of its
+  Dockerfile, so a changed recipe always builds a fresh image.
 - Add an optional local skill distribution to the user config
   (`[distribution]`, `mode = "sync"`). For machines that already run their
   own store-and-link setup, `install_skill.py skill` publishes a SAFE skill

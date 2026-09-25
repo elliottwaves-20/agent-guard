@@ -88,7 +88,10 @@ class ScanBoundaryTests(unittest.TestCase):
              patch.object(scan_mcp, 'CISCO_LLM_KEY', 'runtime-test-secret'), \
              patch.object(scan_mcp, 'CISCO_LLM_MODEL', 'test-model'), \
              patch.object(scan_mcp, 'run_cisco', return_value=0) as scan, \
+             patch.object(scan_mcp._egress.Capture, 'start') as capture, \
+             patch.object(scan_mcp._egress, 'verdict', return_value=0), \
              patch.object(scan_mcp.subprocess, 'run') as cleanup:
+            capture.return_value.name = 'agent-guard-net-test'
             self.assertEqual(scan_mcp.run_sandbox(['python', '-c', 'print(1)']), 0)
             argv = scan.call_args.args[0]
             self.assertEqual(argv[0], 'mcp-scanner')

@@ -18,7 +18,10 @@ This wrapper enforces the safe order:
     throwaway Docker container with no host filesystem access, so the server can
     be started for runtime tool/prompt analysis without touching your machine.
     This is the one thing a static scan cannot do: see MCP tools that are only
-    registered at runtime. Powered by cisco-ai-mcp-scanner.
+    registered at runtime. Powered by cisco-ai-mcp-scanner. The target's
+    network traffic is captured: besides the PyPI/npm registries (and hosts
+    named with --allow-host) every DNS lookup or connection blocks the
+    verdict. --no-network runs the target with no network at all.
 
 LLM analysis is optional. Stage 1 uses SkillSpector's provider config
 (SKILLSPECTOR_*; by default a coding-agent CLI such as claude_cli, no API key),
@@ -33,12 +36,14 @@ Usage:
   python scan_mcp.py remote <url>                     # scan a running remote MCP
   python scan_mcp.py virustotal <path>                # hash reputation check
   python scan_mcp.py pypi <pkg> --sandbox -- uvx <pkg>   # Stage 2: stdio in Docker
+  python scan_mcp.py pypi <pkg> --sandbox --allow-host api.example.com -- uvx <pkg>
 
 After a SAFE verdict, install with:
   python install_skill.py mcp --name <n> --command uvx --arg <pkg> [...]
 """
 
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -53,6 +58,7 @@ import zipfile
 import uuid
 from pathlib import Path
 
+import _egress
 import _llm_profile
 from _skillspector import (
     SCAN_TIMEOUT,
@@ -171,6 +177,17 @@ def cisco_env() -> dict:
 
 
 DOCKER_IMAGE = "agent-guard-mcp-sandbox"
+# The target container only needs launchers (uv/uvx, node/npx, git). The Cisco
+# analyzer runs on the host, so it is not installed here. The image is tagged
+# by the hash of this text, so an edit here always builds a fresh image.
+SANDBOX_DOCKERFILE = (
+    "FROM python:3.12-slim\n"
+    "RUN apt-get update && apt-get install -y --no-install-recommends "
+    "git nodejs npm curl ca-certificates && rm -rf /var/lib/apt/lists/*\n"
+    "RUN pip install --no-cache-dir uv\n"
+    "RUN useradd -m -u 1000 scanner\n"
+    "USER scanner\n"
+)
 
 # How long the scanner waits for a stdio MCP to start. The default (60s) is too
 # short for servers whose first `uvx`/`npx` launch must download heavy deps
@@ -417,12 +434,23 @@ def run_virustotal(path: Path, max_files: int = VT_MAX_FILES) -> int:
     return virustotal_verdict(report)
 
 
-def run_sandbox(command: list) -> int:
+def sandbox_allow_list(allow_hosts=()) -> set:
+    """Registries + AGENT_GUARD_SANDBOX_ALLOW (comma list) + --allow-host."""
+    extra = [h for h in os.environ.get("AGENT_GUARD_SANDBOX_ALLOW", "").split(",") if h.strip()]
+    try:
+        return _egress.parse_allow([*_egress.DEFAULT_ALLOW, *extra, *allow_hosts])
+    except ValueError as exc:
+        die(str(exc))
+
+
+def run_sandbox(command: list, *, allow_hosts=(), network: bool = True) -> int:
     """Keep the trusted Cisco analyzer on the host; only the target runs in Docker.
 
     Scanner API credentials never enter the target container or Docker argv.
-    The target has no host bind mounts. Network remains enabled for package
-    downloads and server APIs; this sandbox does not prevent network egress.
+    The target has no host bind mounts. By default it shares the network
+    namespace of a capture container: it can reach the package registries it
+    needs to start, and every other DNS lookup or connection is reported and
+    blocks the verdict (see _egress). network=False runs it with no network.
     """
     need_mcp_scanner()
     if not command:
@@ -432,53 +460,81 @@ def run_sandbox(command: list) -> int:
     problem = cisco_llm_problem()
     if problem:
         die(f"sandbox scan needs a Cisco runtime LLM: {problem}")
-    build_sandbox_image()
+    allow = sandbox_allow_list(allow_hosts) if network else set()
+    image = build_sandbox_image()
+
+    capture = None
+    if network:
+        try:
+            capture = _egress.Capture.start()
+        except (_egress.CaptureError, OSError, subprocess.TimeoutExpired) as exc:
+            print("\n" + "=" * 60)
+            print(f"[BLOCK] NO VERDICT -- network capture could not start ({exc}). "
+                  "Do NOT install. Fix Docker or re-run with --no-network for a "
+                  "command that needs no downloads.")
+            return 2
+        net = f"container:{capture.name}"
+        print(f"  network: capture on, allowed: {', '.join(sorted(f'{h}:{p}' for h, p in allow))}")
+    else:
+        net = "none"
+        print("  network: none (--no-network)")
+
     container = "agent-guard-scan-" + uuid.uuid4().hex
     docker = [
         "run", "--rm", "-i", "--name", container,
-        "--network", "bridge", "--read-only", "--tmpfs", "/tmp:exec",
+        "--network", net, "--read-only", "--tmpfs", "/tmp:exec",
         "--user", "1000:1000", "--security-opt", "no-new-privileges",
         "--cap-drop", "ALL", "--pids-limit", "256",
         "-e", "HOME=/tmp", "-e", "UV_CACHE_DIR=/tmp/uvcache",
-        DOCKER_IMAGE, *command,
+        # Launchers must not reach for hosts outside the allow list on their
+        # own: uv would fetch a Python build from GitHub, npm checks for updates.
+        "-e", "UV_PYTHON_DOWNLOADS=never",
+        "-e", "NPM_CONFIG_UPDATE_NOTIFIER=false", "-e", "NO_UPDATE_NOTIFIER=1",
+        image, *command,
     ]
     env = cisco_env()
     env["MCP_SCANNER_STDIO_TIMEOUT"] = str(STDIO_TIMEOUT)
     scan = [*cisco_command(env), "--format", "summary", "--analyzers", "yara,llm",
             "stdio", "--stdio-command", "docker"]
     scan.extend(f"--stdio-arg={arg}" for arg in docker)
+    finished = False
     try:
-        return run_cisco(scan,
+        rc = run_cisco(scan,
             "Stage 2: host analyzer with isolated Docker target (no scanner credentials in target)",
             env=env)
+        finished = True
     finally:
         # A timed-out analyzer may leave its child alive. Remove only this
         # invocation's uniquely named container, including on failed handshakes.
         subprocess.run(["docker", "rm", "--force", container],
                        capture_output=True, text=True, timeout=30)
+        if capture is not None and not finished:
+            capture.remove()
+    if capture is not None:
+        rc = max(rc, _egress.verdict(capture.finish(allow)))
+    return rc
 
-def build_sandbox_image():
-    have = subprocess.run(["docker", "image", "inspect", DOCKER_IMAGE],
+
+def sandbox_image() -> str:
+    digest = hashlib.sha256(SANDBOX_DOCKERFILE.encode("utf-8")).hexdigest()[:12]
+    return f"{DOCKER_IMAGE}:{digest}"
+
+
+def build_sandbox_image() -> str:
+    tag = sandbox_image()
+    have = subprocess.run(["docker", "image", "inspect", tag],
                           capture_output=True, text=True)
     if have.returncode == 0:
-        return
+        return tag
     print("  building Docker sandbox image (one-time)...")
-    # Install system-wide (/usr/local/bin) so the non-root scanner user can run
-    # mcp-scanner; uv/uvx ship along to launch the target MCP. HOME is moved to
-    # the tmpfs at runtime because the container root is read-only.
-    dockerfile = (
-        "FROM python:3.12-slim\n"
-        "RUN apt-get update && apt-get install -y --no-install-recommends "
-        "git nodejs npm curl ca-certificates && rm -rf /var/lib/apt/lists/*\n"
-        "RUN pip install --no-cache-dir uv cisco-ai-mcp-scanner\n"
-        "RUN useradd -m -u 1000 scanner\n"
-        "USER scanner\n"
-    )
+    # uv/uvx and node/npx launch the target MCP. HOME is moved to the tmpfs at
+    # runtime because the container root is read-only.
     with tempfile.TemporaryDirectory() as d:
-        (Path(d) / "Dockerfile").write_text(dockerfile, encoding="utf-8")
-        r = subprocess.run(["docker", "build", "-t", DOCKER_IMAGE, d])
+        (Path(d) / "Dockerfile").write_text(SANDBOX_DOCKERFILE, encoding="utf-8")
+        r = subprocess.run(["docker", "build", "-t", tag, d])
         if r.returncode != 0:
             die("Docker sandbox image build failed.")
+    return tag
 
 
 def _shquote(s: str) -> str:
@@ -587,6 +643,16 @@ def _split_launch_command(argv: list) -> tuple:
     return argv, []
 
 
+def _add_network_options(sp):
+    sp.add_argument("--allow-host", action="append", default=[], metavar="HOST[:PORT]",
+                    help="sandbox: also allow this destination (default port 443; "
+                         "PyPI and npm registries are always allowed). Repeatable; "
+                         "AGENT_GUARD_SANDBOX_ALLOW=h1,h2 adds more")
+    sp.add_argument("--no-network", action="store_true",
+                    help="sandbox: run the target without any network "
+                         "(only for commands that need no downloads)")
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Scan an MCP server for malicious code before installing it.")
@@ -601,6 +667,7 @@ def main():
         sp.add_argument("command", nargs="*",
                         help="after `--`: the launch command for the sandbox "
                              "scan, e.g. -- uvx package-name")
+        _add_network_options(sp)
 
     sp = sub.add_parser("local", help="scan a local MCP source directory")
     sp.add_argument("path")
@@ -616,6 +683,7 @@ def main():
     sp = sub.add_parser("sandbox", help="Stage 2 only: live stdio scan in Docker")
     sp.add_argument("command", nargs="*",
                     help="launch command, e.g. uvx package (optionally after `--`)")
+    _add_network_options(sp)
 
     argv, launch_command = _split_launch_command(sys.argv[1:])
     args = p.parse_args(argv)
@@ -632,7 +700,8 @@ def main():
                 die("--sandbox needs a launch command after `--`, "
                     "e.g. -- uvx package-name")
             print("\n-- Stage 2: live runtime scan in Docker sandbox --")
-            rc = max(rc, run_sandbox(command))
+            rc = max(rc, run_sandbox(command, allow_hosts=args.allow_host,
+                                     network=not args.no_network))
         sys.exit(rc)
 
     if args.mode == "local":
@@ -645,7 +714,8 @@ def main():
         command = launch_command or args.command
         if not command:
             die("sandbox scan needs a launch command, e.g. sandbox uvx package-name")
-        sys.exit(run_sandbox(command))
+        sys.exit(run_sandbox(command, allow_hosts=args.allow_host,
+                             network=not args.no_network))
 
 
 if __name__ == "__main__":
