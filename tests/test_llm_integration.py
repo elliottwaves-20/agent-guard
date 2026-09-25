@@ -9,10 +9,13 @@ They cost real subscription budget and need a logged-in CLI, so they are gated:
 
     AGENT_GUARD_LLM_INTEGRATION=1 python -m unittest discover -s tests
 
-The provider follows the configured SKILLSPECTOR_PROVIDER / SKILLSPECTOR_MODEL
-so these tests exercise the setup that real scans use; claude_cli with Haiku 4.5
-is only the fallback when nothing is configured. Override either with
-AGENT_GUARD_LLM_INTEGRATION_PROVIDER / AGENT_GUARD_LLM_INTEGRATION_MODEL.
+The live run uses the machine's real setup, because that is what scans use:
+the active `skills` profile of the personal agent-guard config (read even
+though the rest of the suite ignores it), or the profile named by
+AGENT_GUARD_LLM_INTEGRATION_PROFILE. Without a config it follows
+SKILLSPECTOR_PROVIDER / SKILLSPECTOR_MODEL, and claude_cli with Haiku 4.5 is
+only the last fallback. AGENT_GUARD_LLM_INTEGRATION_PROVIDER / _MODEL bypass
+the config entirely.
 """
 import importlib
 import json
@@ -26,18 +29,47 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")  # never read this machine's personal config
 ss = importlib.import_module("_skillspector")
+import _llm_profile
+import _user_config
 
-PROVIDER = (os.environ.get("AGENT_GUARD_LLM_INTEGRATION_PROVIDER")
-            or os.environ.get("SKILLSPECTOR_PROVIDER")
-            or "claude_cli")
-MODEL = (os.environ.get("AGENT_GUARD_LLM_INTEGRATION_MODEL")
-         or os.environ.get("SKILLSPECTOR_MODEL")
-         or "claude-haiku-4-5-20251001")
-# Mirror the wrapper: a model from another vendor is dropped rather than passed
-# to the CLI, which would exit 1 on every call. Without this the test fails on a
-# leftover SKILLSPECTOR_MODEL that real scans never send.
-if not ss.model_matches_provider(PROVIDER, MODEL):
-    MODEL = ""
+LEGACY_PROVIDER = "claude_cli"
+LEGACY_MODEL = "claude-haiku-4-5-20251001"
+
+
+def live_selection(env) -> tuple[dict, str]:
+    """Environment overlay for the live run, plus a label naming the choice.
+
+    The overlay only steers the wrapper; provider and model are read back from
+    the wrapper afterwards, so the tests drive exactly what a real scan sends."""
+    clear = {"AGENT_GUARD_STATIC_ONLY": "", "AGENT_GUARD_LLM": ""}
+    provider = env.get("AGENT_GUARD_LLM_INTEGRATION_PROVIDER", "").strip()
+    wanted = env.get("AGENT_GUARD_LLM_INTEGRATION_PROFILE", "").strip()
+    if not provider:
+        search = {k: v for k, v in env.items() if k != "AGENT_GUARD_NO_USER_CONFIG"}
+        path = _user_config.find_config(search)
+        selected = None
+        if path is not None:
+            config = _user_config.load_config(env={"AGENT_GUARD_CONFIG": str(path)})
+            selected = _llm_profile.select_profile(
+                config, "skills", {"AGENT_GUARD_LLM_SKILLS": wanted} if wanted else {})
+        if selected is not None:
+            return ({**clear, "AGENT_GUARD_CONFIG": str(path),
+                     "AGENT_GUARD_LLM_SKILLS": selected[0]}, f"profile {selected[0]}")
+        if wanted:
+            raise _llm_profile.ProfileError(
+                f"AGENT_GUARD_LLM_INTEGRATION_PROFILE={wanted} needs a personal "
+                "agent-guard config that defines it")
+    provider = provider or env.get("SKILLSPECTOR_PROVIDER", "").strip() or LEGACY_PROVIDER
+    model = (env.get("AGENT_GUARD_LLM_INTEGRATION_MODEL", "").strip()
+             or env.get("SKILLSPECTOR_MODEL", "").strip() or LEGACY_MODEL)
+    # Mirror the wrapper: a model from another vendor is dropped rather than
+    # passed to the CLI, which would exit 1 on every call.
+    if not ss.model_matches_provider(provider, model):
+        model = ""
+    return ({**clear, "AGENT_GUARD_CONFIG": "", "AGENT_GUARD_NO_USER_CONFIG": "1",
+             "AGENT_GUARD_LLM_SKILLS": "", "SKILLSPECTOR_PROVIDER": provider,
+             "SKILLSPECTOR_MODEL": model}, f"{provider} {model}".strip())
+
 
 HARMLESS_SKILL = """---
 name: greeting-fixture
@@ -58,11 +90,13 @@ class LiveLLMProviderTests(unittest.TestCase):
     """The configured provider answers a real prompt through SkillSpector's runner."""
 
     def setUp(self):
-        self.env = {"SKILLSPECTOR_PROVIDER": PROVIDER, "SKILLSPECTOR_MODEL": MODEL,
-                    "AGENT_GUARD_STATIC_ONLY": ""}
+        self.env, label = live_selection(os.environ)
         with patch.dict(os.environ, self.env):
             importlib.reload(ss)
-            self.assertTrue(ss.LLM_READY, ss.LLM_REASON)
+            self.assertTrue(ss.LLM_READY, f"{label}: {ss.LLM_REASON}")
+            run_env = ss.skillspector_env()
+        self.provider = run_env["SKILLSPECTOR_PROVIDER"]
+        self.model = run_env.get("SKILLSPECTOR_MODEL", "")
 
     def tearDown(self):
         importlib.reload(ss)
@@ -79,7 +113,7 @@ class LiveLLMProviderTests(unittest.TestCase):
         """
         python = ss.skillspector_python()
         self.assertIsNotNone(python, "SkillSpector tool environment not found")
-        binary = ss.CLI_PROVIDERS.get(PROVIDER)
+        binary = ss.CLI_PROVIDERS.get(self.provider)
         if binary is not None:
             probe = (
                 "import json, sys\n"
@@ -88,7 +122,7 @@ class LiveLLMProviderTests(unittest.TestCase):
                 "if not ok:\n"
                 "    print(json.dumps({'available': False, 'reason': reason})); sys.exit(0)\n"
                 f"text = _agent_cli.run_agent_cli({binary!r}, 'Reply with exactly: OK',\n"
-                f"                                model={MODEL!r}, timeout=180)\n"
+                f"                                model={self.model!r}, timeout=180)\n"
                 "print(json.dumps({'available': True, 'text': text.strip()}))\n"
             )
         else:
@@ -98,7 +132,7 @@ class LiveLLMProviderTests(unittest.TestCase):
                 "available, reason = llm_utils.is_llm_available()\n"
                 "if not available:\n"
                 "    print(json.dumps({'available': False, 'reason': reason})); sys.exit(0)\n"
-                f"model = llm_utils.get_chat_model({MODEL!r}, timeout=180)\n"
+                f"model = llm_utils.get_chat_model({self.model!r}, timeout=180)\n"
                 "answer = model.invoke('Reply with exactly: OK')\n"
                 "text = getattr(answer, 'content', answer)\n"
                 "print(json.dumps({'available': True, 'text': str(text).strip()}))\n"
@@ -133,6 +167,82 @@ class LiveLLMProviderTests(unittest.TestCase):
             self.assertGreater(attempted, 0, "no LLM call was made at all")
             self.assertEqual(meta.get("llm_calls_succeeded"), attempted, meta)
             self.assertEqual(ss.llm_run_incomplete(data, expected=True), "")
+
+
+class LiveSelectionTests(unittest.TestCase):
+    """Which setup the live tests drive -- checked without any LLM call."""
+
+    CONFIG = """
+[llm.use]
+skills = "luna"
+
+[llm.profiles.luna]
+kind = "cli"
+cli = "codex"
+model = "gpt-6-luna"
+
+[llm.profiles.haiku]
+kind = "cli"
+cli = "claude"
+model = "claude-haiku-4-5-20251001"
+"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.config = Path(self.tmp.name) / "config.toml"
+        self.config.write_text(self.CONFIG, encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_active_skills_profile_wins_even_in_an_isolated_suite(self):
+        env = {"AGENT_GUARD_CONFIG": str(self.config), "AGENT_GUARD_NO_USER_CONFIG": "1",
+               "SKILLSPECTOR_PROVIDER": "claude_cli"}
+        overlay, label = live_selection(env)
+        self.assertEqual(overlay["AGENT_GUARD_CONFIG"], str(self.config))
+        self.assertEqual(overlay["AGENT_GUARD_LLM_SKILLS"], "luna")
+        self.assertEqual(overlay["AGENT_GUARD_STATIC_ONLY"], "")
+        self.assertEqual(label, "profile luna")
+
+    def test_profile_can_be_chosen_for_the_live_run(self):
+        env = {"AGENT_GUARD_CONFIG": str(self.config),
+               "AGENT_GUARD_LLM_INTEGRATION_PROFILE": "haiku"}
+        overlay, label = live_selection(env)
+        self.assertEqual(overlay["AGENT_GUARD_LLM_SKILLS"], "haiku")
+
+    def test_unknown_or_unconfigured_profile_is_an_error(self):
+        with self.assertRaises(_llm_profile.ProfileError):
+            live_selection({"AGENT_GUARD_CONFIG": str(self.config),
+                            "AGENT_GUARD_LLM_INTEGRATION_PROFILE": "nope"})
+        with patch.object(_user_config, "find_config", return_value=None), \
+             self.assertRaises(_llm_profile.ProfileError):
+            live_selection({"AGENT_GUARD_LLM_INTEGRATION_PROFILE": "haiku"})
+
+    def test_explicit_provider_bypasses_the_config(self):
+        env = {"AGENT_GUARD_CONFIG": str(self.config),
+               "AGENT_GUARD_LLM_INTEGRATION_PROVIDER": "codex_cli",
+               "AGENT_GUARD_LLM_INTEGRATION_MODEL": "gpt-6-luna"}
+        overlay, _ = live_selection(env)
+        self.assertEqual(overlay["AGENT_GUARD_NO_USER_CONFIG"], "1")
+        self.assertEqual(overlay["AGENT_GUARD_CONFIG"], "")
+        self.assertEqual(overlay["SKILLSPECTOR_PROVIDER"], "codex_cli")
+        self.assertEqual(overlay["SKILLSPECTOR_MODEL"], "gpt-6-luna")
+
+    def test_without_config_the_legacy_fallback_applies(self):
+        with patch.object(_user_config, "find_config", return_value=None):
+            overlay, _ = live_selection({})
+        self.assertEqual(overlay["SKILLSPECTOR_PROVIDER"], LEGACY_PROVIDER)
+        self.assertEqual(overlay["SKILLSPECTOR_MODEL"], LEGACY_MODEL)
+
+    def test_overlay_drives_the_wrapper_to_the_profile(self):
+        overlay, _ = live_selection({"AGENT_GUARD_CONFIG": str(self.config)})
+        try:
+            with patch.dict(os.environ, overlay):
+                importlib.reload(ss)
+                self.assertEqual(ss.LLM_PROFILE[0], "luna")
+                self.assertEqual(ss.PROVIDER, "codex_cli")
+        finally:
+            importlib.reload(ss)
 
 
 if __name__ == "__main__":

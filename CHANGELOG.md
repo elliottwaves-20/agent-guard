@@ -12,6 +12,13 @@
   error. A missing, failing or timed-out sync is a warning: the skill stays
   in the inbox for the next regular sync. An invalid section stops the
   installer (exit 2). Without the section nothing changes.
+- Add `scripts/run_all_tests.py`: runs every test group with the interpreter
+  and gates it needs (installed scanners, SkillSpector's tool Python for the
+  budget contract) and fails on any skip; `--live` adds the real LLM tests.
+- The live LLM tests now drive the active `skills` profile of the personal
+  config (or `AGENT_GUARD_LLM_INTEGRATION_PROFILE`), read provider and model
+  back from the wrapper, and fall back to `SKILLSPECTOR_*` / `claude_cli` only
+  without a config.
 - Add LLM profiles to the user config (`config.example.toml`). `[llm.use]`
   picks a profile per scanner -- `skills` (SkillSpector), `mcp` (Cisco
   runtime check), `campaign` (budgeted scans) -- and a profile describes only
