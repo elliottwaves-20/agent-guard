@@ -3,3 +3,10 @@ __pycache__/
 *.pyc
 *.bak
 MAINTENANCE.md
+
+# Local working and handover notes -- never part of a release
+WORK-IN-PROGRESS-*.md
+SESSION-HANDOFF-*.md
+*-HANDOFF.md
+REPAIR-STATUS.md
+CEREBRAS-TEST-*.md

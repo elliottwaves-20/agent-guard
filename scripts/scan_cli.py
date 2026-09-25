@@ -53,10 +53,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from _skillspector import SCAN_TIMEOUT, die, run_skillspector
+from _skillspector import SCAN_TIMEOUT, die, run_bounded, run_skillspector
 from scan_mcp import http_bytes, http_json, run_virustotal, safe_extract_tar
 
 GUARDDOG_IMAGE = os.environ.get(
@@ -226,7 +227,7 @@ def guarddog_verdict(report: dict) -> int:
               "proof of harmlessness -- heuristics only cover known patterns.")
         return 0
 
-    if errors and not flagged:
+    if errors and not malicious:
         print("[WARN] INCONCLUSIVE -- GuardDog rules errored and no findings "
               "were produced. That is not a clean result. Review manually.")
         return 2
@@ -255,9 +256,7 @@ def run_guarddog(ecosystem: str, spec: str) -> int:
     if cmd[0] == "docker":
         print(f"  via Docker image {GUARDDOG_IMAGE} (first run pulls the image)")
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace",
-                           timeout=SCAN_TIMEOUT)
+        r = run_bounded(cmd, timeout=SCAN_TIMEOUT)
     except subprocess.TimeoutExpired:
         print("\n" + "=" * 60)
         print(f"[BLOCK] NO VERDICT -- GuardDog timed out after {SCAN_TIMEOUT}s. "
@@ -272,7 +271,11 @@ def run_guarddog(ecosystem: str, spec: str) -> int:
         print(f"[BLOCK] NO VERDICT -- GuardDog produced no parsable JSON report "
               f"(exit {r.returncode}). Do NOT install. Re-run the scan.")
         return 2
-    return guarddog_verdict(report)
+    verdict = guarddog_verdict(report)
+    if r.returncode != 0 and verdict == 0:
+        print("[BLOCK] NO VERDICT -- GuardDog exited with an error despite a low-risk report.")
+        return 2
+    return verdict
 
 
 # -- binary (GitHub release / arbitrary download) ------------------------------
@@ -317,9 +320,7 @@ def run_malcontent(path: Path) -> int:
            MALCONTENT_IMAGE,
            "--format=json", "analyze", f"/scan/{path.name}"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace",
-                           timeout=SCAN_TIMEOUT)
+        r = run_bounded(cmd, timeout=SCAN_TIMEOUT)
     except subprocess.TimeoutExpired:
         print("\n" + "=" * 60)
         print(f"[BLOCK] NO VERDICT -- malcontent timed out after {SCAN_TIMEOUT}s.")
@@ -333,7 +334,11 @@ def run_malcontent(path: Path) -> int:
         print(f"[BLOCK] NO VERDICT -- malcontent produced no parsable JSON "
               f"(exit {r.returncode}).")
         return 2
-    return malcontent_verdict(report)
+    result = malcontent_verdict(report)
+    if r.returncode != 0 and result == 0:
+        print("[BLOCK] NO VERDICT -- malcontent exited with an error despite a low-risk report.")
+        return 2
+    return result
 
 
 def run_binary(url: str, deep: bool) -> int:

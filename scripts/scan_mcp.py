@@ -14,7 +14,7 @@ This wrapper enforces the safe order:
     (Tool Poisoning, Tool Misuse, Least Privilege) on top of taint tracking,
     credential-access and exfiltration checks.
 
-  Stage 2 (optional, --sandbox): run the live `mcp-scanner stdio` scan inside a
+  Stage 2 (optional, --sandbox): the host scanner inspects the target inside a
     throwaway Docker container with no host filesystem access, so the server can
     be started for runtime tool/prompt analysis without touching your machine.
     This is the one thing a static scan cannot do: see MCP tools that are only
@@ -50,11 +50,13 @@ import tarfile
 import tempfile
 import urllib.request
 import zipfile
+import uuid
 from pathlib import Path
 
 from _skillspector import (
     SCAN_TIMEOUT,
     die,
+    run_bounded,
     run_skillspector as shared_run_skillspector,
 )
 
@@ -127,10 +129,6 @@ def cisco_env() -> dict:
 
 
 DOCKER_IMAGE = "agent-guard-mcp-sandbox"
-# Persistent Docker volume for the in-container uv cache, so a server's heavy
-# deps (pandas/numpy/...) are downloaded once, not on every sandbox run. Holds
-# only downloaded packages -- no host filesystem is exposed.
-CACHE_VOLUME = "agent-guard-mcp-uvcache"
 
 # How long the scanner waits for a stdio MCP to start. The default (60s) is too
 # short for servers whose first `uvx`/`npx` launch must download heavy deps
@@ -259,9 +257,9 @@ def safe_extract_tar(data: bytes, dest: Path):
             pass  # older Python: manual guard below
         for m in tf.getmembers():
             p = (dest / m.name).resolve()
-            if not str(p).startswith(str(dest.resolve())):
+            if not p.is_relative_to(dest.resolve()):
                 die(f"unsafe path in archive: {m.name}")
-            if m.issym() or m.islnk():
+            if not (m.isfile() or m.isdir()):
                 die(f"archive contains a link ({m.name}); refusing to extract")
         tf.extractall(dest)
 
@@ -270,18 +268,20 @@ def safe_extract_zip(data: bytes, dest: Path):
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         for name in zf.namelist():
             p = (dest / name).resolve()
-            if not str(p).startswith(str(dest.resolve())):
+            if not p.is_relative_to(dest.resolve()):
                 die(f"unsafe path in archive: {name}")
         zf.extractall(dest)
 
 
 # -- source acquisition (NO package code executed) ----------------------------
 
-def fetch_pypi(spec: str, dest: Path) -> Path:
+def fetch_pypi(spec: str, dest: Path) -> str:
     name, _, version = spec.partition("==")
     meta = http_json(f"https://pypi.org/pypi/{name}/json")
     version = version or meta["info"]["version"]
-    files = meta.get("releases", {}).get(version) or meta["urls"]
+    files = meta.get("releases", {}).get(version)
+    if not files:
+        die(f"{name}=={version} has no release files on PyPI; refusing a different version.")
     sdists = [f for f in files if f.get("packagetype") == "sdist"]
     if not sdists:
         die(f"{name}=={version} has no source distribution (sdist) on PyPI -- "
@@ -289,10 +289,10 @@ def fetch_pypi(spec: str, dest: Path) -> Path:
     url = sdists[0]["url"]
     print(f"  fetching sdist: {url}")
     safe_extract_tar(http_bytes(url), dest)
-    return dest
+    return f"{name}=={version}"
 
 
-def fetch_npm(spec: str, dest: Path) -> Path:
+def fetch_npm(spec: str, dest: Path) -> str:
     if spec.startswith("@"):
         scope_name, _, version = spec[1:].partition("@")
         name, version = "@" + scope_name, version
@@ -300,11 +300,12 @@ def fetch_npm(spec: str, dest: Path) -> Path:
         name, _, version = spec.partition("@")
     meta = http_json(f"https://registry.npmjs.org/{name}")
     version = version or meta.get("dist-tags", {}).get("latest")
+    version = meta.get("dist-tags", {}).get(version, version)
     ver = meta["versions"][version]
     url = ver["dist"]["tarball"]
     print(f"  fetching npm tarball: {url}")
     safe_extract_tar(http_bytes(url), dest)
-    return dest
+    return f"{name}@{version}"
 
 
 # -- Stage 1: SkillSpector static source scan ---------------------------------
@@ -322,8 +323,7 @@ def run_cisco(cmd: list, label: str, env: dict = None) -> int:
     """Run an mcp-scanner command with a hard timeout, then judge its output."""
     print(f"  {label}")
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=SCAN_TIMEOUT, env=env)
+        r = run_bounded(cmd, timeout=SCAN_TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
         print("\n" + "=" * 60)
         print(f"[BLOCK] NO VERDICT -- scan timed out after {SCAN_TIMEOUT}s. Do NOT "
@@ -357,13 +357,8 @@ def run_virustotal(path: Path, max_files: int = VT_MAX_FILES) -> int:
     print(f"  VirusTotal hash reputation scan: {path}")
     print("  uploads: disabled unless MCP_SCANNER_VIRUSTOTAL_UPLOAD_FILES=true")
     python = mcpscanner_python()
-    r = subprocess.run(
-        [python, "-c", VT_HELPER, str(path), str(max_files)],
-        capture_output=True,
-        text=True,
-        timeout=SCAN_TIMEOUT,
-        env=dict(os.environ),
-    )
+    r = run_bounded([python, "-c", VT_HELPER, str(path), str(max_files)],
+                    timeout=SCAN_TIMEOUT, env=dict(os.environ))
     if r.stderr:
         print(r.stderr)
     try:
@@ -381,14 +376,15 @@ def run_virustotal(path: Path, max_files: int = VT_MAX_FILES) -> int:
 
 
 def run_sandbox(command: list) -> int:
-    """Stage 2: run the live stdio scan inside a throwaway Docker container.
+    """Keep the trusted Cisco analyzer on the host; only the target runs in Docker.
 
-    The container gets NO host filesystem mount, a non-root user, and a
-    read-only root with tmpfs. Network stays ON because the behavioral
-    analyser needs the LLM API -- so the threat we contain is host-filesystem
-    access (SSH keys, .env, documents), not all egress.
+    Scanner API credentials never enter the target container or Docker argv.
+    The target has no host bind mounts. Network remains enabled for package
+    downloads and server APIs; this sandbox does not prevent network egress.
     """
     need_mcp_scanner()
+    if not command:
+        die("sandbox scan needs a launch command")
     if shutil.which("docker") is None:
         die("--sandbox needs Docker, which was not found on PATH.")
     if not CISCO_LLM_KEY:
@@ -396,89 +392,29 @@ def run_sandbox(command: list) -> int:
             "MCP_SCANNER_LLM_API_KEY + MCP_SCANNER_LLM_MODEL in .env.")
     validate_cisco_llm_config()
     build_sandbox_image()
-    ensure_cache_volume()
-    inner = " ".join(_shquote(c) for c in command)
-    # `mcp-scanner` here is the binary *inside* the container (on its PATH).
-    # --format is a GLOBAL flag and must precede the `stdio` subcommand.
-    # Live (stdio) analysis uses yara (local signatures) + llm (semantic
-    # analysis of the running server's tools/prompts). The behavioral analyzer
-    # is source-only and rejects stdio; api needs Cisco AI Defense access, while
-    # VirusTotal is handled by this wrapper's separate `virustotal` mode.
-    # Both the LLM key and the stdio timeout are passed as ENV VARS, never as
-    # CLI flags: every flag the scanner copies into os.environ inside main()
-    # (--llm-api-key, --stdio-timeout) hits an UnboundLocalError there. The env
-    # vars are read cleanly. STDIO_TIMEOUT raises the 60s default so a fresh
-    # container has time to download a server's deps (pandas/numpy/...) first.
-    scan = ["mcp-scanner", "--format", "summary",
-            "--analyzers", "yara,llm",
-            "stdio", "--stdio-command", command[0]]
-    for a in command[1:]:
-        scan.append(f"--stdio-arg={a}")
-
-    # Pre-fetch the server and its deps BEFORE the scan, in the same container.
-    # A heavy server (pandas/numpy/...) can take minutes to download on its first
-    # `uvx`/`npx` launch -- longer than the scanner's stdio handshake timeout.
-    # Running the launch command once with stdin closed warms the uv cache and
-    # Python imports (the server reads stdin, gets EOF, exits), so the real scan
-    # connects fast. Combined with the persistent cache volume, later runs skip
-    # the download entirely.
-    launch = " ".join(shlex.quote(c) for c in command)
-    scan_str = " ".join(shlex.quote(c) for c in scan)
-    script = (
-        f'echo "[sandbox] pre-fetching server + deps (first run can be slow)..." >&2; '
-        f'timeout {STDIO_TIMEOUT} {launch} </dev/null >/dev/null 2>&1 || true; '
-        f'echo "[sandbox] running live scan..." >&2; '
-        f'{scan_str}'
-    )
+    container = "agent-guard-scan-" + uuid.uuid4().hex
     docker = [
-        "docker", "run", "--rm",
-        "--network", "bridge",            # needed for the LLM API call
-        "--read-only", "--tmpfs", "/tmp:exec",
-        "--user", "1000:1000",
-        "--security-opt", "no-new-privileges",
-        "--pids-limit", "256",
-        # container root is read-only; give uv/uvx and the MCP a writable HOME
-        # on the tmpfs, and a PERSISTENT volume for the uv cache so heavy deps
-        # download once across runs (the volume holds only packages, not host fs)
-        "-v", f"{CACHE_VOLUME}:/uvcache",
-        "-e", "HOME=/tmp",
-        "-e", "UV_CACHE_DIR=/uvcache",
-        "-e", f"MCP_SCANNER_LLM_API_KEY={CISCO_LLM_KEY}",
-        "-e", f"MCP_SCANNER_LLM_MODEL={CISCO_LLM_MODEL}",
-        "-e", f"MCP_SCANNER_STDIO_TIMEOUT={STDIO_TIMEOUT}",
+        "run", "--rm", "-i", "--name", container,
+        "--network", "bridge", "--read-only", "--tmpfs", "/tmp:exec",
+        "--user", "1000:1000", "--security-opt", "no-new-privileges",
+        "--cap-drop", "ALL", "--pids-limit", "256",
+        "-e", "HOME=/tmp", "-e", "UV_CACHE_DIR=/tmp/uvcache",
+        DOCKER_IMAGE, *command,
     ]
-    cisco_key_kind = _llm_key_kind(CISCO_LLM_KEY)
-    if cisco_key_kind == "anthropic":
-        docker += ["-e", f"ANTHROPIC_API_KEY={CISCO_LLM_KEY}"]
-    elif cisco_key_kind == "openai":
-        docker += ["-e", f"OPENAI_API_KEY={CISCO_LLM_KEY}"]
-    if CISCO_LLM_BASE_URL:
-        docker += ["-e", f"MCP_SCANNER_LLM_BASE_URL={CISCO_LLM_BASE_URL}"]
-    if CISCO_LLM_API_VERSION:
-        docker += ["-e", f"MCP_SCANNER_LLM_API_VERSION={CISCO_LLM_API_VERSION}"]
-    docker += [
-        DOCKER_IMAGE,
-        "sh", "-c", script,
-    ]
-    return run_cisco(
-        docker,
-        f"Stage 2: live stdio scan of `{inner}` inside Docker sandbox "
-        "(no host filesystem access)")
-
-
-def ensure_cache_volume():
-    """Create the uv cache volume and hand it to the non-root scanner user.
-
-    Docker volumes are created root-owned, but the container runs as uid 1000,
-    so without this chown uv cannot write the cache (Permission denied)."""
-    subprocess.run(["docker", "volume", "create", CACHE_VOLUME],
-                   capture_output=True, text=True)
-    subprocess.run(
-        ["docker", "run", "--rm", "-v", f"{CACHE_VOLUME}:/uvcache",
-         "--user", "root", "--entrypoint", "chown", DOCKER_IMAGE,
-         "-R", "1000:1000", "/uvcache"],
-        capture_output=True, text=True)
-
+    scan = [MCP_SCANNER, "--format", "summary", "--analyzers", "yara,llm",
+            "stdio", "--stdio-command", "docker"]
+    scan.extend(f"--stdio-arg={arg}" for arg in docker)
+    env = cisco_env()
+    env["MCP_SCANNER_STDIO_TIMEOUT"] = str(STDIO_TIMEOUT)
+    try:
+        return run_cisco(scan,
+            "Stage 2: host analyzer with isolated Docker target (no scanner credentials in target)",
+            env=env)
+    finally:
+        # A timed-out analyzer may leave its child alive. Remove only this
+        # invocation's uniquely named container, including on failed handshakes.
+        subprocess.run(["docker", "rm", "--force", container],
+                       capture_output=True, text=True, timeout=30)
 
 def build_sandbox_image():
     have = subprocess.run(["docker", "image", "inspect", DOCKER_IMAGE],
@@ -543,13 +479,13 @@ def verdict(output: str, code: int) -> int:
         return 2
 
     # Scanner crashed and produced no parsable counts -> no verdict.
-    if code != 0 and unsafe is None:
+    if code != 0 and not (unsafe is not None and unsafe > 0):
         print("[BLOCK] NO VERDICT -- scanner errored. Do NOT install. Re-run the scan.")
         return 2
 
     # Source scan found nothing to analyse (tools defined dynamically, or the
     # analyzer can't see them statically). NOT a clean bill of health.
-    if tools == 0 and not unsafe:
+    if (tools is None or tools <= 0) and not unsafe:
         print("[WARN] INCONCLUSIVE -- the live scan found no analyzable tools. "
               "That is not a safety guarantee; the server may register tools "
               "differently or fail to start. Review manually before installing.")

@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "package": "skills",
+  "package_version": "1.5.26",
+  "shasum": "1fa24b1ae298034ec5153277630a05433a3f42a9",
+  "integrity": "sha512-D5jnWoMPDRQ3fJM3RpQH8SBrAS9tmVlTC7OdOB2tk7D6nORbRnw8RLwjVj81IIGlxwWuBthEgUChM7SOZGvTHQ==",
+  "source": "https://github.com/vercel-labs/skills",
+  "scanner": "guarddog npm scan (ghcr.io/datadog/guarddog:latest)",
+  "reviewed_on": "2026-09-13",
+  "note": "agent-guard runs this CLI to distribute an already-scanned skill into every agent on the machine. GuardDog returns BLOCK on the four findings below; each is accepted with a reason AND neutralised by how the wrapper invokes the CLI (npm_config_ignore_scripts=true, reduced environment without credentials, local path as the source so no network fetch is needed). Any other finding, in this or a later version, stops delegation and the built-in installer takes over.",
+  "findings": [
+    {
+      "rule": "capability-process-hooks",
+      "file": "package/package.json",
+      "match": "\"prepare\": \"husky",
+      "reason": "husky is the package's own git-hook tooling for development. npm runs `prepare` only on publish/pack, on an argument-less local `npm install`, on `npm install <folder>` and for git dependencies -- never for a registry tarball and not under npx. The wrapper additionally sets npm_config_ignore_scripts=true, so no lifecycle script can run at all."
+    },
+    {
+      "rule": "threat-runtime-environment-read",
+      "file": "package/dist/cli.mjs",
+      "match": "process.env.GITHUB_TOKEN",
+      "reason": "Documented feature: the CLI reads a GitHub token to install skills from private repositories. agent-guard passes a local directory, so no token is needed, and the delegated process runs with a reduced environment that contains no token variables."
+    },
+    {
+      "rule": "threat-runtime-environment-read",
+      "file": "package/dist/cli.mjs",
+      "match": "process.env.GH_TOKEN",
+      "reason": "Same private-repository code path as GITHUB_TOKEN, reading the GitHub CLI's variable. Not present in the reduced environment the wrapper passes."
+    },
+    {
+      "rule": "threat-runtime-environment-read",
+      "file": "package/dist/_chunks/libs/@vercel/detect-agent.mjs",
+      "match": "process.env.COPILOT_GITHUB_TOKEN",
+      "reason": "Agent detection: the presence of COPILOT_* variables identifies a GitHub Copilot session. The value is used as a signal, and the variable is not present in the reduced environment the wrapper passes."
+    }
+  ]
+}

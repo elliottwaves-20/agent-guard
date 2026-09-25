@@ -80,6 +80,10 @@ def installed_mcp_servers(selected: list[str] | None = None) -> list[tuple[str, 
         for name, entry in (read_json(install_skill.ANTIGRAVITY_CONFIG)
                             .get("mcpServers", {}) or {}).items():
             servers.append(("antigravity", name, entry))
+    if present.get("gemini-cli"):
+        for name, entry in (read_json(install_skill.GEMINI_CLI_CONFIG)
+                            .get("mcpServers", {}) or {}).items():
+            servers.append(("gemini-cli", name, entry))
     if present.get("codex"):
         for name, entry in read_codex_mcp_servers(install_skill.CODEX_CONFIG).items():
             servers.append(("codex", name, entry))
@@ -92,8 +96,10 @@ def installed_mcp_servers(selected: list[str] | None = None) -> list[tuple[str, 
 
 
 def mcp_source_scan_command(entry: dict) -> list[str] | None:
-    if entry.get("url"):
-        return ["python", "scripts/scan_mcp.py", "remote", str(entry["url"])]
+    # Gemini CLI writes streamable-HTTP servers as "httpUrl" and SSE as "url".
+    remote = entry.get("url") or entry.get("httpUrl")
+    if remote:
+        return ["python", "scripts/scan_mcp.py", "remote", str(remote)]
     cmd = str(entry.get("command", ""))
     args = [str(a) for a in entry.get("args", [])]
     launcher = launcher_name(cmd)

@@ -1,5 +1,108 @@
 # Changelog
 
+## Unreleased
+
+- Pin SkillSpector v2.12.0 to commit `c7958a3268d9498644b22edb75d0f051bbc8cbfc`
+  in both setup scripts. The budget adapter's patch points (chat-model
+  factories, retry constants, `LLMAnalyzerBase` batch hooks) are unchanged
+  upstream; its new provider retry loop is still bounded by
+  `API_CONNECTION_RETRY_DELAYS_SECONDS`, which the adapter empties, so the
+  Cerebras budget keeps sole control over retries. The version bump
+  invalidates cached budget responses by design. Upstream adds detectors
+  (SC10, TP4, AST7/AST9, AE7), so findings and verdicts can change.
+- Delegate skill distribution to the pinned `skills` CLI (vercel-labs/skills 1.5.26). It writes one canonical copy to `~/.agents/skills/<name>` and links every
+  agent it detects -- 80+ of them, maintained upstream -- with an NTFS junction on
+  Windows and a copy fallback. Our own table only ever covered the agents we could
+  inspect, and a wrong path there fails silently: the user gets an installation no
+  agent loads. `--tools` now also accepts any agent name that CLI knows.
+  Running a third-party CLI inside a scanner is gated: the version is pinned (a
+  `skills` on PATH is ignored), the registry `shasum`/`integrity` must match, and
+  GuardDog scans that exact version through our own pipeline. Its BLOCK verdict is
+  accepted only when the blocking findings match
+  `scripts/reviewed/skills-cli-1.5.26.json` exactly -- husky's `prepare` hook and
+  three `process.env` token reads, each with a recorded reason. Both are also
+  neutralised rather than argued away: the CLI runs with
+  `npm_config_ignore_scripts=true` and an environment stripped of credentials.
+  Findings are fingerprinted without line numbers, so a rebuild does not raise a
+  false alarm. Afterwards the canonical copy is verified byte for byte against the
+  scanned tree, and verified paths the CLI treats as "universal" and leaves empty
+  (for example `~/.codex/skills`) are linked from it. Any failed gate falls back to
+  the built-in linker; an installation never fails because of delegation.
+  New: `scripts/verify_skills_cli.py` (re-verify, `--latest`, `--update <version>`),
+  `AGENT_GUARD_SKILLS_CLI`, `AGENT_GUARD_SKILLS_CLI_COPY`,
+  `AGENT_GUARD_SKILLS_CLI_TIMEOUT`.
+
+- Split the installer's single "Antigravity / Gemini" target into two: `antigravity` and `gemini-cli`. Both products live under `~/.gemini/` but share no
+  file. Antigravity -- the desktop App and the `agy` CLI -- reads skills from
+  `~/.gemini/config/skills/` and MCP servers from `~/.gemini/config/mcp_config.json`.
+  The Gemini CLI reads `~/.gemini/skills/` and `~/.gemini/settings.json`. Until now a
+  Gemini CLI user silently received an installation that is never loaded. Remote MCP
+  servers are written to the Gemini CLI as `httpUrl` (streamable HTTP); its `url` key
+  means SSE and would select the wrong transport. Detection now also accepts an agent's
+  CLI on PATH (`agy`, `gemini`), so a machine with only the CLI installed is recognised.
+  `audit_installed.py` reads the Gemini CLI's servers as well.
+
+- Terminate the whole process tree when a scan child exceeds its deadline or
+  the user interrupts the run. `subprocess.run(timeout=...)` kills only the
+  direct child, so an agent CLI behind an npm shim (and any container client
+  it drives) kept running and kept spending the user's provider budget after
+  the wrapper had already given up. All long-running scan children -- the
+  SkillSpector scan, GuardDog, malcontent, the Cisco runtime scan and the
+  VirusTotal helper -- now run through `_skillspector.run_bounded()`.
+- Add live LLM integration tests behind `AGENT_GUARD_LLM_INTEGRATION=1`. Until
+  now every LLM assertion was mocked, so a broken provider path (changed CLI
+  flags, failed authentication, a provider that never answers) could not fail
+  the suite. The new tests drive the configured coding-agent CLI for real and
+  verify the report's own LLM call accounting.
+
+## 0.3.1 - 2026-09-06
+
+- Pin SkillSpector v2.11.2 to commit `69dcdfb74487d361ba4c811d088cfdea2ff3a9dc`
+  in both setup scripts. Use its native workflow deadline configuration and
+  remove the obsolete runtime class patch. Old scanner-version baselines
+  require a fresh review; they are not migrated automatically.
+- Recommend user/process environment variables for credentials and provider
+  settings. Keep `.env` as an optional trusted file fallback; setup and agent
+  instructions no longer require creating it.
+- Fail closed on scanner errors, missing execution/LLM accounting and incomplete
+  inspection. Informational GuardDog capabilities cannot hide failed rules;
+  Cisco runtime scans require successfully analyzed tools.
+- Keep the Cisco analyzer and its API credentials outside the untrusted MCP
+  container. Clean up the per-run container even after analyzer failures.
+  malcontent subprocess errors cannot be overridden by partial low-risk output.
+- Make workspace selection side-effect free for installer dry runs, and
+  resolve `uvx --from` to the provider package when deriving source scans.
+- Stop implicitly loading configuration from working or parent directories.
+  Use the trusted installation config or an explicit `AGENT_GUARD_ENV_FILE`.
+  Redact installer environment values in logs, create Windows junctions
+  without command-shell interpolation, and discard per-target sandbox caches.
+- Use unpredictable private temporary files for JSON configuration updates
+  and backups, preserving file modes. Register credential-bearing Claude Code
+  entries through its user configuration instead of exposing secrets in argv.
+- Remove automatic Playwright/npm provisioning during page scans. Rendered
+  fetching now requires an explicitly configured, trusted installed renderer.
+  Discovered remote MCP endpoints require an explicit runtime opt-in.
+- Require full Git commit pins and preserve resolved PyPI/npm versions in
+  installation offers. Missing PyPI releases cannot fall back to another version.
+- Reject skill path traversal, indirect source entries, existing destinations
+  with different content, mismatched links and escaping Git subdirectories.
+  Archive containment checks use path components, including on older Python.
+- Clarify the explicit trust decision when bootstrapping the scanner toolchain.
+- Add explicit `scan_skill.py --baseline` support for reviewer-owned
+  SkillSpector v2 JSON fingerprints. Wildcard rules, legacy fingerprints and
+  mismatched scanner versions fail closed. Target-shipped baselines are never
+  selected automatically. Accepted findings and reasons are printed alongside
+  the verdict; the existing risk and HIGH/CRITICAL gates remain unchanged.
+- Add `scan_skill.py --report` to retain JSON evidence without overwriting
+  existing files. Incomplete LLM runs remain NO VERDICT even with a baseline.
+- Document the self-scan review policy: SkillSpector 2.11.0 preserves static
+  findings the LLM does not confirm; configuration and installer capabilities
+  can therefore block agent-guard itself. A reviewed pass is distinct from a
+  raw clean scan.
+- Add regression coverage for baseline trust boundaries, including an opt-in
+  test against the installed scanner that rejects changed source and new
+  malicious content.
+
 ## 0.3.0 - 2026-09-04
 
 Scanner upgrades plus a rework of how the wrapper drives SkillSpector's LLM

@@ -12,7 +12,7 @@ set -euo pipefail
 # commit behind a release tag (tags can move, commits cannot) so "scan = install"
 # applies to the scanner itself. Bump deliberately; keep the tag comment in sync.
 SKILLSPECTOR_REPO="https://github.com/NVIDIA/SkillSpector"
-SKILLSPECTOR_SHA="b7241089d7ec15d8b30df980dacbb428214732b9"   # v2.11.0
+SKILLSPECTOR_SHA="c7958a3268d9498644b22edb75d0f051bbc8cbfc"   # v2.12.0
 
 echo "Checking prerequisites..."
 
@@ -92,7 +92,7 @@ fi
 
 echo ""
 echo "[OK] Setup complete."
-echo "     Next: cp .env.example .env"
+echo "     Next: configure user/process environment variables (README). .env is optional."
 echo "           SkillSpector LLM: defaults to your coding-agent CLI (claude/codex/gemini login, no API key);"
 echo "           hosted providers (anthropic/openai/nv_build/...) work with a key. MCP_SCANNER_LLM_* for Cisco runtime scans."
 echo "           Optional: set VIRUSTOTAL_API_KEY for binary/archive malware reputation checks"

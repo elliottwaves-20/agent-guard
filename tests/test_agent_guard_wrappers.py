@@ -183,46 +183,84 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             self._write_report(report)
             self.assertEqual(module.verdict_skillspector(report, 0), 0)
 
-    def test_boot_widens_skillspector_workflow_budget(self):
-        import dataclasses
-        import types
+    UNRESOLVED_REFERENCE = {
+        "outcome": "partial", "phase": "reference_resolution",
+        "reason_code": "reference_unresolved", "fatal": False,
+        "message": "A local path-like reference could not be resolved unambiguously.",
+        "path": "SKILL.md", "start_line": 5, "end_line": 5,
+    }
 
-        boot = importlib.import_module("_skillspector_boot")
+    def test_verdict_is_given_when_only_references_are_unresolved(self):
+        """Upstream does not fail a scan for this, and neither do we by default.
 
-        @dataclasses.dataclass(slots=True)
-        class Budget:
-            max_seconds: float = 60.0
-            max_bytes: int = 1
-            started_at: float | None = None
+        SkillSpector's reference resolver reports prose such as "X/100" or
+        "blog/article" as a path-like reference, so every file can be inspected
+        and is_complete still comes back false. Refusing a verdict here would
+        refuse one for almost every documented skill.
+        """
+        module = importlib.import_module("_skillspector")
+        with tempfile.TemporaryDirectory() as d:
+            report = Path(d) / "report.json"
+            self._write_report(report, analysis_completeness={
+                "is_complete": False, "status": "partial",
+                "coverage_percent": 100.0,
+                "entirely_uninspected_files": 0, "partially_inspected_files": 0,
+                "ledger_exceptions": [self.UNRESOLVED_REFERENCE]})
+            self.assertEqual(module.verdict_skillspector(report, 0), 0)
 
-        fake_state = types.ModuleType("skillspector.state")
-        fake_state.MAX_WORKFLOW_SECONDS = 60.0
-        fake_state.WorkflowResourceBudget = Budget
-        fake_pkg = types.ModuleType("skillspector")
-        fake_pkg.state = fake_state
-        saved = {k: sys.modules.get(k) for k in ("skillspector", "skillspector.state")}
+    def test_unresolved_references_still_block_when_completeness_demanded(self):
+        module = importlib.import_module("_skillspector")
+        original = module.FAIL_ON_INCOMPLETE
         try:
-            sys.modules["skillspector"] = fake_pkg
-            sys.modules["skillspector.state"] = fake_state
-
-            self.assertFalse(boot.apply_workflow_budget(0))
-            self.assertFalse(boot.apply_workflow_budget(30))   # upstream already >= 30
-            self.assertIs(fake_state.WorkflowResourceBudget, Budget)
-
-            self.assertTrue(boot.apply_workflow_budget(540))
-            budget = fake_state.WorkflowResourceBudget()
-            self.assertEqual(budget.max_seconds, 540)
-            self.assertEqual(budget.max_bytes, 1)
-            self.assertIsInstance(budget, Budget)
-            explicit = fake_state.WorkflowResourceBudget(max_seconds=5)
-            self.assertEqual(explicit.max_seconds, 5)
-            self.assertEqual(fake_state.MAX_WORKFLOW_SECONDS, 540)
+            module.FAIL_ON_INCOMPLETE = True
+            with tempfile.TemporaryDirectory() as d:
+                report = Path(d) / "report.json"
+                self._write_report(report, analysis_completeness={
+                    "is_complete": False, "status": "partial",
+                    "coverage_percent": 100.0,
+                    "entirely_uninspected_files": 0, "partially_inspected_files": 0,
+                    "ledger_exceptions": [self.UNRESOLVED_REFERENCE]})
+                self.assertEqual(module.verdict_skillspector(report, 0), 2)
         finally:
-            for k, v in saved.items():
-                if v is None:
-                    sys.modules.pop(k, None)
-                else:
-                    sys.modules[k] = v
+            module.FAIL_ON_INCOMPLETE = original
+
+    def test_uninspected_file_blocks_even_without_fatal_exceptions(self):
+        """The relaxation is about references only -- a file nobody read still blocks."""
+        module = importlib.import_module("_skillspector")
+        with tempfile.TemporaryDirectory() as d:
+            report = Path(d) / "report.json"
+            self._write_report(report, analysis_completeness={
+                "is_complete": False, "status": "partial",
+                "coverage_percent": 50.0,
+                "entirely_uninspected_files": 1, "partially_inspected_files": 0,
+                "ledger_exceptions": [self.UNRESOLVED_REFERENCE]})
+            self.assertEqual(module.verdict_skillspector(report, 0), 2)
+
+    def test_fatal_ledger_exception_blocks_despite_full_coverage(self):
+        module = importlib.import_module("_skillspector")
+        fatal = dict(self.UNRESOLVED_REFERENCE, fatal=True)
+        with tempfile.TemporaryDirectory() as d:
+            report = Path(d) / "report.json"
+            self._write_report(report, analysis_completeness={
+                "is_complete": False, "status": "partial",
+                "coverage_percent": 100.0,
+                "entirely_uninspected_files": 0, "partially_inspected_files": 0,
+                "ledger_exceptions": [fatal]})
+            self.assertEqual(module.verdict_skillspector(report, 0), 2)
+
+    def test_non_reference_incompleteness_still_blocks(self):
+        """Only reference_resolution is treated as noise; other phases are not."""
+        module = importlib.import_module("_skillspector")
+        other = dict(self.UNRESOLVED_REFERENCE, phase="static_analysis",
+                     reason_code="analyzer_error")
+        with tempfile.TemporaryDirectory() as d:
+            report = Path(d) / "report.json"
+            self._write_report(report, analysis_completeness={
+                "is_complete": False, "status": "partial",
+                "coverage_percent": 100.0,
+                "entirely_uninspected_files": 0, "partially_inspected_files": 0,
+                "ledger_exceptions": [other]})
+            self.assertEqual(module.verdict_skillspector(report, 0), 2)
 
     def test_scan_env_carries_workflow_budget_and_boot_command(self):
         module = importlib.import_module("_skillspector")
@@ -436,7 +474,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             stderr = ""
 
         original_python = scan_mcp.mcpscanner_python
-        original_run = scan_mcp.subprocess.run
+        original_run = scan_mcp.run_bounded
         try:
             os.environ.clear()
             os.environ.update({"VIRUSTOTAL_API_KEY": "vt-test"})
@@ -446,12 +484,12 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 calls.append(cmd)
                 return Result()
 
-            scan_mcp.subprocess.run = fake_run
+            scan_mcp.run_bounded = fake_run
 
             self.assertEqual(scan_mcp.run_virustotal(ROOT / "README.md", max_files=1), 0)
         finally:
             scan_mcp.mcpscanner_python = original_python
-            scan_mcp.subprocess.run = original_run
+            scan_mcp.run_bounded = original_run
             os.environ.clear()
             os.environ.update(old_env)
 
@@ -478,7 +516,38 @@ class SkillSpectorWrapperTests(unittest.TestCase):
 
         self.assertIn("installer option appears after --args", str(cm.exception))
 
-    def test_skillspector_retries_transient_llm_rate_limit(self):
+    def test_cli_provider_serializes_llm_fan_out_by_default(self):
+        """A CLI provider drives one interactive login through subprocesses.
+
+        SkillSpector's own default is a 10-wide fan-out, which is right for an API
+        quota. Here the burst is the wrapper's own doing, so it serializes unless
+        the user picked a value.
+        """
+        _provider, ready, reason, env = self._resolve(
+            {"SKILLSPECTOR_PROVIDER": "claude_cli"}, on_path=("claude",))
+        self.assertTrue(ready, reason)
+        self.assertEqual(env.get("SKILLSPECTOR_MAX_LLM_CONCURRENCY"), "1")
+
+    def test_explicit_fan_out_is_never_overridden(self):
+        _provider, ready, reason, env = self._resolve(
+            {"SKILLSPECTOR_PROVIDER": "claude_cli",
+             "SKILLSPECTOR_MAX_LLM_CONCURRENCY": "4"}, on_path=("claude",))
+        self.assertTrue(ready, reason)
+        self.assertEqual(env.get("SKILLSPECTOR_MAX_LLM_CONCURRENCY"), "4")
+
+    def test_key_provider_keeps_upstream_fan_out_default(self):
+        """Regression: do not impose our own limit where upstream's fits.
+
+        A key provider talks HTTP against a normal API quota, which is exactly what
+        SkillSpector's default of 10 is designed for. Setting the variable here
+        would override an upstream default we have no reason to second-guess.
+        """
+        _provider, ready, reason, env = self._resolve(
+            {"SKILLSPECTOR_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "k"})
+        self.assertTrue(ready, reason)
+        self.assertNotIn("SKILLSPECTOR_MAX_LLM_CONCURRENCY", env)
+
+    def test_skillspector_does_not_repeat_whole_scan_on_provider_quota(self):
         module = importlib.import_module("_skillspector")
         calls = []
 
@@ -489,7 +558,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 self.stderr = stderr
 
         original_state = (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
-                          module.SKILLSPECTOR, module.subprocess.run,
+                          module.SKILLSPECTOR, module.run_bounded,
                           module.time.sleep, module.LLM_RETRIES)
         try:
             module.PROVIDER = "openai"
@@ -504,29 +573,30 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 calls.append(cmd)
                 self.assertNotIn("--no-llm", cmd)
                 report_path = Path(cmd[cmd.index("--output") + 1])
-                if len(calls) == 1:
-                    # Degraded run: SkillSpector still writes a report, but the
-                    # metadata says the LLM layer did not complete.
-                    self._write_report(report_path, metadata={
-                        "llm_available": False,
-                        "llm_error": "rate_limit_exceeded"})
-                    return Result("Error code: 429 rate_limit_exceeded")
-                self._write_report(report_path)
-                return Result()
+                # Degraded run: SkillSpector still writes a report, but the
+                # metadata says the LLM layer did not complete.
+                self._write_report(report_path, metadata={
+                    "llm_available": False,
+                    "llm_error": "rate_limit_exceeded"})
+                return Result("Error code: 429 rate_limit_exceeded")
 
-            module.subprocess.run = fake_run
+            module.run_bounded = fake_run
             with tempfile.TemporaryDirectory() as src_dir:
                 src = Path(src_dir)
                 (src / "SKILL.md").write_text("---\nname: retry\n---\n",
                                                encoding="utf-8")
 
-                self.assertEqual(module.run_skillspector(src), 0)
+                # Fails closed on the partial run instead of asking the provider
+                # for more of exactly what it just refused.
+                self.assertEqual(module.run_skillspector(src), 2)
         finally:
             (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
-             module.SKILLSPECTOR, module.subprocess.run,
+             module.SKILLSPECTOR, module.run_bounded,
              module.time.sleep, module.LLM_RETRIES) = original_state
 
-        self.assertEqual(len(calls), 2)
+        # A quota refusal must never trigger a whole-scan repeat: the repeat
+        # re-sends every prompt, including those that already succeeded.
+        self.assertEqual(len(calls), 1)
 
     def test_skillspector_blocks_on_partial_llm_run_after_retries(self):
         module = importlib.import_module("_skillspector")
@@ -538,7 +608,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             stderr = ""
 
         original_state = (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
-                          module.SKILLSPECTOR, module.subprocess.run,
+                          module.SKILLSPECTOR, module.run_bounded,
                           module.time.sleep, module.LLM_RETRIES)
         try:
             module.PROVIDER = "claude_cli"
@@ -556,7 +626,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                     "llm_calls_attempted": 4, "llm_calls_succeeded": 3})
                 return Result()
 
-            module.subprocess.run = fake_run
+            module.run_bounded = fake_run
             with tempfile.TemporaryDirectory() as src_dir:
                 src = Path(src_dir)
                 (src / "SKILL.md").write_text("---\nname: partial\n---\n",
@@ -564,7 +634,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 self.assertEqual(module.run_skillspector(src), 2)
         finally:
             (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
-             module.SKILLSPECTOR, module.subprocess.run,
+             module.SKILLSPECTOR, module.run_bounded,
              module.time.sleep, module.LLM_RETRIES) = original_state
 
         self.assertEqual(len(calls), 2)
@@ -579,7 +649,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             stderr = ""
 
         original_state = (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
-                          module.SKILLSPECTOR, module.subprocess.run)
+                          module.SKILLSPECTOR, module.run_bounded)
         try:
             module.PROVIDER = ""
             module.LLM_READY = False
@@ -594,7 +664,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                     "llm_requested": False, "llm_available": False})
                 return Result()
 
-            module.subprocess.run = fake_run
+            module.run_bounded = fake_run
             with tempfile.TemporaryDirectory() as src_dir:
                 src = Path(src_dir)
                 (src / "SKILL.md").write_text("---\nname: static\n---\n",
@@ -602,7 +672,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 self.assertEqual(module.run_skillspector(src), 0)
         finally:
             (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
-             module.SKILLSPECTOR, module.subprocess.run) = original_state
+             module.SKILLSPECTOR, module.run_bounded) = original_state
 
         self.assertEqual(len(calls), 1)
         self.assertIn("--no-llm", calls[0])
@@ -909,7 +979,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             self.assertIn("Static page without links",
                           source.source_path.read_text(encoding="utf-8"))
 
-    def test_url_resolver_playwright_falls_back_to_npx_package(self):
+    def test_url_resolver_never_auto_runs_npx(self):
         resolver = importlib.import_module("_url_resolver")
         calls = []
 
@@ -936,15 +1006,15 @@ class SkillSpectorWrapperTests(unittest.TestCase):
 
             self.assertEqual(
                 resolver.fetch_rendered_page("https://market.example/listing"),
-                "Rendered via npx",
+                None,
             )
         finally:
             resolver.shutil.which = original_which
             resolver.subprocess.run = original_run
 
-        self.assertEqual(calls[1][:4], ["npx", "--yes", "--package", "playwright"])
+        self.assertEqual(calls, [])
 
-    def test_url_resolver_playwright_falls_back_to_temporary_npm_package(self):
+    def test_url_resolver_never_auto_installs_npm_packages(self):
         resolver = importlib.import_module("_url_resolver")
         calls = []
 
@@ -975,15 +1045,13 @@ class SkillSpectorWrapperTests(unittest.TestCase):
 
             self.assertEqual(
                 resolver.fetch_rendered_page("https://market.example/listing"),
-                "Rendered via temporary npm",
+                None,
             )
         finally:
             resolver.shutil.which = original_which
             resolver.subprocess.run = original_run
 
-        self.assertEqual(calls[2][0][:4], ["npm", "install", "--prefix", calls[2][0][3]])
-        self.assertEqual(calls[3][0][0], "node")
-        self.assertIn("cwd", calls[3][1])
+        self.assertEqual(calls, [])
 
     def test_url_resolver_uses_external_firecrawl_fetch_command_first(self):
         resolver = importlib.import_module("_url_resolver")
@@ -1102,7 +1170,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             scan_url.run_sandbox = lambda args: calls.append(("sandbox", args)) or 0
 
             self.assertEqual(scan_url.scan_marketplace_candidates(
-                source, sandbox=False, max_candidates=10, dry_run=True
+                source, sandbox=True, max_candidates=10, dry_run=True
             ), 0)
         finally:
             scan_url.scan_candidate_source_url = original_source
@@ -1200,7 +1268,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
 
                 installer.install_mcp_git(
                     "example-mcp",
-                    "git+https://github.com/example/mcp@abc123",
+                    "git+https://github.com/example/mcp@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "example-mcp",
                     dry=True,
                     selected=["codex"],
@@ -1233,7 +1301,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             )
 
             self.assertEqual(scan_url.scan_marketplace_candidates(
-                source, sandbox=False, max_candidates=10, dry_run=True
+                source, sandbox=True, max_candidates=10, dry_run=True
             ), 0)
         finally:
             scan_url.run_remote = original_remote
@@ -1258,7 +1326,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             source = scan_url.ResolvedSource(
                 kind="github",
                 source_path=src,
-                install_hint="https://github.com/example/mcp@abc123",
+                install_hint="https://github.com/example/mcp@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
             original_static = scan_url.run_mcp_static
             original_offer = scan_url.install_mcp_git
@@ -1282,7 +1350,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
 
         self.assertEqual(calls[0][0][:3], (
             "example-mcp",
-            "git+https://github.com/example/mcp@abc123",
+            "git+https://github.com/example/mcp@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "example-mcp",
         ))
         self.assertFalse(calls[0][1]["dry"])
@@ -1307,7 +1375,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 scan_url.scan_catalog = lambda p: 0
                 scan_url.run_remote = lambda url: 0
 
-                self.assertEqual(scan_url.scan_resolved(source, "catalog", dry_run=True), 0)
+                self.assertEqual(scan_url.scan_resolved(source, "catalog", dry_run=True), 2)
             finally:
                 scan_url.scan_catalog = original
                 scan_url.run_remote = original_remote
@@ -1331,14 +1399,14 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             "command": "uvx",
             "args": [
                 "--from",
-                "git+https://github.com/example/mcp@abc123",
+                "git+https://github.com/example/mcp@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "example-mcp",
             ],
         }
 
         self.assertEqual(
             audit.mcp_source_scan_command(entry),
-            ["python", "scripts/scan_url.py", "https://github.com/example/mcp/tree/abc123"],
+            ["python", "scripts/scan_url.py", "https://github.com/example/mcp/tree/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
         )
         self.assertEqual(
             audit.mcp_sandbox_command(entry),
@@ -1349,7 +1417,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 "--",
                 "uvx",
                 "--from",
-                "git+https://github.com/example/mcp@abc123",
+                "git+https://github.com/example/mcp@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "example-mcp",
             ],
         )
@@ -1777,6 +1845,110 @@ class ScanCliRouterTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(calls["scanned"].name, "install.sh")
         self.assertIn("STATIC scan", buf.getvalue())
+
+
+class GeminiTargetSeparationTests(unittest.TestCase):
+    """Antigravity and the Gemini CLI are separate products under ~/.gemini.
+
+    Antigravity (App and `agy` CLI) reads ~/.gemini/config/skills and
+    ~/.gemini/config/mcp_config.json; the Gemini CLI reads ~/.gemini/skills
+    and ~/.gemini/settings.json. Installing into the wrong one produces a
+    skill that is never loaded, without any error message."""
+
+    def setUp(self):
+        self.installer = importlib.import_module("install_skill")
+
+    def test_targets_use_distinct_skill_directories(self):
+        antigravity = self.installer.TOOLS["antigravity"]["skills"]
+        gemini = self.installer.TOOLS["gemini-cli"]["skills"]
+        self.assertEqual(antigravity, self.installer.HOME / ".gemini" / "config" / "skills")
+        self.assertEqual(gemini, self.installer.HOME / ".gemini" / "skills")
+        self.assertNotEqual(antigravity, gemini)
+
+    def test_gemini_cli_is_a_separate_tool_id(self):
+        self.assertIn("gemini-cli", self.installer.TOOLS)
+        self.assertEqual(self.installer.TOOLS["antigravity"]["label"], "Antigravity")
+        self.assertEqual(self.installer.TOOLS["gemini-cli"]["label"], "Gemini CLI")
+
+    def test_detection_paths_do_not_overlap(self):
+        antigravity = set(self.installer.TOOLS["antigravity"]["detect"])
+        gemini = set(self.installer.TOOLS["gemini-cli"]["detect"])
+        self.assertEqual(antigravity & gemini, set())
+        self.assertIn(self.installer.GEMINI_CLI_CONFIG, gemini)
+        self.assertIn(self.installer.ANTIGRAVITY_CONFIG, antigravity)
+
+    def test_tool_present_falls_back_to_binary_on_path(self):
+        installer = self.installer
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "absent"
+            original_tools = installer.TOOLS
+            original_which = installer.shutil.which
+            try:
+                installer.TOOLS = dict(original_tools)
+                installer.TOOLS["gemini-cli"] = dict(original_tools["gemini-cli"])
+                installer.TOOLS["gemini-cli"]["detect"] = [missing]
+                installer.shutil.which = lambda name: "/usr/bin/gemini" if name == "gemini" else None
+                self.assertTrue(installer.tool_present("gemini-cli"))
+                installer.shutil.which = lambda name: None
+                self.assertFalse(installer.tool_present("gemini-cli"))
+            finally:
+                installer.TOOLS = original_tools
+                installer.shutil.which = original_which
+
+    def test_gemini_cli_entry_maps_remote_url_to_http_url(self):
+        entry = self.installer.gemini_cli_entry({"url": "https://api.example.com/mcp"})
+        self.assertEqual(entry, {"httpUrl": "https://api.example.com/mcp"})
+        self.assertNotIn("url", entry)
+
+    def test_gemini_cli_entry_keeps_stdio_entries_unchanged(self):
+        entry = {"command": "npx", "args": ["-y", "example-mcp"], "env": {"K": "V"}}
+        self.assertEqual(self.installer.gemini_cli_entry(entry), entry)
+
+    def test_install_mcp_writes_gemini_cli_settings(self):
+        installer = self.installer
+        calls = []
+        original_detect = installer.detect_tools
+        original_json = installer.add_to_json_config
+        original_codex = installer.add_to_codex_toml
+        original_claude = installer.add_to_claude_code
+        try:
+            installer.detect_tools = lambda selected=None: {
+                "claude-code": False,
+                "claude-desktop": False,
+                "codex": False,
+                "antigravity": True,
+                "gemini-cli": True,
+                "hermes": False,
+                "openclaw": False,
+            }
+            installer.add_to_json_config = lambda path, name, entry, dry, include_disabled=False: calls.append(
+                (path, name, entry)
+            )
+            installer.add_to_codex_toml = lambda name, entry, dry: None
+            installer.add_to_claude_code = lambda name, entry, dry: None
+
+            installer.install_mcp("remote-api", {"url": "https://api.example.com/mcp"}, dry=True)
+        finally:
+            installer.detect_tools = original_detect
+            installer.add_to_json_config = original_json
+            installer.add_to_codex_toml = original_codex
+            installer.add_to_claude_code = original_claude
+
+        self.assertIn(
+            (installer.ANTIGRAVITY_CONFIG, "remote-api", {"url": "https://api.example.com/mcp"}),
+            calls,
+        )
+        self.assertIn(
+            (installer.GEMINI_CLI_CONFIG, "remote-api", {"httpUrl": "https://api.example.com/mcp"}),
+            calls,
+        )
+
+    def test_audit_reads_gemini_cli_http_url_entries(self):
+        audit = importlib.import_module("audit_installed")
+        self.assertEqual(
+            audit.mcp_source_scan_command({"httpUrl": "https://api.example.com/mcp"}),
+            ["python", "scripts/scan_mcp.py", "remote", "https://api.example.com/mcp"],
+        )
 
 
 if __name__ == "__main__":

@@ -28,22 +28,35 @@ Supported tools (auto-detected):
   - Claude Desktop     (%APPDATA%/Claude/, ~/Library/Application Support/Claude/,
                         or $XDG_CONFIG_HOME|~/.config/Claude/ -- per platform)
   - Codex              (~/.codex/config.toml)
-  - Antigravity/Gemini (~/.gemini/config/mcp_config.json)
+  - Antigravity        (~/.gemini/config/ -- App and `agy` CLI share this root)
+  - Gemini CLI         (~/.gemini/settings.json, skills in ~/.gemini/skills)
   - Hermes             (~/.hermes/skills -- skills only; MCPs via config.yaml)
   - OpenClaw           (~/.openclaw/skills -- skills only; MCPs via its own CLI)
 
 Skills follow the open SKILL.md standard (agentskills.io) -- one scanned skill
 installs into every detected agent at once.
+
+Skill distribution is delegated to the pinned `skills` CLI (vercel-labs/skills)
+when it verifies: it maintains the layout of 80+ agents and owns the canonical
+store `~/.agents/skills`. See _skills_cli.py for the gate in front of it. The
+table above is what this installer configures itself -- MCP registration, and
+the fallback linker when delegation is unavailable.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+
+import _skills_cli
+from _skillspector import run_skillspector
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10: automatic pyproject inference is optional.
@@ -77,9 +90,21 @@ CODEX_DIR    = HOME / ".codex"
 CODEX_CONFIG = CODEX_DIR / "config.toml"
 CODEX_SKILLS = CODEX_DIR / "skills"
 
+# Antigravity: the desktop App and the `agy` CLI share one global root. Both
+# read skills from ~/.gemini/config/skills/<name>/SKILL.md and MCP servers from
+# ~/.gemini/config/mcp_config.json (verified in the agy binary's own docs).
 ANTIGRAVITY_DIR    = HOME / ".gemini" / "config"
 ANTIGRAVITY_CONFIG = ANTIGRAVITY_DIR / "mcp_config.json"
 ANTIGRAVITY_SKILLS = ANTIGRAVITY_DIR / "skills"   # official global skills dir
+ANTIGRAVITY_CLI_DIR = HOME / ".gemini" / "antigravity-cli"
+
+# Gemini CLI is a separate product with separate paths: user skills live in
+# ~/.gemini/skills (alias ~/.agents/skills) and MCP servers in the settings
+# file, not in the Antigravity config directory. Installing into Antigravity's
+# path leaves a Gemini CLI user with a skill that is never loaded.
+GEMINI_CLI_DIR    = HOME / ".gemini"
+GEMINI_CLI_CONFIG = GEMINI_CLI_DIR / "settings.json"
+GEMINI_CLI_SKILLS = GEMINI_CLI_DIR / "skills"
 
 HERMES_DIR    = HOME / ".hermes"
 HERMES_SKILLS = HERMES_DIR / "skills"
@@ -100,19 +125,48 @@ COPY_IGNORE = shutil.ignore_patterns(
 # agents that genuinely have no skills directory.
 
 TOOLS = {
-    "claude-code":    {"label": "Claude Code",          "detect": CLAUDE_CODE_DIR,       "skills": CLAUDE_CODE_SKILLS},
-    "claude-desktop": {"label": "Claude Desktop",       "detect": CLAUDE_DESKTOP_CONFIG, "skills": CLAUDE_CODE_SKILLS},
-    "codex":          {"label": "Codex",                "detect": CODEX_CONFIG,          "skills": CODEX_SKILLS},
-    "antigravity":    {"label": "Antigravity / Gemini", "detect": ANTIGRAVITY_CONFIG,    "skills": ANTIGRAVITY_SKILLS},
-    "hermes":         {"label": "Hermes",               "detect": HERMES_DIR,            "skills": HERMES_SKILLS},
-    "openclaw":       {"label": "OpenClaw",             "detect": OPENCLAW_DIR,          "skills": OPENCLAW_SKILLS},
+    "claude-code":    {"label": "Claude Code",       "detect": [CLAUDE_CODE_DIR],       "skills": CLAUDE_CODE_SKILLS},
+    "claude-desktop": {"label": "Claude Desktop",    "detect": [CLAUDE_DESKTOP_CONFIG], "skills": CLAUDE_CODE_SKILLS},
+    "codex":          {"label": "Codex",             "detect": [CODEX_CONFIG],          "skills": CODEX_SKILLS},
+    "antigravity":    {"label": "Antigravity",       "detect": [ANTIGRAVITY_CONFIG, ANTIGRAVITY_SKILLS, ANTIGRAVITY_CLI_DIR],
+                       "binaries": ["agy"],          "skills": ANTIGRAVITY_SKILLS},
+    "gemini-cli":     {"label": "Gemini CLI",        "detect": [GEMINI_CLI_CONFIG, GEMINI_CLI_SKILLS],
+                       "binaries": ["gemini"],       "skills": GEMINI_CLI_SKILLS},
+    "hermes":         {"label": "Hermes",            "detect": [HERMES_DIR],            "skills": HERMES_SKILLS},
+    "openclaw":       {"label": "OpenClaw",          "detect": [OPENCLAW_DIR],          "skills": OPENCLAW_SKILLS},
 }
 
 
+def tool_present(tid: str) -> bool:
+    """An agent counts as installed when one of its own paths exists or its
+    CLI is on PATH. Antigravity and the Gemini CLI both live under ~/.gemini
+    but share no file, so each is detected only by paths it alone writes."""
+    spec = TOOLS[tid]
+    if any(path.exists() for path in spec["detect"]):
+        return True
+    return any(shutil.which(binary) is not None for binary in spec.get("binaries", ()))
+
+
 def detect_tools(selected: list = None) -> dict:
-    """Return {tool_id: present} for the selected tools (default: all)."""
-    ids = selected or list(TOOLS)
-    return {tid: TOOLS[tid]["detect"].exists() for tid in ids}
+    """Return {tool_id: present} for the selected tools (default: all).
+
+    Only ids this installer configures itself are considered; names meant for
+    the skills CLI are filtered out by split_targets() before they get here."""
+    ids = list(TOOLS) if selected is None else [t for t in selected if t in TOOLS]
+    return {tid: tool_present(tid) for tid in ids}
+
+
+def split_targets(selected: list = None) -> tuple:
+    """Separate our own tool ids from names only the skills CLI knows.
+
+    `--tools cursor windsurf` is valid: the delegated CLI carries 80+ agents,
+    and restricting the user to the handful we configure ourselves would throw
+    that coverage away. Returns (own ids, names for the CLI)."""
+    if selected is None:
+        return None, None
+    own = [t for t in selected if t in TOOLS]
+    extra = [t for t in selected if t not in TOOLS]
+    return own, own + extra
 
 
 def present_labels(present: dict) -> list:
@@ -127,7 +181,6 @@ def workspace_default() -> Path:
     explicit = os.environ.get("AGENT_GUARD_WORKSPACE", "").strip()
     if explicit:
         p = Path(explicit).expanduser()
-        p.mkdir(parents=True, exist_ok=True)
         return p
     candidates = sorted((HOME / "OneDrive").glob("*/Github")) if (HOME / "OneDrive").is_dir() else []
     candidates += [
@@ -138,9 +191,8 @@ def workspace_default() -> Path:
     for p in candidates:
         if p.is_dir():
             return p
-    # Fallback: create ~/Github
+    # Select only; install_skill creates directories only during a real copy.
     fallback = HOME / "Github"
-    fallback.mkdir(parents=True, exist_ok=True)
     return fallback
 
 
@@ -155,6 +207,8 @@ def make_link(target: Path, link: Path, dry: bool):
     """Create a directory symlink; fall back to an NTFS junction on Windows
     (symlinks require Developer Mode or admin rights there)."""
     if link.exists() or link.is_symlink():
+        if link.resolve() != target.resolve():
+            sys.exit(f"ERROR: existing skill link targets different content: {link}")
         log(f"  skip (exists): {link}", dry)
         return
     log(f"  link: {link} -> {target}", dry)
@@ -165,10 +219,17 @@ def make_link(target: Path, link: Path, dry: bool):
         link.symlink_to(target, target_is_directory=True)
     except OSError:
         if os.name == "nt":
-            r = subprocess.run(
-                ["cmd", "/c", "mklink", "/J", str(link), str(target)],
-                capture_output=True, text=True,
-            )
+            with tempfile.TemporaryDirectory() as tmp:
+                script = Path(tmp) / "junction.ps1"
+                script.write_text(
+                    "param([string]$LinkPath, [string]$TargetPath)\n"
+                    "New-Item -ItemType Junction -Path $LinkPath -Target $TargetPath "
+                    "-ErrorAction Stop | Out-Null\n", encoding="utf-8")
+                r = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-File",
+                     str(script), str(link), str(target)],
+                    capture_output=True, text=True,
+                )
             if r.returncode == 0:
                 log("  (NTFS junction created -- symlink permission not available)")
                 return
@@ -196,13 +257,27 @@ def write_json(path: Path, data: dict, dry: bool):
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         backup = path.with_name(path.name + ".bak")
-        shutil.copy2(path, backup)
+        fd, backup_tmp = tempfile.mkstemp(prefix=".guard-backup-", dir=path.parent)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(path.read_bytes())
+            os.chmod(backup_tmp, stat.S_IMODE(path.stat().st_mode))
+            os.replace(backup_tmp, backup)
+        finally:
+            if os.path.exists(backup_tmp):
+                os.unlink(backup_tmp)
         log(f"  backup: {backup}")
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(prefix=".guard-config-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        if path.exists():
+            os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def toml_str(value: str) -> str:
@@ -230,6 +305,24 @@ def add_to_json_config(config_path: Path, name: str, entry: dict,
     servers[name] = payload
     write_json(config_path, data, dry)
     log(f"  added '{name}' to {config_path.name}", dry)
+
+
+def gemini_cli_entry(entry: dict) -> dict:
+    """Translate an MCP entry into Gemini CLI's settings.json dialect.
+
+    Remote servers are registered through `httpUrl` (streamable HTTP), the same
+    transport `claude mcp add --transport http` uses. Gemini CLI's `url` key
+    means SSE, so reusing it would configure the wrong transport."""
+    payload = dict(entry)
+    url = payload.pop("url", None)
+    if url:
+        payload["httpUrl"] = url
+    return payload
+
+
+def add_to_gemini_cli_settings(name: str, entry: dict, dry: bool):
+    """Insert MCP entry into ~/.gemini/settings.json (Gemini CLI user scope)."""
+    add_to_json_config(GEMINI_CLI_CONFIG, name, gemini_cli_entry(entry), dry)
 
 
 def add_to_codex_toml(name: str, entry: dict, dry: bool):
@@ -266,6 +359,11 @@ def add_to_claude_code(name: str, entry: dict, dry: bool):
     Claude Code reads MCP servers from ~/.claude.json (managed by the CLI),
     not from ~/.claude/settings.json -- writing settings.json has no effect.
     """
+    if entry.get("env"):
+        # The CLI accepts env values only in argv. Write the documented user
+        # configuration instead so credentials never enter process arguments.
+        add_to_json_config(HOME / ".claude.json", name, entry, dry)
+        return
     claude = shutil.which("claude")
     if entry.get("url"):
         manual = f"claude mcp add -s user --transport http {name} {entry['url']}"
@@ -278,14 +376,12 @@ def add_to_claude_code(name: str, entry: dict, dry: bool):
         return
 
     cmd = [claude, "mcp", "add", "-s", "user"]
-    for k, v in (entry.get("env") or {}).items():
-        cmd += ["-e", f"{k}={v}"]
     if entry.get("url"):
         cmd += ["--transport", "http", name, entry["url"]]
     else:
         cmd += [name, "--", entry["command"], *entry.get("args", [])]
 
-    log(f"  run: {' '.join(cmd)}", dry)
+    log(f"  register '{name}' via Claude Code (environment values omitted)", dry)
     if dry:
         return
     r = subprocess.run(cmd, capture_output=True, text=True)
@@ -299,6 +395,12 @@ def add_to_claude_code(name: str, entry: dict, dry: bool):
 
 
 def normalize_git_source(url: str) -> str:
+    if not re.search(r"@[0-9a-fA-F]{40}(?:#subdirectory=[A-Za-z0-9_./-]+)?$", url):
+        sys.exit("ERROR: Git installs require the full 40-character scanned commit SHA; branches and tags are not pins.")
+    if "#subdirectory=" in url:
+        subdir = url.split("#subdirectory=", 1)[1]
+        if subdir.startswith("/") or any(part in ("", ".", "..") for part in subdir.split("/")):
+            sys.exit("ERROR: Git subdirectory must stay inside the scanned repository.")
     if url.startswith("git+"):
         return url
     return f"git+{url}"
@@ -376,8 +478,74 @@ def install_mcp_git(name: str, git_url: str, package: str, dry: bool,
 
 # ── Subcommands ───────────────────────────────────────────────────────────────
 
+def skill_tree_digest(root: Path) -> dict[str, str]:
+    """Hash every staged file and reject indirect filesystem entries."""
+    result = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or path.resolve() != path.absolute():
+            sys.exit("ERROR: indirect filesystem entry in staged skill")
+        key = path.relative_to(root).as_posix()
+        result[key] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "directory"
+    return result
+
+
+def top_up_verified_paths(source: Path, name: str, present: dict, dry: bool):
+    """Link the paths we verified ourselves but the skills CLI leaves empty.
+
+    Two cases. Agents whose `skillsDir` is `.agents/skills` count as
+    "universal" upstream: the CLI writes only the canonical copy and skips
+    their own directory, so nothing appears in e.g. ~/.codex/skills. And
+    Antigravity is installed to ~/.gemini/antigravity*/skills, while the path
+    this machine's Antigravity actually reads is ~/.gemini/config/skills
+    (three occurrences in the App's language server; the `agy` binary
+    documents the same global path).
+
+    Both are silent failures -- the user sees a successful installation and the
+    agent never loads the skill. A skill reachable through two paths is
+    harmless by comparison, so anything still missing is linked here."""
+    canonical = _skills_cli.CANONICAL_SKILLS_DIR
+    seen = set()
+    for tid, ok in present.items():
+        skills_dir = TOOLS[tid]["skills"]
+        if not ok or skills_dir is None or str(skills_dir) in seen:
+            continue
+        seen.add(str(skills_dir))
+        if skills_dir == canonical:
+            continue
+        link = skills_dir / name
+        if link.exists() or link.is_symlink():
+            log(f"  skills CLI covered: {link}", dry)
+            continue
+        make_link(source, link, dry)
+
+
+def verify_distributed_copy(scanned: Path, canonical: Path):
+    """Every scanned file must reach the canonical store byte for byte.
+
+    The skills CLI copies the tree itself, so the verdict only covers what is
+    actually installed if the copy matches. Extra files (the CLI's own
+    bookkeeping) are reported, not treated as tampering."""
+    if not canonical.is_dir():
+        sys.exit(f"ERROR: skills CLI reported success but {canonical} does not exist; nothing verified.")
+    expected = skill_tree_digest(scanned)
+    actual = skill_tree_digest(canonical)
+    for key, digest in expected.items():
+        if actual.get(key) != digest:
+            sys.exit(
+                "ERROR: distributed copy does not match the scanned skill "
+                f"({key} differs in {canonical}). Remove it and re-run."
+            )
+    extra = sorted(set(actual) - set(expected))
+    if extra:
+        log(f"  note: canonical copy has {len(extra)} extra entry/entries "
+            f"(first: {extra[0]})")
+    log(f"  verified: canonical copy matches the scanned skill ({canonical})")
+
+
 def install_skill(repo_path: Path, name: str, workspace: Path, dry: bool,
-                  selected: list = None):
+                  selected: list = None, *, baseline: Path | None = None):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) or name.endswith((".", " ")):
+        sys.exit("ERROR: skill name must be a single safe directory name")
     repo_path = repo_path.resolve()
     if not repo_path.is_dir():
         sys.exit(f"ERROR: {repo_path} is not a directory")
@@ -388,29 +556,71 @@ def install_skill(repo_path: Path, name: str, workspace: Path, dry: bool,
             "and install a specific skill subdirectory."
         )
 
-    present = detect_tools(selected)
+    own_targets, cli_targets = split_targets(selected)
+    present = detect_tools(own_targets)
     permanent = (workspace / name).resolve()
+    if permanent.parent != workspace.resolve():
+        sys.exit("ERROR: installation target escapes the selected workspace")
+    if permanent != repo_path and permanent.exists():
+        sys.exit("ERROR: destination already exists; scan that directory explicitly before reusing it. Nothing was linked.")
+    for parent, dirs, files in os.walk(repo_path, followlinks=False):
+        ignored = COPY_IGNORE(parent, dirs + files)
+        dirs[:] = [item for item in dirs if item not in ignored]
+        for item in dirs + [item for item in files if item not in ignored]:
+            path = Path(parent) / item
+            if path.is_symlink() or path.resolve() != path.absolute():
+                sys.exit(f"ERROR: skill contains an indirect filesystem entry; review a materialized copy: {path}")
 
     print(f"\n-- Skill '{name}' --")
-    print(f"   Target tools: {present_labels(present) or 'none detected'}")
-
-    # Copy to permanent location (skip if the repo already lives there)
-    if permanent == repo_path or permanent.exists():
-        log(f"  permanent dir: {permanent}")
+    if cli_targets is None and _skills_cli.enabled():
+        print("   Target tools: every agent the skills CLI detects "
+              f"(built-in fallback: {present_labels(present) or 'none detected'})")
     else:
-        log(f"  copy {repo_path} -> {permanent}", dry)
-        if not dry:
-            shutil.copytree(repo_path, permanent, symlinks=True, ignore=COPY_IGNORE)
+        print(f"   Target tools: {present_labels(present) or 'none detected'}")
+    if dry:
+        log(f"  stage, scan and publish {repo_path} -> {permanent}", dry)
+    else:
+        # Never link the live input directory. Publish the scanned staging tree
+        # by rename, without re-reading the caller-controlled source after scanning.
+        if permanent == repo_path:
+            sys.exit("ERROR: choose a different installation name or workspace; live source directories cannot be linked directly.")
+        workspace.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".guard-stage-", dir=workspace) as staging:
+            candidate = Path(staging) / name
+            shutil.copytree(repo_path, candidate, symlinks=False, ignore=COPY_IGNORE)
+            before = skill_tree_digest(candidate)
+            scan_args = {"baseline": baseline} if baseline is not None else {}
+            if run_skillspector(candidate, **scan_args) != 0:
+                sys.exit("ERROR: staged skill did not receive a SAFE verdict; nothing was installed.")
+            if skill_tree_digest(candidate) != before:
+                sys.exit("ERROR: staged skill changed during scanning; nothing was installed.")
+            if permanent.exists():
+                sys.exit("ERROR: installation destination appeared during scanning; nothing was replaced.")
+            candidate.rename(permanent)
 
-    # One link per UNIQUE skills directory. Claude Code and Claude Desktop both
-    # read ~/.claude/skills, so that shared path is linked once and serves both.
-    seen = set()
-    for tid, ok in present.items():
-        skills_dir = TOOLS[tid]["skills"]
-        if not ok or skills_dir is None or str(skills_dir) in seen:
-            continue
-        seen.add(str(skills_dir))
-        make_link(permanent, skills_dir / name, dry)
+    # Distribution is delegated to the `skills` CLI when it is usable: it owns
+    # the canonical store, the per-agent links, and the platform quirks we
+    # would otherwise have to verify per agent. The built-in linker below stays
+    # as the fallback for machines without npx (or with delegation disabled).
+    delegated, _agents = _skills_cli.distribute(
+        permanent, dry, selected=cli_targets, present=present)
+    if delegated:
+        canonical = _skills_cli.CANONICAL_SKILLS_DIR / name
+        if not dry:
+            verify_distributed_copy(permanent, canonical)
+        top_up_verified_paths(canonical if (dry or canonical.is_dir()) else permanent,
+                              name, present, dry)
+    else:
+        # One link per UNIQUE skills directory. Claude Code and Claude Desktop
+        # both read ~/.claude/skills, so that shared path is linked once and
+        # serves both.
+        seen = set()
+        for tid, ok in present.items():
+            skills_dir = TOOLS[tid]["skills"]
+            if not ok or skills_dir is None or str(skills_dir) in seen:
+                continue
+            seen.add(str(skills_dir))
+            make_link(permanent, skills_dir / name, dry)
 
     if dry:
         print(f"\n[DRY] Skill '{name}' NOT installed (dry run); the steps above show what would happen.")
@@ -439,6 +649,8 @@ def install_mcp(name: str, entry: dict, dry: bool, selected: list = None):
         add_to_codex_toml(name, entry, dry)
     if present.get("antigravity"):
         add_to_json_config(ANTIGRAVITY_CONFIG, name, entry, dry, include_disabled=True)
+    if present.get("gemini-cli"):
+        add_to_gemini_cli_settings(name, entry, dry)
 
     # Hermes and OpenClaw manage MCP servers through their own config formats
     # (YAML / CLI tooling) -- this installer does not modify those. Point the
@@ -474,11 +686,13 @@ def main():
     # skill
     p_skill = sub.add_parser("skill", help="Install a markdown skill globally")
     p_skill.add_argument("repo_path", type=Path, help="Path to scanned + approved skill repo")
+    p_skill.add_argument("--baseline", type=Path, help="Explicit reviewer-owned exact-fingerprint baseline")
     p_skill.add_argument("--name", help="Override name (default: directory name)")
-    p_skill.add_argument("--tools", nargs="*", choices=tool_choices, default=None,
-                         metavar="TOOL",
-                         help=f"Limit installation to specific tools "
-                              f"(default: all detected). Choices: {', '.join(tool_choices)}")
+    p_skill.add_argument("--tools", nargs="*", default=None, metavar="TOOL",
+                         help=f"Limit installation to specific agents (default: every "
+                              f"agent the skills CLI detects). Own ids: "
+                              f"{', '.join(tool_choices)}; any other name is passed "
+                              f"to the skills CLI as an agent name (e.g. cursor, windsurf).")
     p_skill.add_argument("--dry-run", action="store_true")
 
     # mcp
@@ -515,7 +729,7 @@ def main():
     # Git-backed Python MCP
     p_git = sub.add_parser("mcp-git", help="Install a Git-backed Python MCP through uv tool")
     p_git.add_argument("--name", required=True, help="Server name in configs")
-    p_git.add_argument("--git-url", required=True, help="Git URL, preferably pinned with @sha")
+    p_git.add_argument("--git-url", required=True, help="Git URL pinned with the full scanned @commit-SHA")
     p_git.add_argument("--package", required=True,
                        help="Python package name passed to uv tool install")
     p_git.add_argument("--executable",
@@ -534,7 +748,7 @@ def main():
     if args.mode == "skill":
         name = args.name or args.repo_path.resolve().name
         install_skill(args.repo_path, name, workspace, args.dry_run,
-                      selected=args.tools)
+                      selected=args.tools, baseline=args.baseline)
 
     elif args.mode == "mcp":
         installer_flags = {

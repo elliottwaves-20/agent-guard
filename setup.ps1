@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 # commit behind a release tag (tags can move, commits cannot) so "scan = install"
 # applies to the scanner itself. Bump deliberately; keep the tag comment in sync.
 $SkillSpectorRepo = "https://github.com/NVIDIA/SkillSpector"
-$SkillSpectorSha  = "b7241089d7ec15d8b30df980dacbb428214732b9"   # v2.11.0
+$SkillSpectorSha  = "c7958a3268d9498644b22edb75d0f051bbc8cbfc"   # v2.12.0
 
 Write-Host "Checking prerequisites..." -ForegroundColor Cyan
 
@@ -79,7 +79,7 @@ if (Get-Command mcp-scanner -ErrorAction SilentlyContinue) {
 }
 
 Write-Host "`n[OK] Setup complete." -ForegroundColor Green
-Write-Host "     Next: copy .env.example to .env"
+Write-Host "     Next: configure user/process environment variables (README). .env is optional."
 Write-Host "           SkillSpector LLM: defaults to your coding-agent CLI (claude/codex/gemini login, no API key);"
 Write-Host "           hosted providers (anthropic/openai/nv_build/...) work with a key. MCP_SCANNER_LLM_* for Cisco runtime scans."
 Write-Host "           Optional: set VIRUSTOTAL_API_KEY for binary/archive malware reputation checks"

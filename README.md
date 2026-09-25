@@ -49,7 +49,7 @@ agent-guard never writes its own detection — it routes every install target to
 - **Fail-closed workflow** — scanner errors are never silently treated as "no findings".
 - **Prompt-injection aware** — content of scanned repos is treated as data, never as instructions to the reviewing agent.
 - **Clear verdicts** — ✅ SAFE / ⚠ REVIEW / 🚫 DO NOT INSTALL, with a risk score and file/line for every finding.
-- **Universal installer included** — after a SAFE verdict, one command installs the skill or MCP server to every agent detected on the machine (Claude Code, Claude Desktop, Codex, Antigravity/Gemini, Hermes, OpenClaw), or a subset via `--tools`. Local MCP servers are installed through isolated launchers (`uvx`, `uv tool`, `npx`) so one server's dependencies do not pollute or break another.
+- **Universal installer included** — after a SAFE verdict, one command installs the skill or MCP server to every agent detected on the machine. Skills are distributed by the pinned `skills` CLI (vercel-labs/skills), which maintains the directory layout of 80+ agents, so a scanned skill reaches all of them; MCP servers and a built-in fallback linker cover Claude Code, Claude Desktop, Codex, Antigravity, Gemini CLI, Hermes and OpenClaw. Restrict the targets with `--tools` — our own ids or any agent name the CLI knows (`cursor`, `windsurf`, …). Local MCP servers are installed through isolated launchers (`uvx`, `uv tool`, `npx`) so one server's dependencies do not pollute or break another.
 
 ## One scan, every agent
 
@@ -64,11 +64,45 @@ Many people now work across several agents in parallel, not least because of per
 | Claude Code | `~/.claude/skills/` | `claude mcp add -s user` → `~/.claude.json` |
 | Claude Desktop | `~/.claude/skills/` *(shared with Claude Code)* | Windows: `%APPDATA%/Claude/` · macOS: `~/Library/Application Support/Claude/` · Linux: `$XDG_CONFIG_HOME` or `~/.config/Claude/` — `claude_desktop_config.json` |
 | Codex | `~/.codex/skills/` | `~/.codex/config.toml` |
-| Antigravity / Gemini | `~/.gemini/config/skills/` | `~/.gemini/config/mcp_config.json` |
+| Antigravity (App + `agy` CLI) | `~/.gemini/config/skills/` | `~/.gemini/config/mcp_config.json` |
+| Gemini CLI | `~/.gemini/skills/` | `~/.gemini/settings.json` (`httpUrl` for remote servers) |
 | Hermes (Nous Research) | `~/.hermes/skills/` | manual — `mcp_servers:` block in Hermes `config.yaml` |
 | OpenClaw | `~/.openclaw/skills/` | manual — OpenClaw's own MCP tooling |
 
-Detection is automatic — only tools whose configs exist are touched. Claude Desktop reads skills from the same `~/.claude/skills/` as Claude Code, so that shared path is linked once and serves both. JSON configs are backed up (`.bak`) before every write. Hermes and OpenClaw use their own MCP config formats (YAML / CLI), so the installer prints instructions for those instead of modifying configs blindly.
+The table lists the agents agent-guard configures itself: MCP registration, and the fallback linker for skills. Skill *distribution* normally goes through the pinned `skills` CLI, which detects and serves 80+ agents beyond this table; the paths below are then topped up only where that CLI leaves an agent's own directory empty.
+
+Detection is automatic — only tools whose configs exist are touched. Claude Desktop reads skills from the same `~/.claude/skills/` as Claude Code, so that shared path is linked once and serves both. Antigravity and the Gemini CLI both live under `~/.gemini/` but share no file: the Antigravity App and its `agy` CLI read `~/.gemini/config/`, the Gemini CLI reads `~/.gemini/skills/` and `~/.gemini/settings.json`, so each is detected and installed separately. JSON configs are backed up (`.bak`) before every write. Hermes and OpenClaw use their own MCP config formats (YAML / CLI), so the installer prints instructions for those instead of modifying configs blindly.
+
+### Skill distribution: the pinned `skills` CLI
+
+Getting one scanned skill into every agent on a machine is a solved problem, and
+solving it again ourselves is how a skill ends up installed into a path no agent
+reads — a failure with no error message. So after the verdict, distribution is
+delegated to the [`skills` CLI](https://github.com/vercel-labs/skills): it writes
+one canonical copy to `~/.agents/skills/<name>`, links every agent it detects
+(NTFS junction on Windows, automatic copy fallback), and maintains that agent
+table upstream for 80+ agents.
+
+Running a third-party CLI inside a security tool is gated:
+
+| Gate | What it does |
+|------|--------------|
+| Version pin | `npx -y skills@<pinned version>` — a `skills` on PATH is deliberately ignored, because no pin covers it |
+| Registry digests | the release's `shasum` and `integrity` must match the pinned values |
+| Own scan | GuardDog scans that exact version through `scan_cli`; a BLOCK passes only when its blocking findings match `scripts/reviewed/skills-cli-<version>.json`, which names each accepted finding, its file, the matched text and the reason |
+| Reduced environment | `npm_config_ignore_scripts=true` (no lifecycle script can run) and no credential variables (`GITHUB_TOKEN`, `GH_TOKEN`, API keys) are passed |
+| Copy verification | every scanned file must appear byte-identical in the canonical copy |
+| Top-up | paths verified here (for example `~/.codex/skills`, `~/.gemini/config/skills`) are linked from the canonical store when the CLI leaves them empty |
+
+If any gate does not hold — unknown finding, digest mismatch, missing `npx`,
+timeout, non-zero exit — delegation is skipped and the built-in linker installs
+into the agents in the table above. An installation never fails because of this;
+only the distribution method changes, and the output says which one ran. Set
+`AGENT_GUARD_SKILLS_CLI=0` to always use the built-in linker.
+
+Raising the pin is a reviewed step: `python scripts/verify_skills_cli.py --latest`
+compares the pin with the registry, and `--update <version>` scans a candidate
+and prints a reviewed-findings draft. It writes nothing on its own.
 
 ## Prerequisites
 
@@ -81,9 +115,9 @@ Required for the normal scan/install workflow:
 
 Optional, depending on what you scan or install:
 
-- [Docker](https://docs.docker.com/get-docker/) — needed for Docker-isolated live stdio MCP checks (`scan_mcp.py ... --sandbox`), for GuardDog package scans (`scan_cli.py npm/pypi/go`) on Windows where Docker is GuardDog's only supported install (Linux/macOS can use a native `guarddog` on PATH instead), and for the optional malcontent binary analysis (`scan_cli.py binary --deep`). Skill scans, default Stage 1 MCP source scans, and `scan_cli.py script`/`cargo` do not need Docker. The Docker daemon must be **running** first (on Windows/macOS: start Docker Desktop); `failed to connect to the docker API` means it is not.
+- [Docker](https://docs.docker.com/get-docker/) — needed for Docker-isolated live stdio MCP checks (`scan_mcp.py ... --sandbox`), for GuardDog package scans (`scan_cli.py npm/pypi/go`) on Windows where Docker is GuardDog's only supported install (Linux/macOS can use a native `guarddog` on PATH instead), and for the optional malcontent binary analysis (`scan_cli.py binary --deep`). Skill scans, default Stage 1 MCP source scans, and `scan_cli.py script` do not need Docker; Cargo uses GuardDog and needs Docker on Windows. The Docker daemon must be **running** first (on Windows/macOS: start Docker Desktop); `failed to connect to the docker API` means it is not.
 - `VIRUSTOTAL_API_KEY` — required for `scan_cli.py binary` (release-binary hash reputation) and optional malware-reputation checks for bundled binaries, archives, PDFs, images, and similar non-source files in MCP scans. VirusTotal's Public API is free for registered users but rate-limited (4 lookups/min); see [LLM provider support](#llm-provider-support).
-- Node.js/npm — optional. Needed if you install or run npm MCP servers through `npx`, install the Firecrawl CLI with npm, or use the Node Playwright rendered-page fallback for protected marketplaces.
+- Node.js/npm — optional. Needed if you install or run npm MCP servers through `npx`, install the Firecrawl CLI with npm, or explicitly configure a preinstalled Node renderer for protected marketplaces.
 - Firecrawl CLI or Node Playwright — optional renderers for JavaScript-heavy/protected marketplace pages. Direct GitHub/archive/raw SKILL.md/npm/PyPI URLs work without them.
 - Git — optional, but needed for `install_skill.py mcp-git` / `uv tool install --from git+...` and for manual clone/checkout workflows after a SAFE verdict.
 
@@ -117,12 +151,11 @@ This installs the skill files. The skill drives the [SkillSpector](https://githu
 ```bash
 cd ~/.claude/skills/agent-guard   # or wherever the CLI placed it
 bash setup.sh                       # Windows PowerShell: .\setup.ps1
-cp .env.example .env                # optional: pick a provider, add Cisco runtime / VirusTotal keys
+# Optional: configure the environment variables described below.
 ```
 
-The wrappers auto-load **your own** `.env` (created from `.env.example`,
-gitignored — never part of the repo) from the skill/repo directory when
-present. For a custom location, set `AGENT_GUARD_ENV_FILE=/path/to/.env`.
+Prefer environment variables for provider settings and API keys. This keeps
+credentials outside the project directory. See the configuration section below.
 
 **No API keys? None needed.** If `claude`, `codex`, or `gemini` is on PATH and
 logged in, the wrapper auto-detects it and runs SkillSpector's LLM layer through
@@ -139,15 +172,52 @@ cd agent-guard
 
 bash setup.sh       # Windows PowerShell: .\setup.ps1
 
-cp .env.example .env   # set SkillSpector + optional Cisco runtime LLMs
+# Optional: configure provider/runtime environment variables (see below).
 
 # Register agent-guard itself into every detected agent (auto-detects your tools):
 python scripts/install_skill.py skill .
 ```
 
-The scan wrappers auto-load **your own** `.env` (created from `.env.example`,
-gitignored — never part of the repo) from the repo directory, the current
-working directory, or `AGENT_GUARD_ENV_FILE` if you keep secrets elsewhere.
+### Configuration: prefer environment variables
+
+No configuration file is required. Set the variables on the process that
+launches the scanner, in your user's environment, or through your CI's secret
+injection. Use these names (see `.env.example` for all optional settings):
+
+| Variable | Purpose |
+| --- | --- |
+| `SKILLSPECTOR_PROVIDER` | Optional explicit CLI/provider choice: `claude_cli`, `codex_cli`, `gemini_cli`, or a hosted provider. |
+| `SKILLSPECTOR_MODEL` | Optional model override; unset uses the provider/CLI default. |
+| `MCP_SCANNER_LLM_API_KEY` and `MCP_SCANNER_LLM_MODEL` | Separate credentials/model for optional Cisco runtime scans. |
+| `VIRUSTOTAL_API_KEY` | Hash reputation checks for binary downloads. |
+
+**Windows:** open **Environment Variables → User variables** and add the
+settings there. For a non-secret provider preference, PowerShell also supports:
+
+```powershell
+[Environment]::SetEnvironmentVariable('SKILLSPECTOR_PROVIDER', 'codex_cli', 'User')
+$env:SKILLSPECTOR_PROVIDER = 'codex_cli'  # also apply to this PowerShell session
+```
+
+Enter API keys through the environment-variable dialog or a masked prompt;
+do not type real keys into commands that will be saved in shell history.
+Restart already-running terminals and agent apps after changing user variables:
+they retain the environment they inherited at startup.
+
+**macOS/Linux:** export the variables in the shell that launches the scanner;
+for example `export SKILLSPECTOR_PROVIDER=codex_cli`. Obtain secrets from your
+secret manager or a silent prompt instead of putting their values in command
+history or a repository. CI jobs should inject them from their secret store.
+
+Environment variables keep keys out of project files, but are not an encrypted
+vault: processes running as your account may still access them. The untrusted
+MCP target container does not receive the scanner's credentials.
+
+**Optional file fallback:** copy `.env.example` to `.env` in the trusted
+installation directory, or explicitly set `AGENT_GUARD_ENV_FILE` to another
+trusted file. Process variables take precedence. Working and parent directories
+are not searched, so a scan target cannot configure its own scanner through an
+adjacent file. The wrappers parse the file as data; do not source it as shell code.
 
 **Smoke test** — verify the whole chain (uv tools, resolver, scanner) with a
 small, known-harmless skill:
@@ -166,38 +236,18 @@ need a renderer so agent-guard can read the page before scanning it. The URL
 scanner first tries a normal static fetch, then a rendered-page fallback if one
 is available.
 
-Supported renderer options:
-
-- Firecrawl CLI, installed via npm and authenticated, then exposed through
-  `AGENT_GUARD_FETCH_COMMAND`.
-- Node Playwright installed locally; agent-guard can use it as a fallback when
-  no external fetch command is configured.
-
-Firecrawl example:
+A renderer runs only when the operator explicitly configures
+`AGENT_GUARD_FETCH_COMMAND`. Point it at a trusted, preinstalled Firecrawl CLI
+or your own Playwright renderer. For example, after separately installing and
+authenticating Firecrawl:
 
 ```bash
-npm install -g firecrawl
-firecrawl login
 export AGENT_GUARD_FETCH_COMMAND='firecrawl scrape --format markdown --only-main-content --wait-for 3000 {url}'
 ```
 
-If you do not install Firecrawl globally, use the normal npm/npx form:
-
-```bash
-export AGENT_GUARD_FETCH_COMMAND='npx firecrawl scrape --format markdown --only-main-content --wait-for 3000 {url}'
-```
-
-For the built-in Playwright fallback, install the browser binary once with the
-normal Playwright CLI flow:
-
-```bash
-npx playwright install chromium
-```
-
-agent-guard first uses a local `playwright` Node package when present. If it is
-not installed in the project, the resolver tries the npx package path and then a
-temporary npm package install for that render attempt. That keeps the repository
-provider-neutral while still supporting protected JavaScript-heavy marketplaces.
+The command is operator configuration and can execute code. Do not populate it
+from the page being scanned or use a command that downloads dependencies.
+The resolver never installs renderer packages during a scan.
 
 Without a working renderer, protected marketplace pages fail closed with no
 verdict; direct GitHub/archive/raw SKILL.md/npm/PyPI URLs still work normally.
@@ -209,7 +259,7 @@ verdict; direct GitHub/archive/raw SKILL.md/npm/PyPI URLs still work normally.
 ```bash
 # Optional: load LLM provider config into the shell. The wrappers also auto-load
 # .env from the repo/skill directory when present.
-set -a && source .env && set +a
+# Wrappers parse the trusted installation .env automatically.
 
 REPO="user/repo-name"
 WORKDIR=$(mktemp -d)
@@ -367,8 +417,15 @@ python scripts/scan_mcp.py remote https://example.com/mcp
 
 **Stage 2 (optional — live runtime check):** start the server inside a throwaway **Docker container with no access to your filesystem**, then scan the tools and prompts it registers at runtime — the gap a static scan cannot cover (powered by cisco-ai-mcp-scanner).
 
+The trusted Cisco analyzer runs on the host and connects over Docker stdio.
+Only the target server runs in the container; scanner API keys are never
+forwarded into it. Network access remains enabled, and the container is
+removed after the check, including when the analyzer fails or times out.
+Package caches are private to that container and discarded afterwards, so a
+malicious target cannot poison a shared cache for a subsequent scan.
+
 ```bash
-python scripts/scan_mcp.py pypi mcp-server-name --sandbox -- uvx mcp-server-name
+python scripts/scan_mcp.py pypi mcp-server-name==1.2.3 --sandbox -- uvx mcp-server-name==1.2.3
 ```
 
 The Docker daemon must be running (start Docker Desktop on Windows/macOS). The
@@ -411,7 +468,11 @@ Requirements per mode:
 
 ### Install after a SAFE verdict
 
-Install the same commit that was scanned:
+Install the same commit that was scanned. The local skill installer performs a
+fresh scan of a staging copy, checks that its contents did not change during
+scanning, and publishes that same copy before linking it. Choose an installation
+name or workspace different from the source location. An explicitly reviewed
+baseline can be passed to the skill installer with `--baseline /review/accepted.json`:
 
 ```bash
 git clone https://github.com/user/repo-name ~/path/to/workspace/repo-name
@@ -420,8 +481,13 @@ git -C ~/path/to/workspace/repo-name -c advice.detachedHead=false checkout "$SHA
 # All detected agents at once:
 python scripts/install_skill.py skill ~/path/to/workspace/repo-name
 
-# Or only specific agents:
+# Or only specific agents (own ids, or any agent name the skills CLI knows):
 python scripts/install_skill.py skill ~/path/to/workspace/repo-name --tools claude-code hermes
+python scripts/install_skill.py skill ~/path/to/workspace/repo-name --tools cursor windsurf
+
+# Verify or raise the pinned distribution CLI:
+python scripts/verify_skills_cli.py
+python scripts/verify_skills_cli.py --latest
 ```
 
 **MCP server (PyPI, isolated via uvx) — only after `scan_mcp.py` returned SAFE:**
@@ -503,7 +569,7 @@ optional malware-reputation layer:
 | **Cisco mcp-scanner LLM** | live MCP runtime scans (`remote` / `--sandbox`) | `MCP_SCANNER_LLM_*`; any LiteLLM-supported provider (API key) |
 | **VirusTotal analyzer** | optional malware reputation for bundled binaries, archives, PDFs, and similar non-source files | `VIRUSTOTAL_API_KEY` |
 
-**SkillSpector provider resolution** (`scripts/_skillspector.py`): `AGENT_GUARD_STATIC_ONLY=1` forces static-only. Otherwise an explicit `SKILLSPECTOR_PROVIDER` is used and validated (a CLI provider needs its binary on PATH, a hosted one its key). With no provider named, a hosted key in the environment wins, then the first of `claude`, `codex`, `gemini` found on PATH. If nothing is usable the scan runs static-only and says so in the verdict line. With `SKILLSPECTOR_MODEL` you can pin a model (for `claude_cli` e.g. `claude-sonnet-5`); leave it empty to use the CLI's own default. A model from another vendor is ignored with a note. The wrapper also starts SkillSpector inside its own tool environment with the aggregate scan deadline raised from upstream's hard-coded 60 s to `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` (default: `AGENT_GUARD_SCAN_TIMEOUT` minus 60 s), because CLI providers exhaust the 60 s budget on medium-sized skills and would otherwise end in NO VERDICT (upstream: NVIDIA/SkillSpector#460).
+**SkillSpector provider resolution** (`scripts/_skillspector.py`): `AGENT_GUARD_STATIC_ONLY=1` disables the LLM layer only; static analyzers can still use configured lookups such as OSV. Otherwise an explicit `SKILLSPECTOR_PROVIDER` is used and validated (a CLI provider needs its binary on PATH, a hosted one its key). With no provider named, a hosted key in the environment wins, then the first of `claude`, `codex`, `gemini` found on PATH. If nothing is usable the scan runs static-only and says so in the verdict line. With `SKILLSPECTOR_MODEL` you can pin a model (for `claude_cli` e.g. `claude-sonnet-5`; for a cost-conscious Codex CLI scan, `gpt-5.6-luna`); leave it empty to use the CLI's own default. A model from another vendor is ignored with a note. The wrapper also starts SkillSpector inside its own tool environment with the aggregate scan deadline raised from upstream's hard-coded 60 s to `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` (default: `AGENT_GUARD_SCAN_TIMEOUT` minus 60 s), because CLI providers exhaust the 60 s budget on medium-sized skills and would otherwise end in NO VERDICT (upstream: NVIDIA/SkillSpector#460).
 
 **Why a separate LLM process instead of letting the installing agent judge the code?** Two reasons. (1) The LLM layer is not just a summary of the static findings — SkillSpector's semantic analyzers read the raw files and look for the residual gap: prompt injection, exfiltration instructions, and obfuscated intent phrased in natural language that regex/YARA cannot encode. (2) To judge semantically, an LLM must ingest the untrusted content — and the agent that installs the skill is exactly the target a poisoned SKILL.md is written for. The scanner therefore runs the model as a separate process with no tools, no MCP servers, no settings (`claude -p --permission-mode dontAsk --strict-mcp-config --setting-sources=`), feeds the content via stdin, and forces a JSON-schema answer. The verdict is an exit code the agent receives *before* it reads anything. The CLI providers give you that isolation on your existing subscription.
 
@@ -520,7 +586,7 @@ through agent-guard's wrapper. It calls Cisco's VirusTotal analyzer directly and
 avoids known CLI regressions in Cisco's standalone VirusTotal subcommand:
 
 ```bash
-set -a && source .env && set +a
+# Wrappers parse the trusted installation .env automatically.
 python scripts/scan_mcp.py virustotal ./downloaded-source
 ```
 
@@ -554,9 +620,16 @@ Where a stage in a scan output has such a limit, the wrapper prints it inline (`
 ## Security model
 
 1. **Scanned content is data, never instructions** — a malicious SKILL.md cannot talk the reviewing agent into a SAFE verdict.
-2. **Fail closed** — scanner crash/error ⇒ no verdict, not "no findings".
+2. **Fail closed** — scanner crash/error ⇒ no verdict, not "no findings". A low-risk report cannot override an error exit or incomplete inspection.
 3. **Scan = install** — the pinned commit SHA bridges scan and installation; if the repo moves in between, re-scan.
 4. **ZIP before verdict, clone after** — plain ZIP downloads execute nothing, while `git clone` has historically had RCE edge cases (e.g. CVE-2024-32002 via recursive submodules). Cloning is reserved for repos that already passed.
+
+Scanner setup is an explicit bootstrap trust decision: `setup.sh` / `setup.ps1`
+install the operator's chosen security tools and their dependencies. These
+dependencies have not been approved by agent-guard before setup, and the pinned
+SkillSpector source commit is not a lock of all transitive dependencies. Review
+the tool sources and setup before running them. The scan-first promise applies
+to the target under review after this trusted toolchain is installed.
 
 ## Why this skill triggers capability warnings
 
@@ -564,11 +637,61 @@ Automated skill scanners (Socket, Snyk, ClawScan, and others) flag this skill wi
 
 The warnings describe what the skill genuinely does:
 
-- **It runs external binaries.** The skill drives [SkillSpector](https://github.com/NVIDIA/SkillSpector) (skills + static MCP scan) and [cisco-ai-mcp-scanner](https://github.com/cisco-ai-defense/mcp-scanner) (optional live MCP runtime check) — that *is* its job. Both are official, open-source security tools installed isolated via `uv`. SkillSpector is **pinned to the exact commit behind a tagged release** (currently v2.11.0), so "scan = install" applies to the scanner itself (review and bump deliberately); the Cisco MCP scanner is pulled from PyPI at the latest version.
+- **It runs external binaries.** The skill drives [SkillSpector](https://github.com/NVIDIA/SkillSpector) (skills + static MCP scan) and [cisco-ai-mcp-scanner](https://github.com/cisco-ai-defense/mcp-scanner) (optional live MCP runtime check) — that *is* its job. Both are official, open-source security tools installed isolated via `uv`. SkillSpector is **pinned to the exact commit behind a tagged release** (currently v2.11.2), so "scan = install" applies to the scanner itself (review and bump deliberately); the Cisco MCP scanner is pulled from PyPI at the latest version.
 - **It installs across multiple agents.** The bundled installer links the audited skill into every agent you have — the "one scan, every agent" feature. Scanners read cross-platform installation as expanded reach; here it is the intended behavior, and you can limit it with `--tools`.
-- **It can route data to an LLM.** SkillSpector sends scanned skill/static-source contents to the provider you configure — by default the coding-agent CLI you are logged into (so the data goes to that vendor under your own account), otherwise the hosted provider whose key you set. `AGENT_GUARD_STATIC_ONLY=1` keeps everything local. Cisco's runtime MCP scan sends runtime tool/prompt data to the `MCP_SCANNER_LLM_*` provider you configure.
+- **It can route data to an LLM.** SkillSpector sends scanned skill/static-source contents to the provider you configure — by default the coding-agent CLI you are logged into (so the data goes to that vendor under your own account), otherwise the hosted provider whose key you set. `AGENT_GUARD_STATIC_ONLY=1` disables only that LLM layer; static analyzers can still use configured network lookups such as OSV. Cisco's runtime MCP scan sends runtime tool/prompt data to the `MCP_SCANNER_LLM_*` provider you configure.
 
 You cannot drive these flags to green without removing the tool's reason to exist. What keeps it trustworthy is everything in the [Security model](#security-model) above: scanned content is treated as data, the workflow fails closed, repos are pinned and ZIP-scanned before any clone, and the skill ships **no hidden or invisible characters** of its own.
+
+## Reviewing self-scan findings
+
+SkillSpector 2.11.0 retains deterministic findings even when its LLM does not
+confirm them. A raw agent-guard self-scan can therefore return BLOCK for its
+configuration loading, scanner subprocesses and installer capabilities. This
+is a review requirement, not evidence that the scanner failed or that the
+LLM was unavailable. An `llm-unconfirmed` tag never grants permission to install.
+
+For findings you have inspected and accepted, the single-target skill wrapper
+supports an **explicit, reviewer-owned SkillSpector v2 JSON baseline**:
+
+```bash
+python scripts/scan_skill.py /path/to/pinned-source --report /review/raw.json
+python scripts/scan_skill.py /path/to/pinned-source --baseline /review/accepted.json --report /review/reviewed.json
+```
+
+Only exact SHA-256 fingerprints are accepted; wildcard rules and legacy
+baselines are rejected. SkillSpector binds each fingerprint to the complete
+scanned file content, scanner version, location, severity and evidence. Source
+or analyzer changes require renewed review. A new finding still contributes to
+the normal risk score and HIGH/CRITICAL gate. A different scanner version or
+incomplete LLM analysis produces NO VERDICT. Accepted findings and their reasons
+remain visible in both terminal output and the saved report, including on SAFE.
+
+The wrapper never auto-loads a target's baseline. Keep your reviewed baseline
+outside the scanned source, and do not trust one merely because its author
+ships it. `skillspector baseline <source> --output /review/draft.json` can
+generate **candidates for review**; it accepts every current finding, so its
+output must be inspected, reduced and given specific reasons before use.
+Generate it with the same scanner and LLM policy as the later scan; different
+LLM evidence can invalidate an otherwise unchanged fingerprint.
+
+In the previously used 2.11.0 build, the native baseline generator and JSON report can
+use different finding populations. A generated draft may therefore omit
+reported occurrences. Review against the saved report; never compensate with
+wildcards or treat a partially matching draft as a completed review.
+
+For a release self-scan, use a clean export of the intended release tree to
+avoid scanning local credentials, caches or session notes. Run the raw scan
+(expected BLOCK for this security tool), then the reviewed scan (expected
+SAFE with accepted findings), and test that changed source and new malicious
+content still block. Passing a reviewed self-scan does not give permission to
+accept the same capabilities in unrelated skills.
+
+`--report` writes only to a new file and does not overwrite source or policy.
+`--baseline` and `--report` are restricted to one concrete target, not catalog
+or collection scans. Scanner-backed regression tests are opt-in:
+`AGENT_GUARD_INTEGRATION=1 python -m unittest discover -s tests` (PowerShell:
+set `$env:AGENT_GUARD_INTEGRATION='1'` before running the test command).
 
 ## MCP isolation rules
 
@@ -578,10 +701,10 @@ Python/Node installation:
 
 | Source | Command |
 |--------|---------|
-| PyPI package | `uvx package-name` |
+| PyPI package | `uvx package-name==1.2.3` |
 | PyPI (module start) | `uv run --with dep1 --with dep2 python -m module` |
 | GitHub (not on PyPI) | `uv tool install --from "git+URL" name` |
-| npm | `npx --silent -y package-name` |
+| npm | `npx --silent -y package-name@1.2.3` |
 | Remote HTTP/SSE | URL in agent config; no local dependencies |
 
 On synced folders (OneDrive, Dropbox), add `--link-mode=copy`:

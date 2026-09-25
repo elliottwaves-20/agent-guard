@@ -86,7 +86,10 @@ def choose_install_tools() -> list[str] | None:
             selected.append(part)
         else:
             print(f"Ignoring unknown target: {part}")
-    return selected
+    # An empty answer means "no restriction", not "no agents": returning []
+    # would install nowhere, while None keeps the default (every detected
+    # agent, through the skills CLI).
+    return selected or None
 
 
 def confirm_install(prompt: str) -> bool:
@@ -222,6 +225,11 @@ def npm_package_from_args(args: list[str]) -> str | None:
 
 
 def uvx_package_from_args(args: list[str]) -> str | None:
+    for index, arg in enumerate(args):
+        if arg == "--from":
+            return args[index + 1] if index + 1 < len(args) else None
+        if arg.startswith("--from="):
+            return arg.partition("=")[2] or None
     skip_next = False
     for arg in args:
         if skip_next:
@@ -308,6 +316,11 @@ def scan_marketplace_candidates(source: ResolvedSource, sandbox: bool,
         if kind == "source":
             rc = scan_candidate_source_url(item)
         elif kind == "remote":
+            if not sandbox:
+                print("[BLOCK] NO VERDICT -- discovered remote endpoint was not contacted. "
+                      "Use --sandbox for explicit runtime inspection or scan the chosen remote URL directly.")
+                worst = max(worst, 2)
+                continue
             rc = run_remote(item)
             if rc == 0:
                 offer_remote_mcp_install(mcp_name_from_url(item), item, dry_run=dry_run)
@@ -356,13 +369,8 @@ def scan_install_command(command: str, sandbox: bool, dry_run: bool) -> int:
         print("[WARN] Runtime sandbox scan not run. Re-run with --sandbox for live MCP "
               "tool/prompt inspection.")
     if rc == 0:
-        try:
-            parts = shlex.split(command, posix=True)
-        except ValueError:
-            print("[WARN] Could not parse install command for installation prompt.")
-            return rc
-        if parts:
-            offer_mcp_install(mcp_name_from_command(parts), parts[0], parts[1:], dry_run=dry_run)
+        print("Use the pinned installation proposal from the derived package scan above. "
+              "The catalog's original command may select different code or extra arguments.")
     return rc
 
 
@@ -424,19 +432,19 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
 
     if source.kind == "pypi":
         with tempfile.TemporaryDirectory() as d:
-            fetch_pypi(source.install_hint, Path(d))
+            pinned = fetch_pypi(source.install_hint, Path(d))
             rc = run_mcp_static(Path(d))
         if rc == 0:
-            offer_mcp_install(source.install_hint, "uvx", [source.install_hint], dry_run)
+            offer_mcp_install(source.install_hint.split("==")[0], "uvx", [pinned], dry_run)
         return rc
 
     if source.kind == "npm":
         with tempfile.TemporaryDirectory() as d:
-            fetch_npm(source.install_hint, Path(d))
+            pinned = fetch_npm(source.install_hint, Path(d))
             rc = run_mcp_static(Path(d))
         if rc == 0:
             offer_mcp_install(source.install_hint, "npx",
-                              ["--silent", "-y", source.install_hint], dry_run)
+                              ["--silent", "-y", pinned], dry_run)
         return rc
 
     path = source.source_path
@@ -517,8 +525,8 @@ def main() -> None:
                         help="for marketplace/catalog pages, only scan the listing text and "
                              "print candidates instead of scanning them")
     parser.add_argument("--sandbox", action="store_true",
-                        help="when marketplace install commands are found, also run the live "
-                             "Cisco stdio scan in Docker sandbox")
+                        help="opt into runtime inspection of discovered remote MCPs and "
+                             "live Cisco stdio scans in Docker for install commands")
     parser.add_argument("--max-candidates", type=int, default=10,
                         help="maximum marketplace candidates to scan automatically")
     args = parser.parse_args()

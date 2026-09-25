@@ -123,7 +123,14 @@ def main():
     ap.add_argument("--catalog", action="store_true",
                     help="treat <path> as a non-installable skill catalog/index: "
                          "scan the catalog text and list linked GitHub repos")
+    ap.add_argument("--baseline", type=Path,
+                    help="explicit reviewer-owned SkillSpector v2 JSON baseline; "
+                         "exact fingerprints only, never auto-loaded from the target")
+    ap.add_argument("--report", type=Path,
+                    help="save the scanner JSON report to a new file (no overwrite)")
     args = ap.parse_args()
+    if (args.baseline or args.report) and (args.all or args.catalog):
+        ap.error("--baseline and --report require one concrete scan target")
 
     target = Path(args.path)
     if not target.exists():
@@ -147,7 +154,7 @@ def main():
               f"({'BLOCK' if worst else 'all SAFE'}).")
         sys.exit(worst)
 
-    sys.exit(run_skillspector(target))
+    sys.exit(run_skillspector(target, baseline=args.baseline, report_output=args.report))
 
 
 if __name__ == "__main__":

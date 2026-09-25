@@ -39,7 +39,6 @@ DEFAULT_HEADERS = {
         "+https://github.com/elliottwaves-20/agent-guard)"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
 }
 LAST_RENDER_FETCH_ERROR = ""
 
@@ -131,13 +130,12 @@ def http_bytes(url: str) -> bytes:
 
 
 def fetch_rendered_page(url: str) -> str | None:
-    """Render a marketplace page when static HTTP sees a JS checkpoint.
+    """Ask an operator-configured renderer for catalog text after a JS checkpoint.
 
-    This executes the marketplace page in a fresh browser context, then returns
-    only rendered HTML/text for catalog scanning. It is not used for source
-    execution or installation. Users can also provide AGENT_GUARD_FETCH_COMMAND,
-    a command that prints rendered HTML/Markdown to stdout; use {url} as an
-    optional placeholder.
+    The renderer is an external, preinstalled command selected solely through
+    ``AGENT_GUARD_FETCH_COMMAND``. This helper does not provide a browser
+    sandbox or promise rendering isolation; it only consumes stdout as
+    untrusted catalog content and never executes it as a source artifact.
     """
     global LAST_RENDER_FETCH_ERROR
     LAST_RENDER_FETCH_ERROR = ""
@@ -166,108 +164,10 @@ def fetch_rendered_page(url: str) -> str | None:
             + (f": {stderr}" if stderr else "")
         )
         LAST_RENDER_FETCH_ERROR = "; ".join(errors)
-    node = shutil.which("node")
-    if node is None:
-        errors.append("node is not installed; cannot try Playwright render fetch")
-        LAST_RENDER_FETCH_ERROR = "; ".join(errors)
-        return None
-    script = r"""
-const { chromium } = require("playwright");
-const url = process.argv[process.argv.length - 1];
-(async () => {
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({
-    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    locale: "en-US",
-  });
-  const page = await context.newPage();
-  await page.goto(url, { waitUntil: "networkidle", timeout: 60000 });
-  await page.waitForTimeout(3000);
-  const title = await page.title().catch(() => "");
-  const text = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
-  const html = await page.content();
-  console.log(`# Rendered marketplace page\n\nTitle: ${title}\nURL: ${page.url()}\n\n## Rendered text\n\n${text}\n\n## Rendered HTML\n\n${html}`);
-  await browser.close();
-})().catch((err) => {
-  console.error(err && err.message ? err.message : String(err));
-  process.exit(2);
-});
-"""
-    with tempfile.TemporaryDirectory() as d:
-        script_path = Path(d) / "render-marketplace.js"
-        script_path.write_text(script, encoding="utf-8")
-        commands = [[node, str(script_path), url]]
-        npx = shutil.which("npx")
-        if npx is not None:
-            commands.append([
-                npx, "--yes", "--package", "playwright",
-                "node", "-e", script, url,
-            ])
-        for index, command in enumerate(commands):
-            label = "Playwright render fetch" if index == 0 else "npx Playwright render fetch"
-            try:
-                r = subprocess.run(command, capture_output=True, text=True,
-                                   encoding="utf-8", errors="replace", timeout=90)
-            except subprocess.TimeoutExpired:
-                errors.append(f"{label} timed out")
-                continue
-            except OSError as e:
-                errors.append(f"{label} failed to start: {e}")
-                continue
-            if r.returncode == 0 and r.stdout.strip():
-                return r.stdout
-            stderr = " ".join((r.stderr or "").split())[:500]
-            if "Cannot find module 'playwright'" in stderr and index == 0:
-                errors.append(
-                    "Node is available, but the local playwright package is not installed"
-                )
-                continue
-            if stderr:
-                errors.append(f"{label} exited {r.returncode}: {stderr}")
-            else:
-                errors.append(f"{label} exited {r.returncode}")
-        npm = shutil.which("npm")
-        if npm is not None:
-            try:
-                install = subprocess.run(
-                    [npm, "install", "--prefix", d, "playwright",
-                     "--no-audit", "--no-fund"],
-                    capture_output=True, text=True,
-                    encoding="utf-8", errors="replace", timeout=90,
-                )
-            except subprocess.TimeoutExpired:
-                errors.append("temporary npm install playwright timed out")
-            except OSError as e:
-                errors.append(f"temporary npm install playwright failed to start: {e}")
-            else:
-                if install.returncode == 0:
-                    try:
-                        r = subprocess.run([node, str(script_path), url],
-                                           capture_output=True, text=True,
-                                           encoding="utf-8", errors="replace",
-                                           timeout=90, cwd=d)
-                    except subprocess.TimeoutExpired:
-                        errors.append("temporary npm Playwright render fetch timed out")
-                    except OSError as e:
-                        errors.append(
-                            f"temporary npm Playwright render fetch failed to start: {e}"
-                        )
-                    else:
-                        if r.returncode == 0 and r.stdout.strip():
-                            return r.stdout
-                        stderr = " ".join((r.stderr or "").split())[:500]
-                        errors.append(
-                            "temporary npm Playwright render fetch exited "
-                            f"{r.returncode}" + (f": {stderr}" if stderr else "")
-                        )
-                else:
-                    stderr = " ".join((install.stderr or "").split())[:500]
-                    errors.append(
-                        f"temporary npm install playwright exited {install.returncode}"
-                        + (f": {stderr}" if stderr else "")
-                    )
+    errors.append("No working explicit AGENT_GUARD_FETCH_COMMAND renderer; configure a trusted preinstalled renderer. Dependency installation during scans is disabled.")
     LAST_RENDER_FETCH_ERROR = "; ".join(errors)
     return None
+
 
 
 def is_security_checkpoint(text: str) -> bool:
@@ -305,9 +205,9 @@ def safe_extract_tar(data: bytes, dest: Path) -> None:
         root = dest.resolve()
         for m in tf.getmembers():
             p = (dest / m.name).resolve()
-            if not str(p).startswith(str(root)):
+            if not p.is_relative_to(root):
                 raise ValueError(f"unsafe path in archive: {m.name}")
-            if m.issym() or m.islnk():
+            if not (m.isfile() or m.isdir()):
                 raise ValueError(f"archive contains a link: {m.name}")
         tf.extractall(dest)
 
@@ -317,7 +217,7 @@ def safe_extract_zip(data: bytes, dest: Path) -> None:
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         for name in zf.namelist():
             p = (dest / name).resolve()
-            if not str(p).startswith(str(root)):
+            if not p.is_relative_to(root):
                 raise ValueError(f"unsafe path in archive: {name}")
         zf.extractall(dest)
 
@@ -354,17 +254,21 @@ def github_parts(url: str) -> tuple[str, str, str | None, list[str]]:
 
 
 def github_default_sha(owner: str, repo: str) -> str:
-    meta = http_json(f"https://api.github.com/repos/{owner}/{repo}/commits/HEAD")
-    return str(meta["sha"])
+    return github_ref_sha(owner, repo, "HEAD")
 
 
 def github_ref_sha(owner: str, repo: str, ref: str) -> str:
+    if re.fullmatch(r"[0-9a-fA-F]{40}", ref):
+        return ref.lower()
     quoted = urllib.parse.quote(ref, safe="")
     try:
         meta = http_json(f"https://api.github.com/repos/{owner}/{repo}/commits/{quoted}")
-        return str(meta["sha"])
-    except Exception:
-        return ref
+        sha = str(meta["sha"])
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+            raise ValueError("invalid commit SHA")
+        return sha.lower()
+    except (FetchError, KeyError, TypeError, ValueError) as exc:
+        raise FetchError(f"could not resolve immutable GitHub commit for {owner}/{repo}: {ref}") from exc
 
 
 def resolve_github(url: str, dest: Path) -> ResolvedSource:
