@@ -1,0 +1,71 @@
+# agent-guard user configuration -- example.
+#
+# Copy to one of these locations (first hit wins) and edit:
+#   AGENT_GUARD_CONFIG=<path>                     explicit file
+#   Windows:  %APPDATA%\agent-guard\config.toml
+#   Linux/macOS: $XDG_CONFIG_HOME/agent-guard/config.toml or ~/.config/agent-guard/config.toml
+#
+# Without this file agent-guard behaves exactly as before (SKILLSPECTOR_* and
+# MCP_SCANNER_LLM_* environment variables, CLI auto-detection).
+#
+# Never put credentials here. A profile names the environment variable that
+# holds its key (key_env); values that look like keys are refused.
+# Check the result with:  python scripts/llm_check.py
+
+# -- Which profile each scanner uses -----------------------------------------
+# skills   = SkillSpector (skill scans and the static MCP source scan)
+# mcp      = Cisco mcp-scanner runtime check (--sandbox / remote); API only
+# campaign = budgeted scans with a hard dollar cap (scripts/llm_scan.py)
+#
+# One-off switch without editing this file:
+#   AGENT_GUARD_LLM=<profile>            all scanners
+#   AGENT_GUARD_LLM_SKILLS / _MCP / _CAMPAIGN=<profile>
+[llm.use]
+skills = "codex"
+mcp = "openai-compatible"
+# campaign = "openai-compatible"
+
+# -- Profiles -----------------------------------------------------------------
+# A coding-agent CLI login: no API key. `cli` is the binary name; SkillSpector
+# provider "<cli>_cli" must exist (claude, codex, gemini, opencode, ...).
+# Omit `model` to use the CLI's own default model.
+[llm.profiles.codex]
+kind = "cli"
+cli = "codex"
+model = "<model-id>"
+# context = 400000        # optional token limits for models SkillSpector does
+# max_output = 16000      # not know yet (written to SKILLSPECTOR_MODEL_REGISTRY)
+# concurrency = 1         # parallel LLM calls; CLI default is 1
+
+# Any OpenAI-compatible endpoint (hosted or local).
+[llm.profiles.openai-compatible]
+kind = "api"
+protocol = "openai"
+base_url = "https://api.example.com/v1"   # https only; plain http only for localhost
+model = "<model-id>"
+key_env = "EXAMPLE_API_KEY"               # name of the variable, not the key
+max_output = 8192
+# litellm_model = "<provider>/<model-id>" # Cisco only: override the derived LiteLLM name
+# timeout = 60                            # Cisco: seconds per LLM call
+# retries = 5                             # Cisco: retries on transient errors / 429
+# retry_delay = 15                        # Cisco: base delay in seconds
+# temperature = 0.1                       # Cisco: sampling temperature
+# reasoning = true                        # Cisco: treat this model as a reasoning model
+#                                         # (max_completion_tokens, temperature 1) even when
+#                                         # its bundled LiteLLM does not know the name yet
+# limits = { rpm = 5, tpm = 30000 }       # provider quota; enforced by campaigns,
+#                                         # Cisco cannot honour it (warns)
+# Required only for [llm.use] campaign:
+# price = { input_usd_per_mtok = 0.35, output_usd_per_mtok = 0.75 }
+# budget = { total_usd = 4, step_usd = 0.5, probe_usd = 0.1, step_requests = 10 }
+# max_input = 8192                        # largest single prompt a campaign sends
+# pricing_url = "<model-info URL>"        # optional live price check (Cerebras schema)
+
+# A scanner-native provider (SkillSpector: anthropic, openai, nv_build, bedrock,
+# ollama, ...; Cisco: the LiteLLM prefix "<provider>/<model>").
+[llm.profiles.anthropic]
+kind = "api"
+protocol = "native"
+provider = "anthropic"
+model = "<model-id>"
+key_env = "ANTHROPIC_API_KEY"

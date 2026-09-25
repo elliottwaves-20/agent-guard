@@ -10,6 +10,14 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")  # never read this machine's personal config
 from llm_scan import new_session
+from _llm_budget import policy_from_profile
+import _pins
+
+POLICY = policy_from_profile("contract", {
+    "kind": "api", "protocol": "openai", "base_url": "https://api.example.test/v1",
+    "model": "contract-model", "key_env": "CONTRACT_KEY", "max_output": 4096,
+    "price": {"input_usd_per_mtok": 0.35, "output_usd_per_mtok": 0.75},
+    "budget": {"total_usd": 4, "step_usd": 0.5}}, _pins.SKILLSPECTOR_VERSION)
 
 DRIVER = r'''
 import json, sys, socket
@@ -48,8 +56,9 @@ def transport(payload):
     content = json.dumps(minimal(schema, schema))
     return {"choices":[{"finish_reason":"stop","message":{"content":content}}],
             "usage":{"prompt_tokens":100,"completion_tokens":20}}, {}
-_llm_adapter.live_transport = lambda: transport
-raise SystemExit(scan(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4] == "preview"))
+_llm_adapter.live_transport = lambda policy: transport
+raise SystemExit(scan(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4] == "preview",
+                     json.loads(sys.argv[5])))
 '''
 
 
@@ -63,10 +72,11 @@ class InstalledBudgetContract(unittest.TestCase):
             target.mkdir()
             (target / "SKILL.md").write_text("---\nname: greeting\ndescription: Greet the user politely.\n---\n\n# Greeting\nSay hello to the user.\n")
             campaign = root / "campaign"
-            session = new_session(target, campaign)
+            session = new_session(target, campaign, POLICY)
             scripts = str(Path(__file__).resolve().parents[1] / "scripts")
             def invoke(mode):
-                result = subprocess.run([sys.executable, "-c", DRIVER, scripts, str(session), str(campaign), mode],
+                result = subprocess.run([sys.executable, "-c", DRIVER, scripts, str(session), str(campaign), mode,
+                                         json.dumps(POLICY)],
                                         capture_output=True, text=True, timeout=90)
                 self.assertIn(result.returncode, (0, 1, 2), result.stderr[-4000:])
                 return result

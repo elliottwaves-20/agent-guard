@@ -14,16 +14,63 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-MODEL = "gpt-oss-120b"
-POLICY = {"version": 1, "scanner": "2.12.0", "model": MODEL,
-          "input_tokens": 8192, "output_tokens": 4096,
-          "total_nusd": 4_000_000_000, "step_nusd": 500_000_000,
-          "probe_nusd": 100_000_000, "step_requests": 10,
-          "input_nusd": 350, "output_nusd": 750}
+from decimal import Decimal, InvalidOperation
+
+from _llm_profile import ProfileError
 
 
 class Paused(RuntimeError):
     """A persisted, fail-closed stop; never an empty successful response."""
+
+
+def _nano_usd(name, section, field, value, per=1):
+    """Dollar amount (or $/Mtok when per=10**6) as integer nano-dollars."""
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        amount = Decimal(-1)
+    if isinstance(value, bool) or value is None or not amount.is_finite() or amount < 0:
+        raise ProfileError(f"profile {name}: {section}.{field} must be a non-negative number")
+    nano = amount * 10**9 / per
+    if nano != nano.to_integral_value():
+        raise ProfileError(f"profile {name}: {section}.{field} is finer than a nano-dollar")
+    return int(nano)
+
+
+def policy_from_profile(name: str, profile: dict, scanner: str) -> dict:
+    """Build the campaign policy from an api/openai profile.
+
+    Everything provider-specific (model, endpoint, prices, quotas, caps) comes
+    from the profile; the policy is bound into every cache key and the ledger,
+    so changing any of it pauses an existing campaign for review."""
+    for section in ("price", "budget"):
+        if not isinstance(profile.get(section), dict):
+            raise ProfileError(f"profile {name}: [{section}] is required for budgeted campaigns")
+    if "max_output" not in profile:
+        raise ProfileError(f"profile {name}: max_output is required for budgeted campaigns")
+    price, budget = profile["price"], profile["budget"]
+    limits = profile.get("limits") or {}
+    for field in ("rpm", "tpm"):
+        value = limits.get(field)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
+            raise ProfileError(f"profile {name}: limits.{field} must be an integer >= 1")
+    requests = budget.get("step_requests", 10)
+    if isinstance(requests, bool) or not isinstance(requests, int) or requests < 1:
+        raise ProfileError(f"profile {name}: budget.step_requests must be an integer >= 1")
+    return {"version": 2, "scanner": scanner, "profile": name,
+            "model": profile["model"], "base_url": profile["base_url"].rstrip("/"),
+            "key_env": profile["key_env"], "pricing_url": profile.get("pricing_url"),
+            "input_tokens": profile.get("max_input", 8192),
+            "output_tokens": profile["max_output"],
+            "total_nusd": _nano_usd(name, "budget", "total_usd", budget.get("total_usd")),
+            "step_nusd": _nano_usd(name, "budget", "step_usd", budget.get("step_usd")),
+            "probe_nusd": _nano_usd(name, "budget", "probe_usd", budget.get("probe_usd", 0.1)),
+            "step_requests": requests,
+            "input_nusd": _nano_usd(name, "price", "input_usd_per_mtok",
+                                    price.get("input_usd_per_mtok"), 10**6),
+            "output_nusd": _nano_usd(name, "price", "output_usd_per_mtok",
+                                     price.get("output_usd_per_mtok"), 10**6),
+            "rpm": limits.get("rpm"), "tpm": limits.get("tpm")}
 
 
 def canonical(value):
@@ -78,17 +125,18 @@ def exclusive_lock(path: Path):
 class Budget:
     """Caller must hold the campaign OS lock for the entire instance lifetime."""
 
-    def __init__(self, campaign: Path, session: Path, identity: str, *, preview=False,
-                 transport=None, clock=time.time, sleep=time.sleep):
+    def __init__(self, campaign: Path, session: Path, identity: str, *, policy: dict,
+                 preview=False, transport=None, clock=time.time, sleep=time.sleep):
         self.campaign, self.session, self.identity = campaign, session, identity
+        self.policy = policy
         self.preview, self.transport, self.clock, self.sleep = preview, transport, clock, sleep
         self.path = campaign / "budget.json"
         self.data = (json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists()
-                     else {"policy": POLICY, "attempts": [], "not_before": 0})
-        if self.data["policy"] != POLICY:
+                     else {"policy": policy, "attempts": [], "not_before": 0})
+        if self.data["policy"] != policy:
             raise Paused("Campaign policy changed; review required")
-        self.step_limit = POLICY["probe_nusd"] if not self.data["attempts"] else POLICY["step_nusd"]
-        self.request_limit = 1 if not self.data["attempts"] else POLICY["step_requests"]
+        self.step_limit = self.policy["probe_nusd"] if not self.data["attempts"] else self.policy["step_nusd"]
+        self.request_limit = 1 if not self.data["attempts"] else self.policy["step_requests"]
         self.step_start = len(self.data["attempts"])
         self.stopped = None
         self.observed = {}
@@ -134,7 +182,7 @@ class Budget:
         size = len(canonical(payload).encode("utf-8"))
         estimated = math.ceil(size / 3)
         upper = size + 1024
-        key = digest({"identity": self.identity, "policy": POLICY,
+        key = digest({"identity": self.identity, "policy": self.policy,
                       "payload": payload, "context": context})
         self.observed[key] = {"id": key, **context, "bytes": size,
                               "estimated_input_tokens": estimated,
@@ -159,37 +207,39 @@ class Budget:
                 for v in self.observed.values()
             ):
                 self.stop("Meta analysis deferred until prerequisite batches complete")
-            if estimated > POLICY["input_tokens"]:
+            if estimated > self.policy["input_tokens"]:
                 self.stop("Final prompt exceeds input limit; no content was truncated")
             if any(a["id"] == key and a["state"] not in ("complete", "rate_limited") for a in self.data["attempts"]):
                 self.stop("Previous request has an unresolved outcome; explicit review required")
-            reserve = upper * POLICY["input_nusd"] + POLICY["output_tokens"] * POLICY["output_nusd"]
+            reserve = upper * self.policy["input_nusd"] + self.policy["output_tokens"] * self.policy["output_nusd"]
             attempts = self.data["attempts"]
             if len(attempts) - self.step_start >= self.request_limit:
                 self.stop("Etappe complete: request limit reached")
             if sum(a["charged_nusd"] for a in attempts[self.step_start:]) + reserve > self.step_limit:
                 self.stop("Etappe budget exhausted")
-            if sum(a["charged_nusd"] for a in attempts) + reserve > POLICY["total_nusd"]:
+            if sum(a["charged_nusd"] for a in attempts) + reserve > self.policy["total_nusd"]:
                 self.stop("Campaign budget exhausted")
             now = self.clock()
             if self.data["not_before"] > now:
                 self.stop(f"Provider pause; resume after Unix time {self.data['not_before']}")
             for name, quota in self.data.get("quotas", {}).items():
-                needed = estimated + POLICY["output_tokens"] if "token" in name else 1
+                needed = estimated + self.policy["output_tokens"] if "token" in name else 1
                 if quota["reset"] > now and quota["remaining"] < needed:
                     self.data["not_before"] = quota["reset"]
                     self.save()
                     self.stop(f"Provider quota low; resume after Unix time {quota['reset']}")
-            # Three requests/minute and a conservative rolling 30K token budget.
+            # Provider quotas from the profile: a rolling per-minute token window
+            # and even request spacing (60/rpm seconds plus a small margin).
             recent = [a for a in attempts if now - a["time"] < 60]
             token_load = sum(a["estimated_tokens"] for a in recent)
-            if recent and token_load + estimated + POLICY["output_tokens"] > 30000:
+            if (self.policy["tpm"] and recent
+                    and token_load + estimated + self.policy["output_tokens"] > self.policy["tpm"]):
                 self.sleep(max(0, 60 - (now - recent[0]["time"])))
-            if attempts:
-                self.sleep(max(0, attempts[-1]["time"] + 20.1 - self.clock()))
+            if attempts and self.policy["rpm"]:
+                self.sleep(max(0, attempts[-1]["time"] + 60 / self.policy["rpm"] + 0.1 - self.clock()))
             attempt = {"id": key, "time": self.clock(), "state": "reserved",
                        "charged_nusd": reserve, "reserved_nusd": reserve,
-                       "estimated_tokens": estimated + POLICY["output_tokens"],
+                       "estimated_tokens": estimated + self.policy["output_tokens"],
                        "session": self.session.name}
             attempts.append(attempt)
             self.save()  # Durable BEFORE dispatch, also on interruption/crash.
@@ -199,7 +249,7 @@ class Budget:
                 usage = response.get("usage")
                 if isinstance(usage, dict) and all(type(usage.get(k)) is int and usage[k] >= 0
                                                  for k in ("prompt_tokens", "completion_tokens")):
-                    actual = usage["prompt_tokens"] * POLICY["input_nusd"] + usage["completion_tokens"] * POLICY["output_nusd"]
+                    actual = usage["prompt_tokens"] * self.policy["input_nusd"] + usage["completion_tokens"] * self.policy["output_nusd"]
                     attempt["charged_nusd"] = actual
                     attempt["usage"] = usage
                     if actual > reserve:
@@ -227,7 +277,7 @@ class Budget:
                 self.stop(f"Request paused: {type(exc).__name__}; inspect budget.json")
 
     def summary(self):
-        return {"policy": POLICY, "preview": self.preview,
+        return {"policy": self.policy, "preview": self.preview,
                 "requests_this_step": len(self.data["attempts"]) - self.step_start,
                 "requests_total": len(self.data["attempts"]),
                 "charged_or_reserved_usd": sum(a["charged_nusd"] for a in self.data["attempts"]) / 1e9,

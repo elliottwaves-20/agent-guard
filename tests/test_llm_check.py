@@ -1,0 +1,64 @@
+"""llm_check reports the effective LLM connection per scanner without network."""
+import importlib
+import os
+from pathlib import Path
+import sys
+import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")  # never read this machine's personal config
+llm_check = importlib.import_module("llm_check")
+
+CONFIG = {"llm": {"use": {"skills": "luna", "mcp": "cerebras", "campaign": "cerebras"},
+                  "profiles": {
+    "luna": {"kind": "cli", "cli": "codex", "model": "gpt-6-luna"},
+    "cerebras": {"kind": "api", "protocol": "openai", "base_url": "https://api.cerebras.ai/v1",
+                 "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY", "max_output": 8192,
+                 "price": {"input_usd_per_mtok": 0.35, "output_usd_per_mtok": 0.75},
+                 "budget": {"total_usd": 4, "step_usd": 0.5}},
+}}}
+
+
+def rows_by_scanner(rows):
+    return {row["scanner"]: row for row in rows}
+
+
+class DescribeTests(unittest.TestCase):
+    def test_profiles_are_reported_per_scanner(self):
+        rows = rows_by_scanner(llm_check.describe(
+            CONFIG, {"CEREBRAS_API_KEY": "csk-x"}, which=lambda name: f"/bin/{name}"))
+        self.assertEqual(rows["skills"]["source"], "profile luna")
+        self.assertEqual(rows["skills"]["connection"], "codex_cli")
+        self.assertEqual(rows["skills"]["model"], "gpt-6-luna")
+        self.assertTrue(rows["skills"]["ready"])
+        self.assertEqual(rows["mcp"]["model"], "openai/gpt-oss-120b")
+        self.assertTrue(rows["mcp"]["ready"])
+        self.assertTrue(rows["campaign"]["ready"])
+
+    def test_missing_key_and_binary_are_reported_not_raised(self):
+        rows = rows_by_scanner(llm_check.describe(CONFIG, {}, which=lambda name: None))
+        self.assertFalse(rows["skills"]["ready"])
+        self.assertIn("codex", rows["skills"]["problem"])
+        self.assertFalse(rows["mcp"]["ready"])
+        self.assertIn("CEREBRAS_API_KEY", rows["mcp"]["problem"])
+        self.assertFalse(rows["campaign"]["ready"])
+        self.assertIn("CEREBRAS_API_KEY", rows["campaign"]["problem"])
+
+    def test_broken_profile_becomes_a_row_problem(self):
+        cfg = {"llm": {"use": {"skills": "missing"}, "profiles": {}}}
+        rows = rows_by_scanner(llm_check.describe(cfg, {}, which=lambda name: None))
+        self.assertFalse(rows["skills"]["ready"])
+        self.assertIn("missing", rows["skills"]["problem"])
+
+    def test_without_profiles_scanners_report_legacy_sources(self):
+        rows = rows_by_scanner(llm_check.describe(
+            {}, {"MCP_SCANNER_LLM_MODEL": "openai/gpt-x"}, which=lambda name: None))
+        self.assertEqual(rows["skills"]["source"], "legacy env")
+        self.assertEqual(rows["mcp"]["source"], "legacy env")
+        self.assertEqual(rows["mcp"]["model"], "openai/gpt-x")
+        self.assertFalse(rows["mcp"]["ready"])
+        self.assertEqual(rows["campaign"]["source"], "not configured")
+
+
+if __name__ == "__main__":
+    unittest.main()

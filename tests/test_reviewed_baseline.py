@@ -162,8 +162,9 @@ class InstalledScannerBaselineTests(unittest.TestCase):
         result = subprocess.run([python, "-c", probe], capture_output=True,
                                 text=True, encoding="utf-8", env=env, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
+        import _pins
         self.assertEqual(json.loads(result.stdout),
-                         ["2.12.0", 780.0, "c7958a3268d9498644b22edb75d0f051bbc8cbfc"])
+                         [_pins.SKILLSPECTOR_VERSION, 780.0, _pins.SKILLSPECTOR_SHA])
 
     def test_real_fingerprints_reject_modified_source_and_new_payload(self):
         ss.need_skillspector()

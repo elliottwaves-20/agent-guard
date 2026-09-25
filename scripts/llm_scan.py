@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Bounded SkillSpector selfscans: plan TARGET, run SESSION, resume SESSION.
 
-Sessions share one campaign ledger, outside every target. API keys are read
-only from CEREBRAS_API_KEY. No installation or baseline approval is performed.
+Sessions share one campaign ledger, outside every target. The provider, its
+prices, quotas and budget caps come from the [llm.use] campaign profile of the
+user config (kind = "api", protocol = "openai"); the key is read only from the
+variable that profile names. No installation or baseline approval is performed.
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ import subprocess
 import sys
 import uuid
 
-from _llm_budget import Budget, POLICY, Paused, atomic_json, digest, exclusive_lock
+from _llm_budget import Budget, Paused, atomic_json, digest, exclusive_lock, policy_from_profile
 
 
 def campaign_root():
@@ -41,7 +43,7 @@ def manifest(root):
     return entries
 
 
-def new_session(target, campaign):
+def new_session(target, campaign, policy):
     target, campaign = target.resolve(strict=True), campaign.resolve()
     if not target.is_dir():
         raise Paused("plan requires a local directory")
@@ -80,35 +82,50 @@ def new_session(target, campaign):
     # Catch ordinary edits while copying; do not claim an atomic live checkout.
     if any(hashlib.sha256(source.read_bytes()).hexdigest() != files[relative] for source, relative in paths):
         raise Paused("Target changed while creating snapshot; plan again")
-    binding = {"files": files, "policy": POLICY, "adapter": adapter_identity()}
+    binding = {"files": files, "policy": policy, "adapter": adapter_identity()}
     info = {"target": str(target), **binding, "excluded": excluded,
             "identity": digest(binding), "campaign": str(campaign)}
     atomic_json(session / "session.json", info)
     return session
 
 
-def validate_session(session, campaign):
+def validate_session(session, campaign, policy):
     session = session.resolve(strict=True)
     if session.parent != campaign.resolve() / "sessions":
         raise Paused("Session does not belong to this campaign")
     info = json.loads((session / "session.json").read_text(encoding="utf-8"))
     files = manifest(session / "snapshot")
-    binding = {"files": files, "policy": POLICY, "adapter": adapter_identity()}
-    if (info["files"] != files or info["policy"] != POLICY or
+    binding = {"files": files, "policy": policy, "adapter": adapter_identity()}
+    if (info["files"] != files or info["policy"] != policy or
             info["identity"] != digest(binding)):
         raise Paused("Snapshot/policy changed; cached responses cannot be reused")
     return info
 
 
-def scan(session, campaign, preview):
-    info = validate_session(session, campaign)
+def campaign_policy(env=None) -> dict:
+    """Policy of the [llm.use] campaign profile; Paused when none is usable."""
+    import _llm_profile
+    import _pins
+    import _user_config
+    env = os.environ if env is None else env
+    try:
+        selected = _llm_profile.select_profile(_user_config.load_config(env=env), "campaign", env)
+        if selected is None:
+            raise Paused("No [llm.use] campaign profile configured; see config.example.toml")
+        return policy_from_profile(*selected, _pins.SKILLSPECTOR_VERSION)
+    except (_user_config.ConfigError, _llm_profile.ProfileError) as exc:
+        raise Paused(str(exc)) from None
+
+
+def scan(session, campaign, preview, policy):
+    info = validate_session(session, campaign, policy)
     from _llm_adapter import ProviderError, install, live_transport
-    budget = Budget(campaign, session, info["identity"], preview=preview)
+    budget = Budget(campaign, session, info["identity"], policy=policy, preview=preview)
     # Check installed contract before touching any provider network endpoint.
     try:
         install(budget)
         if not preview:
-            budget.transport = live_transport()
+            budget.transport = live_transport(policy)
     except (Paused, ProviderError, OSError, ValueError, KeyError) as exc:
         budget.stopped = f"Preflight failed: {type(exc).__name__}"
         if isinstance(exc, ProviderError):
@@ -171,11 +188,13 @@ def main():
         print(result.stdout)
         print(result.stderr, file=sys.stderr)
         return result.returncode
+    policy = campaign_policy()
     campaign = campaign_root().resolve()
     with exclusive_lock(campaign / "campaign.lock"):
-        session = new_session(args.path, campaign) if args.command == "plan" else args.path.resolve()
+        session = (new_session(args.path, campaign, policy) if args.command == "plan"
+                   else args.path.resolve())
         print(f"Session: {session}", flush=True)
-        return scan(session, campaign, args.command == "plan")
+        return scan(session, campaign, args.command == "plan", policy)
 
 
 if __name__ == "__main__":

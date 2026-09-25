@@ -10,7 +10,15 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")  # never read this machine's personal config
-from _llm_budget import Budget, POLICY, Paused, atomic_json, exclusive_lock
+from _llm_budget import Budget, Paused, atomic_json, exclusive_lock, policy_from_profile
+from _llm_profile import ProfileError
+
+CAMPAIGN = {"kind": "api", "protocol": "openai", "base_url": "https://api.cerebras.ai/v1",
+            "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY", "max_output": 4096,
+            "price": {"input_usd_per_mtok": 0.35, "output_usd_per_mtok": 0.75},
+            "budget": {"total_usd": 4, "step_usd": 0.5, "probe_usd": 0.1, "step_requests": 10},
+            "limits": {"rpm": 3, "tpm": 30000}}
+POLICY = policy_from_profile("test", CAMPAIGN, "2.12.0")
 from _llm_adapter import Model, ProviderError, strict_schema
 from llm_scan import new_session, validate_session
 
@@ -33,9 +41,9 @@ class BudgetTests(unittest.TestCase):
         target.mkdir()
         (target / "SKILL.md").write_text("Say hello")
         campaign = self.root / "campaign"
-        session = new_session(target, campaign)
+        session = new_session(target, campaign, POLICY)
         with patch("_llm_adapter.install"), patch("_llm_adapter.live_transport", side_effect=ProviderError(403)):
-            self.assertEqual(llm_scan.scan(session, campaign, False), 2)
+            self.assertEqual(llm_scan.scan(session, campaign, False, POLICY), 2)
         result = json.loads((session / "progress.json").read_text())
         self.assertFalse(result["complete"])
         self.assertEqual(result["requests_total"], 0)
@@ -60,7 +68,8 @@ class BudgetTests(unittest.TestCase):
 
     def budget(self, **kwargs):
         return Budget(self.root, self.session, kwargs.pop("identity", "snapshot"),
-                      transport=self.transport, clock=lambda: self.now, sleep=self.sleep, **kwargs)
+                      policy=kwargs.pop("policy", POLICY), transport=self.transport,
+                      clock=lambda: self.now, sleep=self.sleep, **kwargs)
 
     def call(self, budget, prompt="a", analyzer="security"):
         return budget.call({"messages": [{"role": "user", "content": prompt}]},
@@ -207,13 +216,13 @@ class BudgetTests(unittest.TestCase):
         (target / "SKILL.md").write_text("Read-only skill")
         (target / ".env").write_text("CEREBRAS_API_KEY=test-not-real")
         campaign = self.root / "campaign"
-        session = new_session(target, campaign)
-        info = validate_session(session, campaign)
+        session = new_session(target, campaign, POLICY)
+        info = validate_session(session, campaign, POLICY)
         self.assertNotIn(".env", info["files"])
         self.assertEqual(info["excluded"][0]["path"], ".env")
         (session / "snapshot/SKILL.md").write_text("Changed")
         with self.assertRaises(Paused):
-            validate_session(session, campaign)
+            validate_session(session, campaign, POLICY)
 
     def test_structured_payload_has_no_tools_and_preserves_prompt(self):
         class Schema:
@@ -228,6 +237,74 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(payload["messages"][0]["content"], "Untrusted complete prompt")
         self.assertEqual(payload["max_completion_tokens"], 4096)
         self.assertTrue(payload["response_format"]["json_schema"]["strict"])
+
+    def test_policy_converts_profile_prices_and_caps_to_nano_dollars(self):
+        self.assertEqual((POLICY["input_nusd"], POLICY["output_nusd"]), (350, 750))
+        self.assertEqual((POLICY["total_nusd"], POLICY["step_nusd"], POLICY["probe_nusd"]),
+                         (4_000_000_000, 500_000_000, 100_000_000))
+        self.assertEqual((POLICY["output_tokens"], POLICY["input_tokens"]), (4096, 8192))
+        self.assertEqual(POLICY["model"], "gpt-oss-120b")
+
+    def test_policy_requires_price_budget_and_output_cap(self):
+        for field in ("price", "budget", "max_output"):
+            with self.subTest(field=field), self.assertRaises(ProfileError):
+                policy_from_profile("t", {k: v for k, v in CAMPAIGN.items() if k != field}, "2.12.0")
+
+    def test_request_spacing_follows_profile_rpm(self):
+        policy = policy_from_profile("t", dict(CAMPAIGN, limits={"rpm": 6}), "2.12.0")
+        self.call(self.budget(policy=policy), "probe")
+        start = self.now
+        self.call(self.budget(policy=policy), "second")
+        self.assertGreaterEqual(self.now - start, 10.0)
+        self.assertLess(self.now - start, 11.0)
+
+    def test_profile_without_limits_does_not_pace(self):
+        policy = policy_from_profile("t", {k: v for k, v in CAMPAIGN.items() if k != "limits"}, "2.12.0")
+        self.call(self.budget(policy=policy), "probe")
+        self.call(self.budget(policy=policy), "second")
+        self.assertEqual(self.now, 1000.0)
+
+    def test_changed_policy_pauses_existing_campaign(self):
+        self.call(self.budget(), "probe")
+        other = policy_from_profile("t", dict(CAMPAIGN, model="other-model"), "2.12.0")
+        with self.assertRaises(Paused):
+            self.budget(policy=other)
+
+    def test_live_transport_skips_pricing_check_without_pricing_url(self):
+        import _llm_adapter
+        calls = []
+        def fake(url, payload=None, key=None):
+            calls.append((url, key))
+            return {"choices": []}, {}
+        with patch.object(_llm_adapter, "http_json", fake),                 patch.dict(os.environ, {"CEREBRAS_API_KEY": "csk-test"}):
+            send = _llm_adapter.live_transport(POLICY)
+            self.assertEqual(calls, [])
+            send({"model": "gpt-oss-120b"})
+        self.assertEqual(calls, [("https://api.cerebras.ai/v1/chat/completions", "csk-test")])
+
+    def test_live_transport_needs_the_profile_key(self):
+        import _llm_adapter
+        with patch.dict(os.environ, {}, clear=True), self.assertRaises(Paused):
+            _llm_adapter.live_transport(POLICY)
+
+    def test_campaign_policy_comes_from_the_campaign_profile(self):
+        import llm_scan
+        config = self.root / "config.toml"
+        config.write_text(chr(10).join([
+            '[llm.use]', 'campaign = "c"', '[llm.profiles.c]', 'kind = "api"',
+            'protocol = "openai"', 'base_url = "https://api.example.test/v1"',
+            'model = "m-1"', 'key_env = "EXAMPLE_KEY"', 'max_output = 2048',
+            'price = { input_usd_per_mtok = 0.1, output_usd_per_mtok = 0.2 }',
+            'budget = { total_usd = 1, step_usd = 0.25 }', '']), encoding="utf-8")
+        policy = llm_scan.campaign_policy({"AGENT_GUARD_CONFIG": str(config)})
+        self.assertEqual((policy["model"], policy["base_url"], policy["key_env"]),
+                         ("m-1", "https://api.example.test/v1", "EXAMPLE_KEY"))
+        self.assertEqual((policy["input_nusd"], policy["output_nusd"]), (100, 200))
+
+    def test_campaign_without_profile_is_paused(self):
+        import llm_scan
+        with self.assertRaises(Paused):
+            llm_scan.campaign_policy({"AGENT_GUARD_NO_USER_CONFIG": "1"})
 
 
 if __name__ == "__main__":

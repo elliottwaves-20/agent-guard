@@ -88,10 +88,13 @@ load_agent_guard_env()
 # after the env files. A config that exists but is unsafe or unreadable stops
 # every wrapper before anything is scanned -- ignoring it silently would run
 # the scan with settings the user did not choose.
+import _llm_profile
 import _user_config
 try:
     USER_CONFIG = _user_config.load_config()
-except _user_config.ConfigError as exc:
+    # (name, profile) for SkillSpector, or None for the legacy env resolution.
+    LLM_PROFILE = _llm_profile.select_profile(USER_CONFIG, "skills", os.environ)
+except (_user_config.ConfigError, _llm_profile.ProfileError) as exc:
     print(f"ERROR: agent-guard config: {exc}", file=sys.stderr)
     sys.exit(2)
 
@@ -279,16 +282,8 @@ CLI_PROVIDERS = {
     "gemini_cli": "gemini",
 }
 
-# Hosted providers and the env vars they need.
-KEY_PROVIDERS = {
-    "anthropic": ("ANTHROPIC_API_KEY",),
-    "openai": ("OPENAI_API_KEY",),
-    "nv_build": ("NVIDIA_INFERENCE_KEY",),
-    "nv_inference": ("NVIDIA_INFERENCE_KEY",),
-    "anthropic_proxy": ("ANTHROPIC_PROXY_API_KEY", "ANTHROPIC_PROXY_ENDPOINT_URL"),
-    "azure_openai": ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"),
-    "openai_compatible": ("SKILLSPECTOR_COMPAT_API_KEY", "SKILLSPECTOR_COMPAT_BASE_URL"),
-}
+# Hosted providers and the env vars they need (shared with the profile layer).
+KEY_PROVIDERS = _llm_profile.SKILLSPECTOR_KEY_VARS
 # Auto-detection only considers the unambiguous key providers, in this order.
 KEY_AUTODETECT_ORDER = ("anthropic", "openai", "nv_build")
 
@@ -349,13 +344,20 @@ def resolve_llm() -> tuple[str, bool, str]:
     Resolution order:
       1. AGENT_GUARD_STATIC_ONLY=1 disables only LLM semantic analysis; other
          configured static analyzers may still perform their own network lookups.
-      2. An explicit SKILLSPECTOR_PROVIDER is honoured and validated: a CLI
+      2. An active LLM profile from the user config decides alone; stale
+         SKILLSPECTOR_* settings are ignored.
+      3. An explicit SKILLSPECTOR_PROVIDER is honoured and validated: a CLI
          provider needs its binary on PATH, a hosted one its credential(s).
-      3. Otherwise auto-detect: a hosted credential in the environment wins
+      4. Otherwise auto-detect: a hosted credential in the environment wins
          (explicit intent), then the first coding-agent CLI on PATH.
     """
     if _static_only_forced():
         return "", False, "AGENT_GUARD_STATIC_ONLY is set"
+
+    if LLM_PROFILE:
+        env, ready, reason, _registry = _llm_profile.skillspector_env(
+            *LLM_PROFILE, os.environ, which=shutil.which)
+        return env["SKILLSPECTOR_PROVIDER"], ready, reason
 
     explicit = os.environ.get("SKILLSPECTOR_PROVIDER", "").strip().lower()
     explicit = PROVIDER_ALIASES.get(explicit, explicit)
@@ -395,6 +397,26 @@ def skillspector_llm_usable() -> bool:
     return LLM_READY
 
 
+_REGISTRY_FILE: str | None = None
+
+
+def _profile_registry_file(registry: dict) -> str:
+    """Write the profile's single-model registry once per process.
+
+    SkillSpector reads SKILLSPECTOR_MODEL_REGISTRY as YAML; JSON is valid YAML,
+    so no extra dependency is needed. The file replaces the bundled registry,
+    which is fine because a profile run uses exactly this one model."""
+    global _REGISTRY_FILE
+    if _REGISTRY_FILE is None:
+        import atexit
+        fd, path = tempfile.mkstemp(prefix="agent-guard-registry-", suffix=".yaml")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(registry, handle)
+        atexit.register(lambda: Path(path).unlink(missing_ok=True))
+        _REGISTRY_FILE = path
+    return _REGISTRY_FILE
+
+
 def skillspector_env() -> dict:
     """Environment for SkillSpector: force UTF-8 (its rich terminal renderer
     crashes on a legacy Windows cp1252 console) and pin the resolved provider
@@ -402,21 +424,30 @@ def skillspector_env() -> dict:
     usable the provider variable is dropped so SkillSpector does not try (and
     fail) on its own default; the scan is run with --no-llm."""
     e = dict(os.environ)
+    profile_active = bool(LLM_PROFILE) and LLM_READY
+    if profile_active:
+        e, _ready, _reason, registry = _llm_profile.skillspector_env(
+            *LLM_PROFILE, e, which=shutil.which)
+        if registry:
+            e["SKILLSPECTOR_MODEL_REGISTRY"] = _profile_registry_file(registry)
     e["PYTHONUTF8"] = "1"
     e["PYTHONIOENCODING"] = "utf-8"
     e["SKILLSPECTOR_MAX_WORKFLOW_SECONDS"] = str(WORKFLOW_BUDGET)
     if LLM_READY:
         e["SKILLSPECTOR_PROVIDER"] = PROVIDER
+        is_cli = PROVIDER.endswith("_cli") if profile_active else PROVIDER in CLI_PROVIDERS
         # SkillSpector's own default fan-out is 10 parallel LLM calls, which suits a
         # normal API quota -- we leave it alone for key providers. A CLI provider is
         # different, and the difference is ours: every call becomes a separate CLI
         # subprocess driving one interactive login, so a 10-wide burst spends a single
         # subscription's rate limit in seconds and SkillSpector drops the 429'd batches.
         # Serialize that case unless the user has chosen a value.
-        if PROVIDER in CLI_PROVIDERS and not e.get("SKILLSPECTOR_MAX_LLM_CONCURRENCY", "").strip():
+        if is_cli and not e.get("SKILLSPECTOR_MAX_LLM_CONCURRENCY", "").strip():
             e["SKILLSPECTOR_MAX_LLM_CONCURRENCY"] = "1"
         model = e.get("SKILLSPECTOR_MODEL", "").strip()
-        if model and not model_matches_provider(PROVIDER, model):
+        # A profile's model is the user's explicit choice; the marker check only
+        # guards against leftovers in the legacy env configuration.
+        if model and not profile_active and not model_matches_provider(PROVIDER, model):
             print(f"  NOTE: SKILLSPECTOR_MODEL={model} does not belong to provider "
                   f"{PROVIDER}; ignoring it and using the provider's default model.")
             e.pop("SKILLSPECTOR_MODEL", None)

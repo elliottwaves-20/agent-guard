@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- Add LLM profiles to the user config (`config.example.toml`). `[llm.use]`
+  picks a profile per scanner -- `skills` (SkillSpector), `mcp` (Cisco
+  runtime check), `campaign` (budgeted scans) -- and a profile describes only
+  the connection kind: a coding-agent CLI login, any OpenAI-compatible
+  endpoint, or a scanner-native provider. Switching models or providers is a
+  config edit; `AGENT_GUARD_LLM[_SKILLS|_MCP|_CAMPAIGN]` switches for one run.
+  An active profile replaces stale `SKILLSPECTOR_*` / `MCP_SCANNER_LLM_*`
+  settings, and token limits for models SkillSpector does not know yet are
+  passed as a one-model `SKILLSPECTOR_MODEL_REGISTRY`. Without a profile the
+  environment-based resolution is unchanged.
+- The Cisco runtime check now always receives an explicit model (it silently
+  fell back to `gpt-4o`). Profiles map token cap, timeout, retries and
+  temperature; `reasoning = true` applies Cisco's own reasoning request rule
+  (`max_completion_tokens`, temperature 1) to models its pinned LiteLLM does
+  not know yet, via `scripts/_cisco_boot.py`. Cisco analyses all tools of a
+  server in parallel, so a profile's `limits.rpm` is reported, not enforced.
+- Budgeted campaigns (`llm_scan.py`) take model, endpoint, key variable,
+  prices, quotas and caps from the `campaign` profile instead of built-in
+  Cerebras constants; the live price check runs only when the profile names a
+  `pricing_url`. The policy version changed, so existing campaigns pause for
+  review.
+- Add `scripts/llm_check.py`: shows the effective LLM per scanner without
+  network access; `--probe skills|mcp` sends exactly one request through that
+  scanner's own client.
+- Keep the SkillSpector pin in one place (`scripts/_pins.py`); a test keeps
+  both setup scripts in sync with it.
 - Pin SkillSpector v2.12.0 to commit `c7958a3268d9498644b22edb75d0f051bbc8cbfc`
   in both setup scripts. The budget adapter's patch points (chat-model
   factories, retry constants, `LLMAnalyzerBase` batch hooks) are unchanged

@@ -53,8 +53,10 @@ import zipfile
 import uuid
 from pathlib import Path
 
+import _llm_profile
 from _skillspector import (
     SCAN_TIMEOUT,
+    USER_CONFIG,
     die,
     run_bounded,
     run_skillspector as shared_run_skillspector,
@@ -62,6 +64,11 @@ from _skillspector import (
 
 MCP_SCANNER = shutil.which("mcp-scanner")      # Stage 2 / remote: runtime (Cisco)
 
+# (name, profile) for the Cisco runtime check, or None for MCP_SCANNER_LLM_*.
+try:
+    CISCO_PROFILE = _llm_profile.select_profile(USER_CONFIG, "mcp", os.environ)
+except _llm_profile.ProfileError as exc:
+    die(f"agent-guard config: {exc}")
 
 CISCO_LLM_KEY = os.environ.get("MCP_SCANNER_LLM_API_KEY", "").strip()
 CISCO_LLM_MODEL = os.environ.get("MCP_SCANNER_LLM_MODEL", "").strip()
@@ -105,11 +112,46 @@ def validate_cisco_llm_config() -> None:
             )
 
 
+CISCO_BOOT = Path(__file__).with_name("_cisco_boot.py")
+
+
+def cisco_command(env: dict) -> list:
+    """argv prefix for a Cisco scan. A reasoning profile needs the boot shim,
+    which applies Cisco's reasoning request rule to the profile's model;
+    otherwise the installed `mcp-scanner` entry point is used unchanged."""
+    if env.get("AGENT_GUARD_CISCO_REASONING") == "1":
+        return [mcpscanner_python(), str(CISCO_BOOT)]
+    return [MCP_SCANNER]
+
+
+def cisco_llm_problem() -> str | None:
+    """Why the Cisco runtime LLM cannot run, or None when it can."""
+    if CISCO_PROFILE:
+        return _llm_profile.cisco_env(*CISCO_PROFILE, os.environ)[1]
+    if not CISCO_LLM_KEY:
+        return ("no Cisco runtime LLM key -- configure an [llm.use] mcp profile or "
+                "MCP_SCANNER_LLM_API_KEY + MCP_SCANNER_LLM_MODEL")
+    return None
+
+
 def cisco_env() -> dict:
     """Environment for the Cisco MCP scanner: hand it the LiteLLM model + base
     URL so its LiteLLM uses the configured runtime provider instead of its
     default. The key is passed via environment, not CLI args, so it does not
     show up in process listings and avoids mcp-scanner CLI flag regressions."""
+    if CISCO_PROFILE:
+        name, profile = CISCO_PROFILE
+        e, problem = _llm_profile.cisco_env(name, profile, os.environ)
+        if problem:
+            die(f"Cisco runtime LLM: {problem}")
+        if (profile.get("limits") or {}).get("rpm"):
+            # Cisco analyses all tools of a server concurrently and has no
+            # concurrency switch, so a per-minute quota can only be absorbed
+            # by its retries (profile: retries / retry_delay), not enforced.
+            print(f"  NOTE: profile {name} sets limits.rpm; the Cisco scanner cannot "
+                  "honour it (it analyses all tools in parallel). Raise retries / "
+                  "retry_delay or use a provider with a larger per-minute quota.")
+        return e
     validate_cisco_llm_config()
     e = dict(os.environ)
     if CISCO_LLM_KEY:
@@ -337,9 +379,9 @@ def run_cisco(cmd: list, label: str, env: dict = None) -> int:
 
 def run_remote(url: str) -> int:
     need_mcp_scanner()
-    cmd = [MCP_SCANNER, "--format", "summary", "remote", "--server-url", url]
-    return run_cisco(cmd, f"scanning remote MCP (no local code runs): {url}",
-                     env=cisco_env())
+    env = cisco_env()
+    cmd = [*cisco_command(env), "--format", "summary", "remote", "--server-url", url]
+    return run_cisco(cmd, f"scanning remote MCP (no local code runs): {url}", env=env)
 
 
 def run_virustotal(path: Path, max_files: int = VT_MAX_FILES) -> int:
@@ -387,10 +429,9 @@ def run_sandbox(command: list) -> int:
         die("sandbox scan needs a launch command")
     if shutil.which("docker") is None:
         die("--sandbox needs Docker, which was not found on PATH.")
-    if not CISCO_LLM_KEY:
-        die("sandbox scan needs a Cisco runtime LLM key. Configure "
-            "MCP_SCANNER_LLM_API_KEY + MCP_SCANNER_LLM_MODEL in .env.")
-    validate_cisco_llm_config()
+    problem = cisco_llm_problem()
+    if problem:
+        die(f"sandbox scan needs a Cisco runtime LLM: {problem}")
     build_sandbox_image()
     container = "agent-guard-scan-" + uuid.uuid4().hex
     docker = [
@@ -401,11 +442,11 @@ def run_sandbox(command: list) -> int:
         "-e", "HOME=/tmp", "-e", "UV_CACHE_DIR=/tmp/uvcache",
         DOCKER_IMAGE, *command,
     ]
-    scan = [MCP_SCANNER, "--format", "summary", "--analyzers", "yara,llm",
-            "stdio", "--stdio-command", "docker"]
-    scan.extend(f"--stdio-arg={arg}" for arg in docker)
     env = cisco_env()
     env["MCP_SCANNER_STDIO_TIMEOUT"] = str(STDIO_TIMEOUT)
+    scan = [*cisco_command(env), "--format", "summary", "--analyzers", "yara,llm",
+            "stdio", "--stdio-command", "docker"]
+    scan.extend(f"--stdio-arg={arg}" for arg in docker)
     try:
         return run_cisco(scan,
             "Stage 2: host analyzer with isolated Docker target (no scanner credentials in target)",

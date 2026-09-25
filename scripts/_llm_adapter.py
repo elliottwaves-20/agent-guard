@@ -1,4 +1,9 @@
-"""Process-local SkillSpector adapter (exact version: _llm_budget.POLICY); upstream files are never edited."""
+"""Process-local SkillSpector adapter for budgeted campaigns; upstream files are never edited.
+
+Model, endpoint, key variable, prices and caps come from the campaign policy
+(built from the user's LLM profile); the exact SkillSpector version it patches
+is the one pinned in _pins.py.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -11,10 +16,9 @@ import urllib.error
 import urllib.request
 from types import SimpleNamespace
 
-from _llm_budget import MODEL, POLICY, Paused
+from _llm_budget import Paused
 
 CONTEXT = contextvars.ContextVar("guard_batch", default={"analyzer": "chat_completion"})
-BASE_URL = "https://api.cerebras.ai/v1"
 
 
 class ProviderError(RuntimeError):
@@ -54,18 +58,23 @@ def http_json(url, payload=None, key=None):
         raise ProviderError(exc.code, retry) from None
 
 
-def live_transport():
-    key = os.environ.get("CEREBRAS_API_KEY", "").strip()
+def live_transport(policy):
+    key = os.environ.get(policy["key_env"], "").strip()
     if not key:
-        raise Paused("CEREBRAS_API_KEY is missing; no model request sent")
-    info, _ = http_json("https://api.cerebras.ai/public/v1/models/" + MODEL)
-    from decimal import Decimal
-    if (info.get("id") != MODEL or info.get("deprecated") is not False
-            or Decimal(info["pricing"]["prompt"]) * 10**9 != POLICY["input_nusd"]
-            or Decimal(info["pricing"]["completion"]) * 10**9 != POLICY["output_nusd"]
-            or not info.get("capabilities", {}).get("structured_outputs")):
-        raise Paused("Model availability/pricing changed; review required")
-    return lambda payload: http_json(BASE_URL + "/chat/completions", payload, key)
+        raise Paused(f"{policy['key_env']} is missing; no model request sent")
+    if policy.get("pricing_url"):
+        # Optional live check against a model-info endpoint in the Cerebras
+        # schema (id, deprecated, pricing per token, capabilities): the ledger
+        # prices must still be the provider's prices before anything is spent.
+        info, _ = http_json(policy["pricing_url"])
+        from decimal import Decimal
+        if (info.get("id") != policy["model"] or info.get("deprecated") is not False
+                or Decimal(info["pricing"]["prompt"]) * 10**9 != policy["input_nusd"]
+                or Decimal(info["pricing"]["completion"]) * 10**9 != policy["output_nusd"]
+                or not info.get("capabilities", {}).get("structured_outputs")):
+            raise Paused("Model availability/pricing changed; review required")
+    url = policy["base_url"] + "/chat/completions"
+    return lambda payload: http_json(url, payload, key)
 
 
 def strict_schema(schema):
@@ -88,7 +97,7 @@ def strict_schema(schema):
 class Model:
     def __init__(self, budget, schema=None):
         self.budget, self.schema = budget, schema
-        self.model_name = MODEL
+        self.model_name = budget.policy["model"]
 
     def with_structured_output(self, schema):
         return Model(self.budget, schema)
@@ -96,8 +105,8 @@ class Model:
     def invoke_with_usage(self, prompt, collector=None):
         if not isinstance(prompt, str):
             raise Paused("Unsupported scanner prompt type")
-        payload = {"model": MODEL, "messages": [{"role": "user", "content": prompt}],
-                   "max_completion_tokens": POLICY["output_tokens"], "stream": False}
+        payload = {"model": self.model_name, "messages": [{"role": "user", "content": prompt}],
+                   "max_completion_tokens": self.budget.policy["output_tokens"], "stream": False}
         if self.schema:
             payload["response_format"] = {"type": "json_schema", "json_schema": {
                 "name": self.schema.__name__, "strict": True,
@@ -126,18 +135,20 @@ class Model:
 
 def install(budget):
     """Install before importing graph/nodes, to cover imported factory aliases."""
-    if importlib.metadata.version("skillspector") != POLICY["scanner"]:
-        raise Paused("Budget adapter requires exactly SkillSpector " + POLICY["scanner"])
+    policy = budget.policy
+    if importlib.metadata.version("skillspector") != policy["scanner"]:
+        raise Paused("Budget adapter requires exactly SkillSpector " + policy["scanner"])
     for key in list(os.environ):
         if key.startswith("SKILLSPECTOR_"):
             del os.environ[key]
     os.environ["LANGCHAIN_TRACING_V2"] = "false"
     os.environ["LANGSMITH_TRACING"] = "false"
-    os.environ.update(SKILLSPECTOR_PROVIDER="openai_compatible", SKILLSPECTOR_MODEL=MODEL,
-                      SKILLSPECTOR_COMPAT_BASE_URL=BASE_URL,
+    os.environ.update(SKILLSPECTOR_PROVIDER="openai_compatible", SKILLSPECTOR_MODEL=policy["model"],
+                      SKILLSPECTOR_COMPAT_BASE_URL=policy["base_url"],
                       SKILLSPECTOR_MAX_LLM_CONCURRENCY="1",
                       SKILLSPECTOR_MAX_WORKFLOW_SECONDS="540",
-                      AGENT_GUARD_LLM_RETRIES="0", AGENT_GUARD_NO_DOTENV="1")
+                      AGENT_GUARD_LLM_RETRIES="0", AGENT_GUARD_NO_DOTENV="1",
+                      AGENT_GUARD_NO_USER_CONFIG="1")
     # No credential is handed to upstream. Only our HTTP transport receives it.
     # Upstream constructs its graph during package import and checks whether a
     # credential exists. A non-secret sentinel keeps analyzers enabled; their
@@ -150,7 +161,7 @@ def install(budget):
     original_factory, original_available = utils.get_chat_model, utils.is_llm_available
     def factory(*args, **kwargs):
         model = Model(budget)
-        utils.register_chat_model_provider(model, "cerebras")
+        utils.register_chat_model_provider(model, "openai_compatible")
         return model
     utils.get_chat_model = factory
     utils.is_llm_available = lambda: (True, None)
@@ -164,7 +175,7 @@ def install(budget):
                 elif value is original_input:
                     setattr(module, name, lambda *args, **kwargs: 4000)
                 elif value is original_output:
-                    setattr(module, name, lambda *args, **kwargs: POLICY["output_tokens"])
+                    setattr(module, name, lambda *args, **kwargs: policy["output_tokens"])
     # Disable alternate factory routes rather than permitting an unbudgeted fallback.
     def forbidden(*args, **kwargs):
         raise Paused("Unbudgeted provider route refused")
