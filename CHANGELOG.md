@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Add an optional local skill distribution to the user config
+  (`[distribution]`, `mode = "sync"`). For machines that already run their
+  own store-and-link setup, `install_skill.py skill` publishes a SAFE skill
+  into the configured `inbox` and runs the configured `sync` command once,
+  instead of asking for target agents; `--tools` and `--workspace` are
+  refused. The sync runs without credentials, only its output lines about
+  the installed skill are shown, and a sync that changes a scanned file is an
+  error. A missing, failing or timed-out sync is a warning: the skill stays
+  in the inbox for the next regular sync. An invalid section stops the
+  installer (exit 2). Without the section nothing changes.
 - Add LLM profiles to the user config (`config.example.toml`). `[llm.use]`
   picks a profile per scanner -- `skills` (SkillSpector), `mcp` (Cisco
   runtime check), `campaign` (budgeted scans) -- and a profile describes only

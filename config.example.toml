@@ -69,3 +69,19 @@ protocol = "native"
 provider = "anthropic"
 model = "<model-id>"
 key_env = "ANTHROPIC_API_KEY"
+
+# -- Local skill distribution (optional) ---------------------------------------
+# Only for machines that already run their own skill distribution (one store,
+# links into every agent, profiles). Without this section a SAFE skill goes
+# through the pinned `skills` CLI or the built-in linker as usual.
+#
+# With it, install_skill.py publishes the SAFE skill into `inbox`, runs `sync`
+# once and prints the sync's lines that mention the skill; --tools and
+# --workspace are refused. The sync must not change scanned files (checked).
+# A missing, failing or slow sync leaves the skill in the inbox with a warning.
+# The sync runs without credentials in its environment.
+[distribution]
+mode = "sync"
+inbox = "~/.claude/skills"                 # a directory your sync collects from
+sync = ["pwsh", "-NoProfile", "-File", "<path to your sync script>"]
+# sync_timeout = 600                       # seconds

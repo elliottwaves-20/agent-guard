@@ -55,8 +55,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+import _distribution
 import _skills_cli
+import _skillspector
 from _skillspector import run_skillspector
+from _user_config import ConfigError
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10: automatic pyproject inference is optional.
@@ -542,8 +545,38 @@ def verify_distributed_copy(scanned: Path, canonical: Path):
     log(f"  verified: canonical copy matches the scanned skill ({canonical})")
 
 
+def configured_distribution():
+    """The machine's own skill distribution from the user config, or None.
+
+    A broken [distribution] section stops the installer (exit 2) instead of
+    silently falling back to per-agent links the machine does not want."""
+    try:
+        return _distribution.from_config(_skillspector.USER_CONFIG)
+    except ConfigError as exc:
+        print(f"ERROR: agent-guard config: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+
+def verify_synced_copy(expected: dict, published: Path):
+    """The sync may move the skill and leave a link behind, but it must not
+    change a scanned file. Extra entries are reported, not treated as tampering."""
+    if not (published.exists() and published.resolve().is_dir()):
+        log(f"  note: the sync moved the skill away from {published}; not re-verified")
+        return
+    actual = skill_tree_digest(published.resolve())
+    for key, digest in expected.items():
+        if actual.get(key) != digest:
+            sys.exit("ERROR: the sync changed the scanned skill "
+                     f"({key} differs under {published.resolve()}). Review and remove it.")
+    extra = sorted(set(actual) - set(expected))
+    if extra:
+        log(f"  note: synced copy has {len(extra)} extra entry/entries (first: {extra[0]})")
+    log(f"  verified: synced copy matches the scanned skill ({published.resolve()})")
+
+
 def install_skill(repo_path: Path, name: str, workspace: Path, dry: bool,
-                  selected: list = None, *, baseline: Path | None = None):
+                  selected: list = None, *, baseline: Path | None = None,
+                  distribution=None):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) or name.endswith((".", " ")):
         sys.exit("ERROR: skill name must be a single safe directory name")
     repo_path = repo_path.resolve()
@@ -556,6 +589,11 @@ def install_skill(repo_path: Path, name: str, workspace: Path, dry: bool,
             "and install a specific skill subdirectory."
         )
 
+    if distribution is not None:
+        if selected is not None:
+            sys.exit("ERROR: --tools does not apply: [distribution] in the agent-guard "
+                     "config decides where skills go. Nothing was installed.")
+        workspace = distribution.inbox
     own_targets, cli_targets = split_targets(selected)
     present = detect_tools(own_targets)
     permanent = (workspace / name).resolve()
@@ -572,7 +610,9 @@ def install_skill(repo_path: Path, name: str, workspace: Path, dry: bool,
                 sys.exit(f"ERROR: skill contains an indirect filesystem entry; review a materialized copy: {path}")
 
     print(f"\n-- Skill '{name}' --")
-    if cli_targets is None and _skills_cli.enabled():
+    if distribution is not None:
+        print(f"   Target: local distribution (inbox {distribution.inbox}, then sync)")
+    elif cli_targets is None and _skills_cli.enabled():
         print("   Target tools: every agent the skills CLI detects "
               f"(built-in fallback: {present_labels(present) or 'none detected'})")
     else:
@@ -597,6 +637,18 @@ def install_skill(repo_path: Path, name: str, workspace: Path, dry: bool,
             if permanent.exists():
                 sys.exit("ERROR: installation destination appeared during scanning; nothing was replaced.")
             candidate.rename(permanent)
+
+    if distribution is not None:
+        if dry:
+            if distribution.sync:
+                log(f"  run sync: {' '.join(distribution.sync)}", dry)
+            print(f"\n[DRY] Skill '{name}' NOT installed (dry run); the steps above show what would happen.")
+            return
+        if _distribution.run_sync(distribution, name):
+            verify_synced_copy(before, permanent)
+        print(f"\n[OK] Skill '{name}' installed.")
+        print("     Update later: RE-SCAN the new version, then install it again")
+        return
 
     # Distribution is delegated to the `skills` CLI when it is usable: it owns
     # the canonical store, the per-agent links, and the platform quirks we
@@ -746,9 +798,14 @@ def main():
     workspace = args.workspace or workspace_default()
 
     if args.mode == "skill":
+        distribution = configured_distribution()
+        if distribution is not None and args.workspace is not None:
+            sys.exit("ERROR: --workspace does not apply: [distribution] in the agent-guard "
+                     "config decides where skills go. Nothing was installed.")
         name = args.name or args.repo_path.resolve().name
         install_skill(args.repo_path, name, workspace, args.dry_run,
-                      selected=args.tools, baseline=args.baseline)
+                      selected=args.tools, baseline=args.baseline,
+                      distribution=distribution)
 
     elif args.mode == "mcp":
         installer_flags = {
