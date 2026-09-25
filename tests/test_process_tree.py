@@ -7,6 +7,7 @@ after the wrapper has already given up. These tests drive a real three-level
 process tree through the wrapper's bounded runner and assert the grandchild
 stops when the parent's deadline expires.
 """
+import os
 import importlib
 from pathlib import Path
 import subprocess
@@ -16,6 +17,7 @@ import time
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")  # never read this machine's personal config
 ss = importlib.import_module("_skillspector")
 
 # Grandchild: append a heartbeat forever. Its file stops growing once it dies.

@@ -84,6 +84,17 @@ def load_agent_guard_env() -> None:
 
 load_agent_guard_env()
 
+# The personal config (LLM profiles, local distribution) is read once, right
+# after the env files. A config that exists but is unsafe or unreadable stops
+# every wrapper before anything is scanned -- ignoring it silently would run
+# the scan with settings the user did not choose.
+import _user_config
+try:
+    USER_CONFIG = _user_config.load_config()
+except _user_config.ConfigError as exc:
+    print(f"ERROR: agent-guard config: {exc}", file=sys.stderr)
+    sys.exit(2)
+
 SKILLSPECTOR = shutil.which("skillspector")
 BOOT = Path(__file__).with_name("_skillspector_boot.py")
 SKILLSPECTOR_CMD: list | None = None   # resolved lazily by skillspector_command()

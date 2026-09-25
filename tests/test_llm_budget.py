@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")  # never read this machine's personal config
 from _llm_budget import Budget, POLICY, Paused, atomic_json, exclusive_lock
 from _llm_adapter import Model, ProviderError, strict_schema
 from llm_scan import new_session, validate_session

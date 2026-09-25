@@ -24,6 +24,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")  # never read this machine's personal config
 ss = importlib.import_module("_skillspector")
 
 PROVIDER = (os.environ.get("AGENT_GUARD_LLM_INTEGRATION_PROVIDER")
