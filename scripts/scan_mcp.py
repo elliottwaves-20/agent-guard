@@ -14,6 +14,11 @@ This wrapper enforces the safe order:
     (Tool Poisoning, Tool Misuse, Least Privilege) on top of taint tracking,
     credential-access and exfiltration checks.
 
+  Stage 1b (default, needs Docker; --no-dynamic skips it): the package is
+    installed and imported inside OpenSSF's package-analysis sandbox (gVisor)
+    and its file, network and process activity is judged -- install scripts
+    run here, never on your machine (see _dynamic.py).
+
   Stage 2 (optional, --sandbox): the host scanner inspects the target inside a
     throwaway Docker container with no host filesystem access, so the server can
     be started for runtime tool/prompt analysis without touching your machine.
@@ -58,6 +63,7 @@ import zipfile
 import uuid
 from pathlib import Path
 
+import _dynamic
 import _egress
 import _llm_profile
 from _skillspector import (
@@ -668,6 +674,8 @@ def main():
                         help="after `--`: the launch command for the sandbox "
                              "scan, e.g. -- uvx package-name")
         _add_network_options(sp)
+        sp.add_argument("--no-dynamic", action="store_true",
+                        help="skip the dynamic install analysis (Stage 1b, needs Docker)")
 
     sp = sub.add_parser("local", help="scan a local MCP source directory")
     sp.add_argument("path")
@@ -695,6 +703,11 @@ def main():
             print(f"-- Stage 1: source scan of {args.package} (no execution) --")
             (fetch_pypi if args.mode == "pypi" else fetch_npm)(args.package, dest)
             rc = run_skillspector(dest)
+        if args.no_dynamic:
+            print("[WARN] Dynamic install analysis skipped by --no-dynamic.")
+        else:
+            print("\n-- Stage 1b: dynamic install analysis (OpenSSF sandbox) --")
+            rc = max(rc, _dynamic.run(args.mode, args.package, allow_hosts=args.allow_host))
         if args.sandbox:
             if not command:
                 die("--sandbox needs a launch command after `--`, "

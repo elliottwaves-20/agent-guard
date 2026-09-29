@@ -21,6 +21,7 @@ from install_skill import (
     install_skill,
     workspace_default,
 )
+import _dynamic
 from scan_mcp import fetch_npm, fetch_pypi, run_remote, run_sandbox
 from scan_mcp import run_skillspector as run_mcp_static
 from scan_skill import find_skill_dirs, scan_catalog
@@ -417,9 +418,19 @@ def persist_source(source: ResolvedSource, keep_source: Path | None) -> Path | N
     return target
 
 
+def run_dynamic_stage(ecosystem: str, pinned: str, enabled: bool) -> int:
+    """Install analysis of exactly the version the static scan fetched."""
+    if not enabled:
+        print("[WARN] Dynamic install analysis skipped by --no-dynamic.")
+        return 0
+    print("\n-- Dynamic install analysis (OpenSSF sandbox) --")
+    return _dynamic.run(ecosystem, pinned)
+
+
 def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
                   keep_source: Path | None = None, sandbox: bool = False,
-                  scan_candidates: bool = True, max_candidates: int = 10) -> int:
+                  scan_candidates: bool = True, max_candidates: int = 10,
+                  dynamic: bool = True) -> int:
     if kind == "auto":
         kind = classify_source(source)
     stable_path = persist_source(source, keep_source)
@@ -434,6 +445,7 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
         with tempfile.TemporaryDirectory() as d:
             pinned = fetch_pypi(source.install_hint, Path(d))
             rc = run_mcp_static(Path(d))
+        rc = max(rc, run_dynamic_stage("pypi", pinned, dynamic))
         if rc == 0:
             offer_mcp_install(source.install_hint.split("==")[0], "uvx", [pinned], dry_run)
         return rc
@@ -442,6 +454,7 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
         with tempfile.TemporaryDirectory() as d:
             pinned = fetch_npm(source.install_hint, Path(d))
             rc = run_mcp_static(Path(d))
+        rc = max(rc, run_dynamic_stage("npm", pinned, dynamic))
         if rc == 0:
             offer_mcp_install(source.install_hint, "npx",
                               ["--silent", "-y", pinned], dry_run)
@@ -527,6 +540,9 @@ def main() -> None:
     parser.add_argument("--sandbox", action="store_true",
                         help="opt into runtime inspection of discovered remote MCPs and "
                              "live Cisco stdio scans in Docker for install commands")
+    parser.add_argument("--no-dynamic", action="store_true",
+                        help="skip the dynamic install analysis of PyPI/npm packages "
+                             "(it needs Docker)")
     parser.add_argument("--max-candidates", type=int, default=10,
                         help="maximum marketplace candidates to scan automatically")
     args = parser.parse_args()
@@ -540,7 +556,8 @@ def main() -> None:
                                keep_source=args.keep_source,
                                sandbox=args.sandbox,
                                scan_candidates=not args.no_scan_candidates,
-                               max_candidates=args.max_candidates))
+                               max_candidates=args.max_candidates,
+                               dynamic=not args.no_dynamic))
 
 
 if __name__ == "__main__":

@@ -13,6 +13,10 @@ detection:
                        and registry metadata). Runs natively if `guarddog` is
                        on PATH, otherwise via the official Docker image
                        (the only supported install on Windows).
+                       npm / pypi add a dynamic stage by default: the package is
+                       installed and imported in OpenSSF's package-analysis
+                       sandbox and its file, network and process activity is
+                       judged (_dynamic.py). --no-dynamic skips it knowingly.
   binary <url>      -> download (never executed), SHA256, VirusTotal hash
                        reputation check (reuses the scan_mcp.py stage).
                        --deep adds a malcontent capability scan via Docker.
@@ -57,6 +61,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+import _dynamic
 from _skillspector import SCAN_TIMEOUT, die, run_bounded, run_skillspector
 from scan_mcp import http_bytes, http_json, run_virustotal, safe_extract_tar
 
@@ -427,6 +432,14 @@ def run_cargo(spec: str) -> int:
 
 # -- CLI -------------------------------------------------------------------------
 
+def _add_dynamic_options(sp):
+    sp.add_argument("--no-dynamic", action="store_true",
+                    help="skip the dynamic install analysis (it needs Docker)")
+    sp.add_argument("--allow-host", action="append", default=[], metavar="HOST[:PORT]",
+                    help="dynamic analysis: also allow this destination (default port 443; the "
+                         "package registry is always allowed). Repeatable")
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Scan a CLI tool for malicious code before installing it.")
@@ -437,6 +450,8 @@ def main():
                           ("go", "Go module -> GuardDog")]:
         sp = sub.add_parser(eco, help=helptext)
         sp.add_argument("package", help="package name, optionally with version")
+        if eco in _dynamic.ECOSYSTEMS:
+            _add_dynamic_options(sp)
 
     sp = sub.add_parser("binary",
                         help="release binary URL -> SHA256 + VirusTotal")
@@ -454,7 +469,15 @@ def main():
 
     args = p.parse_args()
 
-    if args.mode in ("npm", "pypi", "go"):
+    if args.mode in _dynamic.ECOSYSTEMS:
+        rc = run_guarddog(args.mode, args.package)
+        if args.no_dynamic:
+            print("[WARN] Dynamic install analysis skipped by --no-dynamic.")
+            sys.exit(rc)
+        print("\n-- Dynamic install analysis (OpenSSF sandbox) --")
+        sys.exit(combine_verdicts(rc, _dynamic.run(args.mode, args.package,
+                                                   allow_hosts=args.allow_host)))
+    if args.mode == "go":
         sys.exit(run_guarddog(args.mode, args.package))
     if args.mode == "binary":
         sys.exit(run_binary(args.url, args.deep))

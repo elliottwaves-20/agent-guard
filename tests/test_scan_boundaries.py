@@ -334,9 +334,11 @@ class ScanBoundaryTests(unittest.TestCase):
             source = resolver.ResolvedSource(kind=ecosystem, install_hint=spec)
             with patch.object(scan_url, 'fetch_' + ecosystem, return_value=pinned), \
                  patch.object(scan_url, 'run_mcp_static', return_value=0), \
+                 patch.object(scan_url._dynamic, 'run', return_value=0) as dynamic, \
                  patch.object(scan_url, 'offer_mcp_install') as offer:
                 self.assertEqual(scan_url.scan_resolved(source, 'mcp-source', True), 0)
                 self.assertIn(pinned, offer.call_args.args[2])
+                dynamic.assert_called_once_with(ecosystem, pinned)
 
     def test_catalog_cannot_reoffer_original_unpinned_command_after_source_scan(self):
         with patch.object(scan_url, 'scan_candidate_source_url', return_value=0), \

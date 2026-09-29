@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Add a dynamic install analysis for npm and PyPI packages
+  (`scripts/_dynamic.py`), on by default in `scan_cli.py npm|pypi`,
+  `scan_mcp.py pypi|npm` (Stage 1b) and the package path of `scan_url.py`.
+  The package is installed and imported in OpenSSF package-analysis (gVisor
+  inside a privileged Docker container, image pinned by digest) and its
+  recorded behaviour is judged: reads of credential stores, writes outside
+  the package areas, DNS lookups and connections beyond the registry
+  (`--allow-host` adds more), network tools, and the sandbox's planted fake
+  credentials showing up in a DNS name or command line. Files the package
+  manager itself reads during install (calibrated on clean packages) are
+  excused in that phase only. A failed or missing phase, a result for another
+  package or version, a timeout or missing Docker gives no verdict;
+  `--no-dynamic` skips the stage knowingly. The analysed package really
+  reaches the network; the sandbox holds nothing worth stealing.
 - The MCP sandbox (Stage 2) now records the target's network traffic. A
   capture container (Alpine and tcpdump pinned by digest and version) owns the
   network namespace and the target joins it. Only the PyPI and npm registries
