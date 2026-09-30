@@ -14,9 +14,13 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 from types import SimpleNamespace
 
 from _llm_budget import Paused
+
+USER_AGENT = "agent-guard/" + (Path(__file__).resolve().parents[1] / "VERSION").read_text(
+    encoding="utf-8").strip()
 
 CONTEXT = contextvars.ContextVar("guard_batch", default={"analyzer": "chat_completion"})
 
@@ -33,7 +37,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def http_json(url, payload=None, key=None):
-    headers = {"Content-Type": "application/json", "User-Agent": "agent-guard/0.3.1"}
+    headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
     if key:
         headers["Authorization"] = "Bearer " + key
     request = urllib.request.Request(url, data=None if payload is None else

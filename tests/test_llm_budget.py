@@ -32,7 +32,8 @@ class BudgetTests(unittest.TestCase):
             response.headers = {}
             http_json("https://api.cerebras.ai/public/v1/models/gpt-oss-120b")
             request = factory.return_value.open.call_args.args[0]
-            self.assertEqual(request.get_header("User-agent"), "agent-guard/0.3.1")
+            version = (Path(__file__).resolve().parents[1] / "VERSION").read_text(encoding="utf-8").strip()
+            self.assertEqual(request.get_header("User-agent"), f"agent-guard/{version}")
             self.assertIsNone(request.get_header("Authorization"))
 
     def test_preflight_failure_writes_incomplete_progress(self):

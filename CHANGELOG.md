@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-09-30
+
+- The release self-scan passes again: the raw static scan blocks, as expected
+  for a security tool, and the reviewed scan is SAFE with every accepted
+  finding and its reason listed; changed source re-surfaces its findings and a
+  new malicious file blocks. The README explains why a baseline from
+  `skillspector baseline` misses repeated occurrences (NVIDIA/SkillSpector#630)
+  and why the release self-scan runs static. The user agent of budgeted
+  campaigns now reads its version from `VERSION`.
 
 - **Fix:** `scan_mcp.py remote` failed for everyone without a Cisco AI Defense
   contract: Cisco's default analyzers include the hosted `api` analyzer, which

@@ -767,7 +767,7 @@ You cannot drive these flags to green without removing the tool's reason to exis
 
 ## Reviewing self-scan findings
 
-SkillSpector 2.11.0 retains deterministic findings even when its LLM does not
+SkillSpector retains deterministic findings even when its LLM does not
 confirm them. A raw agent-guard self-scan can therefore return BLOCK for its
 configuration loading, scanner subprocesses and installer capabilities. This
 is a review requirement, not evidence that the scanner failed or that the
@@ -797,16 +797,23 @@ output must be inspected, reduced and given specific reasons before use.
 Generate it with the same scanner and LLM policy as the later scan; different
 LLM evidence can invalidate an otherwise unchanged fingerprint.
 
-In the previously used 2.11.0 build, the native baseline generator and JSON report can
-use different finding populations. A generated draft may therefore omit
-reported occurrences. Review against the saved report; never compensate with
-wildcards or treat a partially matching draft as a completed review.
+The native generator fingerprints only one occurrence of a finding that
+repeats, while the scan matches every occurrence (still true in 2.12.0; see
+NVIDIA/SkillSpector#630, #633, #656). A generated draft therefore leaves
+repeated occurrences unsuppressed. Review against the saved report; never
+compensate with wildcards or treat a partially matching draft as a completed
+review. A baseline built with SkillSpector's own `build_baseline_dict` from the
+graph's raw `findings` covers every occurrence with the same exact
+fingerprints.
 
 For a release self-scan, use a clean export of the intended release tree to
-avoid scanning local credentials, caches or session notes. Run the raw scan
-(expected BLOCK for this security tool), then the reviewed scan (expected
-SAFE with accepted findings), and test that changed source and new malicious
-content still block. Passing a reviewed self-scan does not give permission to
+avoid scanning local credentials, caches or session notes, and run it static
+(`AGENT_GUARD_STATIC_ONLY=1`): LLM evidence differs between runs and would
+invalidate otherwise unchanged fingerprints. Run the raw scan (expected BLOCK
+for this security tool), then the reviewed scan (expected SAFE with accepted
+findings), and test that changed source and new malicious content still block.
+The maintainers keep the reviewed baseline outside this repository, as
+recommended above. Passing a reviewed self-scan does not give permission to
 accept the same capabilities in unrelated skills.
 
 `--report` writes only to a new file and does not overwrite source or policy.
