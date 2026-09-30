@@ -69,6 +69,7 @@ import _llm_profile
 from _skillspector import (
     SCAN_TIMEOUT,
     USER_CONFIG,
+    combine_verdicts,
     die,
     run_bounded,
     run_skillspector as shared_run_skillspector,
@@ -86,6 +87,9 @@ CISCO_LLM_KEY = os.environ.get("MCP_SCANNER_LLM_API_KEY", "").strip()
 CISCO_LLM_MODEL = os.environ.get("MCP_SCANNER_LLM_MODEL", "").strip()
 CISCO_LLM_BASE_URL = os.environ.get("MCP_SCANNER_LLM_BASE_URL", "").strip()
 CISCO_LLM_API_VERSION = os.environ.get("MCP_SCANNER_LLM_API_VERSION", "").strip()
+# Named explicitly: Cisco's default adds "api" (the hosted Cisco AI Defense
+# analyzer), which fails the whole scan unless MCP_SCANNER_API_KEY is set.
+CISCO_ANALYZERS = "yara,llm"
 
 
 def _llm_key_kind(key: str) -> str:
@@ -403,7 +407,8 @@ def run_cisco(cmd: list, label: str, env: dict = None) -> int:
 def run_remote(url: str) -> int:
     need_mcp_scanner()
     env = cisco_env()
-    cmd = [*cisco_command(env), "--format", "summary", "remote", "--server-url", url]
+    cmd = [*cisco_command(env), "--format", "summary", "--analyzers", CISCO_ANALYZERS,
+           "remote", "--server-url", url]
     return run_cisco(cmd, f"scanning remote MCP (no local code runs): {url}", env=env)
 
 
@@ -500,7 +505,7 @@ def run_sandbox(command: list, *, allow_hosts=(), network: bool = True) -> int:
     ]
     env = cisco_env()
     env["MCP_SCANNER_STDIO_TIMEOUT"] = str(STDIO_TIMEOUT)
-    scan = [*cisco_command(env), "--format", "summary", "--analyzers", "yara,llm",
+    scan = [*cisco_command(env), "--format", "summary", "--analyzers", CISCO_ANALYZERS,
             "stdio", "--stdio-command", "docker"]
     scan.extend(f"--stdio-arg={arg}" for arg in docker)
     finished = False
@@ -517,7 +522,7 @@ def run_sandbox(command: list, *, allow_hosts=(), network: bool = True) -> int:
         if capture is not None and not finished:
             capture.remove()
     if capture is not None:
-        rc = max(rc, _egress.verdict(capture.finish(allow)))
+        rc = combine_verdicts(rc, _egress.verdict(capture.finish(allow)))
     return rc
 
 
@@ -708,14 +713,14 @@ def main():
             print("[WARN] Dynamic install analysis skipped by --no-dynamic.")
         else:
             print("\n-- Stage 1b: dynamic install analysis (OpenSSF sandbox) --")
-            rc = max(rc, _dynamic.run(args.mode, args.package, allow_hosts=args.allow_host))
+            rc = combine_verdicts(rc, _dynamic.run(args.mode, args.package, allow_hosts=args.allow_host))
         if args.sandbox:
             if not command:
                 die("--sandbox needs a launch command after `--`, "
                     "e.g. -- uvx package-name")
             print("\n-- Stage 2: live runtime scan in Docker sandbox --")
-            rc = max(rc, run_sandbox(command, allow_hosts=args.allow_host,
-                                     network=not args.no_network))
+            rc = combine_verdicts(rc, run_sandbox(command, allow_hosts=args.allow_host,
+                                                 network=not args.no_network))
         sys.exit(rc)
 
     if args.mode == "local":

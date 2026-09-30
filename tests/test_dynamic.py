@@ -202,6 +202,31 @@ class CompletenessTests(unittest.TestCase):
         self.assertFalse(report.complete)
         self.assertIn("install", report.problem)
 
+    def test_crashed_execute_harness_is_a_limit_not_a_gap(self):
+        """An MCP stdio server closes stdout; OpenSSF's own execute script then
+        crashes on its next print (Status error_analysis). What ran until then
+        is recorded and still judged; install and import stay strict."""
+        result = npm_clean()
+        result["Analysis"]["execute"] = phase(status="error_analysis")
+        report = analyse(result)
+        self.assertTrue(report.complete)
+        self.assertEqual(len(report.limits), 1)
+        self.assertIn("execute", report.limits[0])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(dyn.verdict(report), 0)
+        self.assertIn("LIMIT:", out.getvalue())
+        result["Analysis"]["execute"]["Files"].append(read("/root/.ssh/id_rsa"))
+        self.assertEqual(analyse(result).findings,
+                         ["execute: reads sensitive file /root/.ssh/id_rsa"])
+
+    def test_only_execute_may_end_in_a_harness_error(self):
+        for phase_name, status in [("execute", "error_timeout"), ("install", "error_analysis"),
+                                   ("import", "error_analysis")]:
+            result = npm_clean()
+            result["Analysis"].setdefault(phase_name, phase())["Status"] = status
+            self.assertFalse(analyse(result).complete, (phase_name, status))
+
     def test_missing_install_phase_is_incomplete(self):
         result = npm_clean()
         del result["Analysis"]["install"]

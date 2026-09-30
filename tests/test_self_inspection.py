@@ -29,9 +29,25 @@ def tracked_files() -> list:
     return [p for p in out.stdout.decode("utf-8").split("\0") if p]
 
 
+# SkillSpector caps some analyses with fixed wall-clock limits (the dependency
+# source scan: 5 s). On a busy machine that ends in `runtime_limit`, which says
+# nothing about the source, so only that reason earns a fresh attempt.
+ATTEMPTS = 3
+
+
 @unittest.skipUnless(os.environ.get("AGENT_GUARD_INTEGRATION") == "1",
                      "set AGENT_GUARD_INTEGRATION=1 to test with the installed SkillSpector")
 class SelfInspectionTests(unittest.TestCase):
+    def scan(self, tree: Path, report: Path) -> dict:
+        if report.exists():
+            report.unlink()
+        cmd = ss.skillspector_command() + ["scan", str(tree), "--no-llm",
+                                           "--format", "json", "--output", str(report)]
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", env=ss.skillspector_env(), timeout=900)
+        self.assertTrue(report.is_file(), result.stderr[-2000:])
+        return json.loads(report.read_text(encoding="utf-8"))["analysis_completeness"]
+
     def test_own_tree_is_fully_inspected(self):
         ss.need_skillspector()
         if shutil.which("git") is None or not (ROOT / ".git").exists():
@@ -44,13 +60,11 @@ class SelfInspectionTests(unittest.TestCase):
                     dest = tree / rel
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source, dest)
-            report = Path(tmp) / "report.json"
-            cmd = ss.skillspector_command() + ["scan", str(tree), "--no-llm",
-                                               "--format", "json", "--output", str(report)]
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                                    errors="replace", env=ss.skillspector_env(), timeout=600)
-            self.assertTrue(report.is_file(), result.stderr[-2000:])
-            completeness = json.loads(report.read_text(encoding="utf-8"))["analysis_completeness"]
+            for _attempt in range(ATTEMPTS):
+                completeness = self.scan(tree, Path(tmp) / "report.json")
+                reasons = {e.get("reason_code") for e in completeness.get("ledger_exceptions") or []}
+                if reasons - {"reference_missing"} != {"runtime_limit"}:
+                    break
         gaps = [f"{e.get('path')}: {e.get('reason_code')}"
                 for e in completeness.get("ledger_exceptions") or []
                 if e.get("reason_code") != "reference_missing"]

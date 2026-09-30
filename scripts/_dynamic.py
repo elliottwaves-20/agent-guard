@@ -86,6 +86,7 @@ class Report:
     name: str = ""
     version: str = ""
     phases: list = field(default_factory=list)
+    limits: list = field(default_factory=list)
 
 
 def split_spec(ecosystem: str, spec: str) -> tuple:
@@ -123,7 +124,16 @@ def analyse(result: dict, ecosystem: str, allow_hosts=(), expect_name: str | Non
         report.problem = f"result is for package {report.name!r}, not {expect_name!r}"
         return report
     missing = [p for p in REQUIRED_PHASES if p not in analysis]
-    failed = [p for p, r in analysis.items() if (r or {}).get("Status") != "completed"]
+    # An MCP stdio server takes over stdout and closes it; OpenSSF's own execute
+    # script then crashes on its next print. That phase is optional (see
+    # REQUIRED_PHASES) and everything up to the crash is recorded and judged
+    # below, so it is a stated limit, not a gap. install and import stay strict.
+    if (analysis.get("execute") or {}).get("Status") == "error_analysis":
+        report.limits.append("execute phase ended early (the analysis script failed, "
+                             "for example because the package closed stdout); behaviour "
+                             "recorded until then is judged")
+    failed = [p for p, r in analysis.items() if (r or {}).get("Status") != "completed"
+              and not (p == "execute" and (r or {}).get("Status") == "error_analysis")]
     if missing or failed:
         report.complete = False
         report.problem = "; ".join(filter(None, [
@@ -189,6 +199,8 @@ def verdict(report: Report) -> int:
     print(f"Dynamic install analysis (OpenSSF package-analysis): {label}")
     if report.phases:
         print(f"  phases: {', '.join(report.phases)}")
+    for limit in report.limits:
+        print(f"  LIMIT: {limit}")
     if report.findings:
         for item in report.findings:
             print(f"  - {item}")

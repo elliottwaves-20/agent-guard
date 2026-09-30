@@ -62,7 +62,7 @@ import urllib.request
 from pathlib import Path
 
 import _dynamic
-from _skillspector import SCAN_TIMEOUT, die, run_bounded, run_skillspector
+from _skillspector import SCAN_TIMEOUT, combine_verdicts, die, run_bounded, run_skillspector
 from scan_mcp import http_bytes, http_json, run_virustotal, safe_extract_tar
 
 GUARDDOG_IMAGE = os.environ.get(
@@ -360,7 +360,7 @@ def run_binary(url: str, deep: bool) -> int:
         rc = run_virustotal(dest, max_files=1)
         if deep:
             print("\n-- deep: malcontent capability analysis --")
-            rc = max(rc, run_malcontent(dest))
+            rc = combine_verdicts(rc, run_malcontent(dest))
         return rc
 
 
@@ -395,16 +395,6 @@ def fetch_crate(spec: str, dest: Path) -> tuple:
     print(f"  fetching crate source: {url}")
     safe_extract_tar(http_bytes(url), dest)
     return name, version
-
-
-def combine_verdicts(*codes: int) -> int:
-    """Fail-closed merge of several stage exit codes: any BLOCK (1) wins over
-    any NO VERDICT (2), which wins over SAFE (0)."""
-    if 1 in codes:
-        return 1
-    if 2 in codes:
-        return 2
-    return 0
 
 
 def run_cargo(spec: str) -> int:

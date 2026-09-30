@@ -188,6 +188,17 @@ def _terminate_tree(proc: subprocess.Popen) -> None:
         pass
 
 
+def combine_verdicts(*codes: int) -> int:
+    """Fail-closed merge of several stage exit codes: any BLOCK (1) wins, so its
+    findings are not hidden behind a no-verdict stage; any other non-zero code
+    (2, or anything unexpected) is NO VERDICT; only all-zero is SAFE."""
+    if 1 in codes:
+        return 1
+    if any(code != 0 for code in codes):
+        return 2
+    return 0
+
+
 def run_bounded(cmd: list, *, env: dict | None = None, timeout: float,
                 cwd: str | None = None) -> subprocess.CompletedProcess:
     """subprocess.run(capture_output, text) with a process-TREE deadline.
@@ -785,7 +796,13 @@ def verdict_skillspector(report_path: Path, code: int, runtime_hint: bool = Fals
                     and item.get("reason_code") == "reference_missing"
                     and item.get("fatal") is False for item in exceptions))
         if not reviewed_references and not (unresolved_only and not FAIL_ON_INCOMPLETE):
-            print("[BLOCK] NO VERDICT -- incomplete inspection requires review; no clean verdict.")
+            gaps = [item for item in exceptions if isinstance(item, dict)
+                    and item.get("reason_code") != "reference_missing"]
+            for item in gaps:
+                print(f"    - not fully inspected: {_console_text(str(item.get('path')))}: "
+                      f"{_console_text(str(item.get('reason_code')))}")
+            print("[BLOCK] NO VERDICT -- incomplete inspection requires review; no clean verdict."
+                  + (" Review the files listed above by hand." if gaps else ""))
             return 2
         if reviewed_references:
             print("  REVIEW: unresolved documentation references accepted with exact AE1 "

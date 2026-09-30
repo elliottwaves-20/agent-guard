@@ -1,4 +1,6 @@
+import contextlib
 import importlib
+import io
 import json
 import os
 import sys
@@ -279,6 +281,25 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 "ledger_exceptions": [other]})
             self.assertEqual(module.verdict_skillspector(report, 0), 2)
 
+    def test_incomplete_inspection_names_file_and_reason(self):
+        """A no-verdict must say which file was not fully inspected and why, so
+        the user can review exactly that file instead of guessing."""
+        module = importlib.import_module("_skillspector")
+        parse_limit = dict(self.UNRESOLVED_REFERENCE, phase="static",
+                           reason_code="static_parse_limit", path="src/lib.rs")
+        with tempfile.TemporaryDirectory() as d:
+            report = Path(d) / "report.json"
+            self._write_report(report, analysis_completeness={
+                "is_complete": False, "status": "partial",
+                "coverage_percent": 92.9,
+                "entirely_uninspected_files": 0, "partially_inspected_files": 1,
+                "ledger_exceptions": [parse_limit, self.UNRESOLVED_REFERENCE]})
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(module.verdict_skillspector(report, 0), 2)
+        self.assertIn("src/lib.rs: static_parse_limit", out.getvalue())
+        self.assertNotIn("SKILL.md: reference_missing", out.getvalue())
+
     def test_scan_env_carries_workflow_budget_and_boot_command(self):
         module = importlib.import_module("_skillspector")
         env = module.skillspector_env()
@@ -403,10 +424,12 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             scan_mcp.CISCO_LLM_KEY = original_key
             scan_mcp.run_cisco = original_run_cisco
 
+        # Cisco's own default adds the "api" analyzer (Cisco AI Defense), which
+        # fails the whole scan without MCP_SCANNER_API_KEY; name ours explicitly.
         self.assertEqual(
             calls[0],
-            ["mcp-scanner", "--format", "summary", "remote", "--server-url",
-             "https://api.example.com/mcp"],
+            ["mcp-scanner", "--format", "summary", "--analyzers", "yara,llm",
+             "remote", "--server-url", "https://api.example.com/mcp"],
         )
 
     def test_cisco_remote_passes_llm_key_via_env_not_cli(self):
@@ -1844,6 +1867,13 @@ class ScanCliRouterTests(unittest.TestCase):
         self.assertEqual(self._run_cargo_with(2, 0)[0], 2)
         self.assertEqual(self.scan_cli.combine_verdicts(0, 0), 0)
         self.assertEqual(self.scan_cli.combine_verdicts(2, 1), 1)
+        # An unexpected exit code is no verdict, never SAFE.
+        self.assertEqual(self.scan_cli.combine_verdicts(0, 3), 2)
+        # Every multi-stage wrapper merges the same way: a BLOCK keeps its
+        # findings visible instead of hiding behind a later no-verdict stage.
+        for name in ("scan_mcp", "scan_url"):
+            module = importlib.import_module(name)
+            self.assertIs(module.combine_verdicts, self.scan_cli.combine_verdicts)
 
     # -- script flow -----------------------------------------------------------
 

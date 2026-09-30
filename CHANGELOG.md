@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Fix:** `scan_mcp.py remote` failed for everyone without a Cisco AI Defense
+  contract: Cisco's default analyzers include the hosted `api` analyzer, which
+  aborts the scan unless `MCP_SCANNER_API_KEY` is set. Remote scans now run
+  `yara,llm`, like the sandbox check.
+- **Fix:** multi-stage verdicts are merged the same way everywhere. `scan_mcp.py`
+  and `scan_url.py` took the numerically largest exit code, so a later
+  no-verdict stage hid a BLOCK and its findings; any BLOCK now wins, and an
+  unexpected exit code is no verdict, never SAFE.
+- The dynamic install analysis now judges MCP stdio servers: they close stdout,
+  and OpenSSF's own script then fails in the optional `execute` phase
+  (`error_analysis`). What was recorded until then is judged and the verdict
+  carries a `LIMIT:` line; install and import stay strict.
+- A no-verdict for incomplete inspection now names every file SkillSpector did
+  not fully inspect and the reason (for example `static_parse_limit`), so that
+  file can be reviewed by hand.
+
 - **Security fix (reference gate):** SkillSpector 2.12.0 split
   `reference_unresolved` into `reference_missing` (a path that matches no
   bundled file; every byte was still inspected) and `reference_unresolved` (a

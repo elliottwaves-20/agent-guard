@@ -549,7 +549,10 @@ It reports:
   DNS name or a command line (exfiltration).
 
 Any of these blocks the verdict; the combined exit code is the worst of all
-stages (BLOCK before NO VERDICT before SAFE). A failed or missing phase, a
+stages (BLOCK before NO VERDICT before SAFE). The optional `execute` phase
+may end early when the package closes stdout — MCP stdio servers do — because
+OpenSSF's own script then fails; what was recorded until then is judged and the
+output says so in a `LIMIT:` line. A failed or missing install or import phase, a
 result for another package or version, a timeout
 (`AGENT_GUARD_DYNAMIC_TIMEOUT`, default 1200 s) or missing Docker gives **no
 verdict**; `--no-dynamic` skips the stage knowingly and says so. The first run

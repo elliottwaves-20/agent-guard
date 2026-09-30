@@ -11,7 +11,7 @@ import tempfile
 import urllib.parse
 from pathlib import Path
 
-from _skillspector import die
+from _skillspector import combine_verdicts, die
 from _url_resolver import FetchError, ResolvedSource, resolve_url
 from install_skill import (
     TOOLS,
@@ -363,9 +363,9 @@ def scan_install_command(command: str, sandbox: bool, dry_run: bool) -> int:
             args = shlex.split(command, posix=True)
         except ValueError:
             print("[BLOCK] Could not parse install command for sandbox runtime scan.")
-            return max(rc, 2)
+            return combine_verdicts(rc, 2)
         sandbox_rc = run_sandbox(args)
-        rc = max(rc, sandbox_rc)
+        rc = combine_verdicts(rc, sandbox_rc)
     else:
         print("[WARN] Runtime sandbox scan not run. Re-run with --sandbox for live MCP "
               "tool/prompt inspection.")
@@ -445,7 +445,7 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
         with tempfile.TemporaryDirectory() as d:
             pinned = fetch_pypi(source.install_hint, Path(d))
             rc = run_mcp_static(Path(d))
-        rc = max(rc, run_dynamic_stage("pypi", pinned, dynamic))
+        rc = combine_verdicts(rc, run_dynamic_stage("pypi", pinned, dynamic))
         if rc == 0:
             offer_mcp_install(source.install_hint.split("==")[0], "uvx", [pinned], dry_run)
         return rc
@@ -454,7 +454,7 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
         with tempfile.TemporaryDirectory() as d:
             pinned = fetch_npm(source.install_hint, Path(d))
             rc = run_mcp_static(Path(d))
-        rc = max(rc, run_dynamic_stage("npm", pinned, dynamic))
+        rc = combine_verdicts(rc, run_dynamic_stage("npm", pinned, dynamic))
         if rc == 0:
             offer_mcp_install(source.install_hint, "npx",
                               ["--silent", "-y", pinned], dry_run)
@@ -513,7 +513,7 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
                     source, sandbox=sandbox, max_candidates=max_candidates,
                     dry_run=dry_run
                 )
-                return max(rc, candidate_rc)
+                return combine_verdicts(rc, candidate_rc)
             return rc
         return rc
 
