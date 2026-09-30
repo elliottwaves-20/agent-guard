@@ -124,6 +124,15 @@ explicitly or configure optional layers; no `.env` file is required:
   binaries, archives, PDFs, and similar non-source files against VirusTotal by
   hash.
 
+Alternatively the user can pick model and provider per scanner in a personal
+config file outside the repository (`config.example.toml`; Windows
+`%APPDATA%\agent-guard\config.toml`, otherwise `~/.config/agent-guard/config.toml`
+or `AGENT_GUARD_CONFIG=<path>`). An active profile there wins over
+`SKILLSPECTOR_*` / `MCP_SCANNER_LLM_*`; keys still come from the environment.
+`python "$SKILL_DIR/scripts/llm_check.py"` shows the effective setup without
+network access; `--probe skills|mcp` spends one real request, so run it only
+when the user asks. Never write keys into that file or edit it unasked.
+
 Configure these variables before starting the agent or scanner. On Windows,
 use User environment variables and restart already-running terminals/agents.
 Never put real keys in command history or committed files. `.env.example`
@@ -296,29 +305,43 @@ executes untrusted code. The wrapper enforces a safe order.
 from the registry and run SkillSpector's static scan on it.
 
 ```bash
-INSTALLER_DIR="$HOME/.claude/skills/agent-guard/scripts"
-# Wrappers parse the trusted installation .env automatically.
-
-python "$INSTALLER_DIR/scan_mcp.py" pypi <package>       # PyPI MCP
-python "$INSTALLER_DIR/scan_mcp.py" npm <@scope/package> # npm MCP
-python "$INSTALLER_DIR/scan_mcp.py" local <path>         # local source
-python "$INSTALLER_DIR/scan_mcp.py" remote <url>         # hosted remote MCP
+python "$SKILL_DIR/scripts/scan_mcp.py" pypi <package>       # PyPI MCP
+python "$SKILL_DIR/scripts/scan_mcp.py" npm <@scope/package> # npm MCP
+python "$SKILL_DIR/scripts/scan_mcp.py" local <path>         # local source
+python "$SKILL_DIR/scripts/scan_mcp.py" remote <url>         # hosted remote MCP
 ```
+
+**Stage 1b (default for `pypi` / `npm`, needs Docker):** the package is
+installed and imported inside OpenSSF package-analysis (gVisor) and its
+behaviour is judged: credential-store reads, writes outside the package areas,
+DNS lookups and connections beyond the registry, network tools, planted fake
+credentials leaving the sandbox. Without Docker this stage gives NO VERDICT.
+`--no-dynamic` skips it; pass it only when the user explicitly accepts a scan
+without dynamic analysis, and say so in the result.
 
 **Stage 2 (optional — live runtime check in a Docker sandbox):** starts the
 server with **no host filesystem access** to inspect the tools it registers at
 runtime — the gap a static scan cannot cover. Powered by cisco-ai-mcp-scanner.
 
 ```bash
-python "$INSTALLER_DIR/scan_mcp.py" pypi <package> --sandbox -- uvx <package>
+python "$SKILL_DIR/scripts/scan_mcp.py" pypi <package> --sandbox -- uvx <package>
 ```
+
+The sandbox records the target's network traffic: only the PyPI and npm
+registries are allowed; any other DNS lookup, connection, UDP or ICMP packet
+blocks the verdict and is listed. A server that legitimately calls its own API
+needs `--allow-host HOST[:PORT]` (repeatable, also applies to Stage 1b) or
+`AGENT_GUARD_SANDBOX_ALLOW=h1,h2`. Add a host only when the user confirms it
+belongs to the server's documented purpose — never to turn a BLOCK green.
+`--no-network` runs the target without network (only when nothing must be
+downloaded).
 
 A clean Stage 1 verdict does not prove runtime safety — use `--sandbox` for
 unfamiliar servers. Only after SAFE: `install_skill.py mcp ...` (see below).
 
-**Stage 2 needs Docker** (running). The first `--sandbox` run builds a small
-sandbox image; if Docker is missing,
-`scan_mcp.py` says so and exits — Stage 1 and all skill scans work without it.
+**Stage 1b and Stage 2 need Docker** (running). The first `--sandbox` run builds
+a small sandbox image and a capture image; if Docker is missing, `scan_mcp.py`
+says so — `local` / `remote` scans and all skill scans work without it.
 Cisco runtime LLMs are configured with `MCP_SCANNER_LLM_*` and can use any
 LiteLLM-supported provider. For local LLM endpoints such as Ollama, Cisco still
 expects `MCP_SCANNER_LLM_API_KEY` to be set; use a harmless dummy value such as
@@ -358,8 +381,8 @@ source to the professional scanner best suited for it — same exit-code
 contract (0 SAFE / 1 BLOCK / 2 no verdict, fail closed):
 
 ```bash
-python "$SKILL_DIR/scripts/scan_cli.py" npm <package>[@version]     # GuardDog
-python "$SKILL_DIR/scripts/scan_cli.py" pypi <package>[==version]   # GuardDog
+python "$SKILL_DIR/scripts/scan_cli.py" npm <package>[@version]     # GuardDog + dynamic analysis
+python "$SKILL_DIR/scripts/scan_cli.py" pypi <package>[==version]   # GuardDog + dynamic analysis
 python "$SKILL_DIR/scripts/scan_cli.py" go <module>                 # GuardDog
 python "$SKILL_DIR/scripts/scan_cli.py" binary <release-url>        # SHA256 + VirusTotal
 python "$SKILL_DIR/scripts/scan_cli.py" binary <release-url> --deep # + malcontent (Docker)
@@ -374,6 +397,12 @@ Notes the agent must respect:
 - GuardDog needs Docker on Windows (official image is pulled automatically;
   Docker Desktop must be running). On Linux/macOS a native `guarddog` on PATH
   is used first.
+- `npm` / `pypi` also run the dynamic install analysis (OpenSSF
+  package-analysis, same rules as MCP Stage 1b); the worst stage decides.
+  It needs Docker on every platform, about 1 GB of image plus a cache volume,
+  and a privileged container for gVisor. The first run takes a few minutes.
+  `--no-dynamic` and `--allow-host` follow the same rules as for MCP scans:
+  only with the user's explicit consent.
 - GuardDog `capability-*` findings are informational (nearly every library
   reads files); only malware-heuristic rules produce BLOCK. Exception:
   `capability-process-hooks` (setup.py install/develop hook = code execution
@@ -509,7 +538,7 @@ with the registry and `--update <version>` drafts the review file for a new one.
 `windsurf`, ...).
 
 ```bash
-INSTALLER="$HOME/.claude/skills/agent-guard/scripts/install_skill.py"
+INSTALLER="$SKILL_DIR/scripts/install_skill.py"
 
 # Skill (markdown, no executables) -- all detected agents at once:
 python "$INSTALLER" skill "$WORKSPACE/<name>"
@@ -523,6 +552,12 @@ python "$INSTALLER" skill "$WORKSPACE/<name>" --dry-run
 
 Ask the user which agents to target if they work with several — default is
 all detected ones.
+
+If the user's personal config has a `[distribution]` section (`mode = "sync"`),
+the installer publishes the SAFE skill into that section's inbox and runs the
+user's own sync command once instead; `--tools` and `--workspace` are then
+refused, so do not ask which agents to target. A sync warning leaves the skill
+in the inbox for the user's next regular sync — report it, do not retry blindly.
 
 Updating later: `git -C "$WORKSPACE/<name>" fetch` → **re-scan the new
 commit** → checkout the new SHA.

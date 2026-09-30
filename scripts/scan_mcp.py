@@ -651,9 +651,10 @@ def _split_launch_command(argv: list) -> tuple:
 
 def _add_network_options(sp):
     sp.add_argument("--allow-host", action="append", default=[], metavar="HOST[:PORT]",
-                    help="sandbox: also allow this destination (default port 443; "
-                         "PyPI and npm registries are always allowed). Repeatable; "
-                         "AGENT_GUARD_SANDBOX_ALLOW=h1,h2 adds more")
+                    help="sandbox and (pypi/npm) dynamic analysis: also allow this "
+                         "destination (default port 443; the package registries are "
+                         "always allowed). Repeatable; AGENT_GUARD_SANDBOX_ALLOW=h1,h2 "
+                         "adds more for the sandbox")
     sp.add_argument("--no-network", action="store_true",
                     help="sandbox: run the target without any network "
                          "(only for commands that need no downloads)")

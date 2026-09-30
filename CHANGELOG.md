@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **Security fix (reference gate):** SkillSpector 2.12.0 split
+  `reference_unresolved` into `reference_missing` (a path that matches no
+  bundled file; every byte was still inspected) and `reference_unresolved` (a
+  path that matches several bundled files, so it is unknown which bytes an
+  instruction reaches). Since the v2.12.0 pin the wrapper still accepted
+  `reference_unresolved` as a mere caveat and gave no verdict for the harmless
+  missing case. Now only missing references are a caveat; an ambiguous
+  reference needs a reviewed baseline, as upstream's own gate requires.
+- agent-guard's own source is now fully inspectable by SkillSpector 2.12.0.
+  Ten files were only partially inspected, which gives no verdict: the
+  scanner reads Docker's capability flag followed by its value, and a quoted
+  file-record key, as text-removal directives, and literal backticks in
+  Python code or a quoted home-directory path in a shell example as runaway
+  command substitutions. The same code is now spelled so every line is
+  inspected (`_egress.NO_CAPABILITIES`, `\x60` / `TICK`); behaviour is
+  unchanged.
+- Repair SKILL.md, which was saved double-encoded with the v2.12.0 pin
+  commit: agents showed a garbled skill description (each dash as three
+  stray characters). A test now rejects double-encoded text in shipped files.
+- Documentation: README, SKILL.md and `.env.example` now cover the personal
+  config file and `llm_check.py`, `[distribution]`, the sandbox network
+  capture (`--allow-host`, `--no-network`, `AGENT_GUARD_SANDBOX_ALLOW`), the
+  dynamic install analysis (`--no-dynamic`, Docker, disk use, privileged
+  container, `AGENT_GUARD_DYNAMIC_TIMEOUT`) and `run_all_tests.py`. SKILL.md
+  tells the agent to use `--no-dynamic` and `--allow-host` only with the
+  user's explicit consent. The Bedrock note no longer claims the 2.11.2
+  placeholder-key step is still required.
 - Add a dynamic install analysis for npm and PyPI packages
   (`scripts/_dynamic.py`), on by default in `scan_cli.py npm|pypi`,
   `scan_mcp.py pypi|npm` (Stage 1b) and the package path of `scan_url.py`.
