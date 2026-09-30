@@ -320,12 +320,18 @@ def extract_github_links_from_text(text: str) -> list[str]:
     return links
 
 
+# The backtick, spelled as an escape: SkillSpector's shell parser reads literal
+# backticks in this file as unclosed command substitutions and then inspects
+# it only partially.
+TICK = "\x60"
+
+
 def clean_candidate_url(url: str) -> str:
     cleaned = html.unescape(url)
-    for marker in ("\\n", "\\r", "```", "`"):
+    for marker in ("\\n", "\\r", TICK * 3, TICK):
         if marker in cleaned:
             cleaned = cleaned.split(marker, 1)[0]
-    cleaned = cleaned.strip().rstrip(".,;\\`'\"")
+    cleaned = cleaned.strip().rstrip(".,;\\'\"" + TICK)
     cleaned = cleaned.removesuffix("&quot").removesuffix("&amp")
     parsed = urllib.parse.urlparse(cleaned)
     if parsed.query and "YOUR_API_KEY" in parsed.query.upper():
@@ -396,7 +402,7 @@ def extract_candidate_links_from_text(text: str) -> tuple[list[str], list[str]]:
 
 
 INSTALL_COMMAND_RE = re.compile(
-    r"(?m)^\s*(?:\$|>)?\s*((?:npx|uvx|docker|cargo)\s+[^\r\n`]+)"
+    r"(?m)^\s*(?:\$|>)?\s*((?:npx|uvx|docker|cargo)\s+[^\r\n\x60]+)"
 )
 
 
@@ -424,7 +430,7 @@ def compact_page_markdown(url: str, text: str) -> tuple[str, list[str], list[str
         body = body[:20000] + "\n\n[agent-guard: page text truncated for catalog scan]\n"
     source_block = "\n".join(f"- {link}" for link in source_links) or "- none"
     remote_block = "\n".join(f"- {link}" for link in remote_links) or "- none"
-    command_block = "\n".join(f"- `{command}`" for command in install_commands) or "- none"
+    command_block = "\n".join(f"- {TICK}{command}{TICK}" for command in install_commands) or "- none"
     markdown = (
         f"# Marketplace/catalog page\n\n"
         f"Source: {url}\n\n"

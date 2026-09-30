@@ -70,7 +70,7 @@ class SelectionTests(unittest.TestCase):
         bad = [
             {"kind": "magic"},
             {"kind": "cli"},
-            {"kind": "cli", "cli": "codex; rm -rf /"},
+            {"kind": "cli", "cli": "codex; whoami"},
             {"kind": "api", "protocol": "openai", "model": "m", "key_env": "K"},
             {"kind": "api", "protocol": "openai", "base_url": "ftp://x", "model": "m", "key_env": "K"},
             {"kind": "api", "protocol": "native", "model": "m", "key_env": "K"},

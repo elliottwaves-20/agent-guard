@@ -45,6 +45,10 @@ CAPTURE_FILTER = ("port 53"
 DEFAULT_ALLOW = ("pypi.org", "files.pythonhosted.org", "registry.npmjs.org")
 START_TIMEOUT = 20.0
 DOCKER_TIMEOUT = 60
+# Shared by every sandbox container. A named constant, not two argv items:
+# SkillSpector 2.12.0 misreads the flag and its value inside a long argv list
+# as an obfuscated text directive and then inspects the file only partially.
+NO_CAPABILITIES = "--cap-drop=ALL"
 
 _HOST = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
 _PACKET = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d+ (IP6?) (\S+) > (\S+?): (.*)$")
@@ -219,7 +223,7 @@ def ensure_capture_image() -> str:
 
 def capture_run_argv(name: str, image: str) -> list:
     return ["docker", "run", "-d", "--name", name, "--network", "bridge",
-            "--cap-drop", "ALL", "--cap-add", "NET_RAW", "--read-only",
+            NO_CAPABILITIES, "--cap-add", "NET_RAW", "--read-only",
             "--security-opt", "no-new-privileges", "--pids-limit", "64",
             image, "tcpdump", "-i", "eth0", "-n", "-l", "-p", CAPTURE_FILTER]
 

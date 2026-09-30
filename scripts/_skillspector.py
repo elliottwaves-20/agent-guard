@@ -449,7 +449,7 @@ def skillspector_env() -> dict:
         # guards against leftovers in the legacy env configuration.
         if model and not profile_active and not model_matches_provider(PROVIDER, model):
             print(f"  NOTE: SKILLSPECTOR_MODEL={model} does not belong to provider "
-                  f"{PROVIDER}; ignoring it and using the provider's default model.")
+                  f"{PROVIDER}; it is not used, the provider's default model applies.")
             e.pop("SKILLSPECTOR_MODEL", None)
     else:
         e.pop("SKILLSPECTOR_PROVIDER", None)
@@ -762,24 +762,27 @@ def verdict_skillspector(report_path: Path, code: int, runtime_hint: bool = Fals
             and reviewed_paths and not any(item.get("id") == "AE1" for item in issues)
             and isinstance(exceptions, list) and exceptions and all(isinstance(item, dict)
                 and item.get("phase") == "reference_resolution"
-                and item.get("reason_code") == "reference_unresolved"
+                and item.get("reason_code") in ("reference_missing", "reference_unresolved")
                 and item.get("fatal") is False
                 and item.get("path") in reviewed_paths for item in exceptions)
             and not completeness.get("limitations")
         )
         # Every file was inspected and the only thing SkillSpector could not
-        # settle are non-fatal reference lookups. Upstream does not fail a scan
-        # for this -- `--fail-on-incomplete` is opt-in -- and its own resolver
-        # reports prose like "X/100" or "blog/article" as a path-like reference,
-        # so blocking here would deny a verdict to essentially every skill whose
-        # documentation contains a slash. Report it as a caveat and judge.
+        # settle are references that match no bundled file. Upstream does not
+        # fail a scan for this -- `--fail-on-incomplete` is opt-in -- and its own
+        # resolver reports prose like "X/100" or "blog/article" as a path-like
+        # reference, so blocking here would deny a verdict to essentially every
+        # skill whose documentation contains a slash. Report it as a caveat and
+        # judge. Since SkillSpector 2.12.0 `reference_unresolved` means a path
+        # that matched several bundled files instead; upstream keeps that from
+        # counting as safe, so it needs the reviewed baseline above.
         unresolved_only = (
             not uninspected and not partial
             and completeness.get("coverage_percent") == 100
             and isinstance(exceptions, list) and exceptions
             and all(isinstance(item, dict)
                     and item.get("phase") == "reference_resolution"
-                    and item.get("reason_code") == "reference_unresolved"
+                    and item.get("reason_code") == "reference_missing"
                     and item.get("fatal") is False for item in exceptions))
         if not reviewed_references and not (unresolved_only and not FAIL_ON_INCOMPLETE):
             print("[BLOCK] NO VERDICT -- incomplete inspection requires review; no clean verdict.")

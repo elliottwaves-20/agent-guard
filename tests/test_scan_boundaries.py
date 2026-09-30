@@ -101,7 +101,7 @@ class ScanBoundaryTests(unittest.TestCase):
             self.assertNotIn('API_KEY', ' '.join(argv))
             self.assertNotIn('--stdio-arg=-v', argv)
             self.assertEqual(scan.call_args.kwargs['env']['MCP_SCANNER_LLM_API_KEY'], 'runtime-test-secret')
-            self.assertIn('--stdio-arg=--cap-drop', argv)
+            self.assertIn('--stdio-arg=--cap-drop=ALL', argv)
             cleanup_args = cleanup.call_args.args[0]
             self.assertEqual(cleanup_args[:3], ['docker', 'rm', '--force'])
             self.assertTrue(cleanup_args[3].startswith('agent-guard-scan-'))
@@ -188,11 +188,18 @@ class ScanBoundaryTests(unittest.TestCase):
         data = clean_report()
         data.update(suppressed_count=1, suppressed=[{'id': 'AE1', 'suppressed': True,
             'location': {'file': 'SKILL.md'}, 'suppression_reason': 'Reviewed documentation placeholders'}])
-        exception = {'phase': 'reference_resolution', 'reason_code': 'reference_unresolved',
+        exception = {'phase': 'reference_resolution', 'reason_code': 'reference_missing',
                      'path': 'SKILL.md', 'fatal': False}
         data['analysis_completeness'].update(is_complete=False, coverage_percent=100,
                                              ledger_exceptions=[exception])
         self.assertEqual(self.judge(data, reviewed=True), 0)
+        # An ambiguous reference (several bundled matches) needs the review:
+        # accepted with the reviewed AE1 fingerprints, refused without them.
+        ambiguous = copy.deepcopy(data)
+        ambiguous['analysis_completeness']['ledger_exceptions'][0]['reason_code'] = \
+            'reference_unresolved'
+        self.assertEqual(self.judge(ambiguous, reviewed=True), 0)
+        self.assertEqual(self.judge(ambiguous), 2)
         # A fatal exception, or one from another phase, is not reference noise and
         # blocks on its own -- the reviewed baseline cannot rescue it.
         for change in [{'fatal': True}, {'phase': 'analyzer'}]:

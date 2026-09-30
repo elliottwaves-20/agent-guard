@@ -186,8 +186,9 @@ class SkillSpectorWrapperTests(unittest.TestCase):
 
     UNRESOLVED_REFERENCE = {
         "outcome": "partial", "phase": "reference_resolution",
-        "reason_code": "reference_unresolved", "fatal": False,
-        "message": "A local path-like reference could not be resolved unambiguously.",
+        "reason_code": "reference_missing", "fatal": False,
+        "message": "A local path-like reference does not match any bundled artifact,"
+                   " such as a file the skill writes at runtime.",
         "path": "SKILL.md", "start_line": 5, "end_line": 5,
     }
 
@@ -208,6 +209,21 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 "entirely_uninspected_files": 0, "partially_inspected_files": 0,
                 "ledger_exceptions": [self.UNRESOLVED_REFERENCE]})
             self.assertEqual(module.verdict_skillspector(report, 0), 0)
+
+    def test_ambiguous_reference_blocks_without_review(self):
+        """Since SkillSpector 2.12.0 `reference_unresolved` means the path matched
+        several bundled files, so nobody knows which bytes the instruction reaches.
+        Upstream keeps that from counting as safe; so do we."""
+        module = importlib.import_module("_skillspector")
+        ambiguous = dict(self.UNRESOLVED_REFERENCE, reason_code="reference_unresolved")
+        with tempfile.TemporaryDirectory() as d:
+            report = Path(d) / "report.json"
+            self._write_report(report, analysis_completeness={
+                "is_complete": False, "status": "partial",
+                "coverage_percent": 100.0,
+                "entirely_uninspected_files": 0, "partially_inspected_files": 0,
+                "ledger_exceptions": [ambiguous]})
+            self.assertEqual(module.verdict_skillspector(report, 0), 2)
 
     def test_unresolved_references_still_block_when_completeness_demanded(self):
         module = importlib.import_module("_skillspector")
@@ -852,8 +868,8 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         Also valid: https://mcp.alphavantage.co/mcp
         Docs only: https://docs.anthropic.com/en/docs/claude-code/mcp
         Docs only: https://docs.continue.dev/customize/deep-dives/mcp
-        Broken markdown: https://mcp.alphavantage.co/mcp?apikey=YOUR_API_KEY\\n```\\n
-        """
+        Broken markdown: https://mcp.alphavantage.co/mcp?apikey=YOUR_API_KEY\\n\x60\x60\x60\\n
+        """  # \x60 = backtick, escaped for SkillSpector's shell parser (see _url_resolver.TICK)
 
         source_links, remote_links = resolver.extract_candidate_links_from_text(text)
 
@@ -1488,6 +1504,15 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         path = Path("C:/repo/node_modules/pkg/build/main/cli.js")
 
         self.assertEqual(audit.package_root_for_file(path), Path("C:/repo/node_modules/pkg"))
+
+    def test_shipped_text_is_not_double_encoded(self):
+        # UTF-8 read as cp1252 and saved again turns "—" into "â€”"; agents
+        # then show the garbled SKILL.md description to the user.
+        for path in [ROOT / "SKILL.md", ROOT / "README.md", ROOT / "CHANGELOG.md",
+                     *sorted((ROOT / "scripts").glob("*.py"))]:
+            text = path.read_text(encoding="utf-8")
+            for marker in ("â€", "âœ", "Ã"):
+                self.assertNotIn(marker, text, f"double-encoded UTF-8 in {path.name}")
 
     def test_docs_use_scan_skill_wrapper_for_skill_scans(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

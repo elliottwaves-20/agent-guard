@@ -70,7 +70,10 @@ WRITE_OK = ("/app/", "/root/.npm/", "/root/.cache/", "/tmp/", "/dev/", "/proc/",
             "/execution.log", "pipe:", "socket:", "anon_inode:", "host:")
 NET_TOOLS = ("curl", "wget", "nc", "ncat", "netcat", "socat", "telnet", "ftp", "tftp",
              "ssh", "scp", "sftp", "rsync", "dig", "nslookup", "host", "drill")
-_NET_TOOL_WORD = re.compile(r"(?:^|[\s;&|`(/])(" + "|".join(NET_TOOLS) + r")(?=\s|$)")
+# \x60 is the backtick. Written as an escape because SkillSpector's shell parser
+# reads a literal one as an unclosed command substitution and then inspects
+# this file only partially.
+_NET_TOOL_WORD = re.compile(r"(?:^|[\s;&|\x60(/])(" + "|".join(NET_TOOLS) + r")(?=\s|$)")
 _SHELLS = ("sh", "bash", "dash", "zsh", "ash")
 _PLANTED_KEY = re.compile(r"(KEY|SECRET|TOKEN|PASS)", re.IGNORECASE)
 

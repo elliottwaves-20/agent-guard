@@ -31,12 +31,14 @@ def cmd(*argv):
     return {"Command": list(argv), "Environment": ENV}
 
 
+# Keyword form on purpose: SkillSpector 2.12.0 misreads the quoted key list of
+# a file record as an obfuscated text directive (partial inspection).
 def read(path):
-    return {"Path": path, "Read": True, "Write": False, "Delete": False}
+    return dict(Path=path, Read=True, Write=False, Delete=False)
 
 
 def write(path):
-    return {"Path": path, "Read": False, "Write": True, "Delete": False}
+    return dict(Path=path, Read=False, Write=True, Delete=False)
 
 
 def phase(files=(), names=(), sockets=(), commands=(), status="completed"):

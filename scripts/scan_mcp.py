@@ -490,7 +490,7 @@ def run_sandbox(command: list, *, allow_hosts=(), network: bool = True) -> int:
         "run", "--rm", "-i", "--name", container,
         "--network", net, "--read-only", "--tmpfs", "/tmp:exec",
         "--user", "1000:1000", "--security-opt", "no-new-privileges",
-        "--cap-drop", "ALL", "--pids-limit", "256",
+        _egress.NO_CAPABILITIES, "--pids-limit", "256",
         "-e", "HOME=/tmp", "-e", "UV_CACHE_DIR=/tmp/uvcache",
         # Launchers must not reach for hosts outside the allow list on their
         # own: uv would fetch a Python build from GitHub, npm checks for updates.
