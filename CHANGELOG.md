@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.0 - unreleased
+
+- **New: `update_skills.py` -- scanned skill updates.** Installed skills are
+  fetched by the pinned `skills` CLI in project mode into a throw-away
+  directory, pinned to one commit (`owner/repo#<sha>`, recorded by the CLI as
+  `ref`), compared with the installed copy and scanned only when they differ.
+  Only SAFE replaces the installed version; the old one goes to `backup`. A
+  BLOCK quarantines the new version with its report, pauses every skill from
+  the same source and stays reported until `--accept` (with a reason),
+  `--reject` or `--remove`. Accepted MEDIUM/LOW findings (rule + file) carry
+  over to later versions of that skill; HIGH/CRITICAL never do. New skills use
+  the same path (`--add NAME --source owner/repo`); `--import-lock` adopts the
+  GitHub entries of the skills CLI's global lock. A changed project-lock format
+  stops with an error instead of being guessed around.
+- `[distribution]` accepts the optional keys `origins`, `backup` and
+  `quarantine`; without them nothing changes.
+
 ## 0.4.0 - 2026-09-30
 
 - The release self-scan passes again: the raw static scan blocks, as expected

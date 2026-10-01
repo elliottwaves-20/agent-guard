@@ -608,6 +608,42 @@ an error. A missing, failing or timed-out sync is a warning: the skill stays in
 the inbox for your next regular sync. An invalid section stops the installer
 (exit 2).
 
+**Keeping skills up to date (`update_skills.py`).** With three more keys in the
+same section, installed skills get scanned updates:
+
+```toml
+origins = "/path/to/skills-origins.json"   # which skill comes from which GitHub repo
+backup = "/path/to/replaced-versions"      # old versions are moved here, never deleted
+quarantine = "/path/to/blocked-versions"   # blocked versions are kept here for review
+```
+
+```bash
+python scripts/update_skills.py --import-lock ~/.agents/.skill-lock.json  # adopt skills-CLI installs
+python scripts/update_skills.py --add NAME --source owner/repo            # new skill, same path
+python scripts/update_skills.py --all --json report.json                   # weekly run
+```
+
+Each skill is fetched by the pinned `skills` CLI in *project mode* into a
+throw-away directory, pinned to the source's current commit (`owner/repo#<sha>`)
+— no agent directory and no global lock is touched. The staged files are
+compared with the installed copy; only a difference is scanned, and only a
+SAFE version replaces the installed one. Anything else keeps the installed
+version active:
+
+- **BLOCK:** the new version goes to `quarantine` (with its report), every
+  other skill from the same source is paused, and the skill is reported as
+  `blocked` in every run until you decide: `--accept NAME --reason TEXT`
+  installs it after review, `--reject NAME` keeps the old one and silences that
+  exact version, `--remove NAME` stops managing the skill. An accepted
+  MEDIUM/LOW finding (rule + file) stays accepted for later versions of that
+  skill; HIGH and CRITICAL findings are never carried over and block again.
+- **No verdict / fetch error:** reported, exit 2; nothing changes.
+
+Exit codes: 0 everything current or updated, 1 something waits for a decision,
+2 something could not be checked. The `--json` report lists each skill's
+status (`unchanged`, `updated`, `installed`, `blocked`, `paused`, `rejected`,
+`failed`, `no-verdict`) for a scheduler or notifier to act on.
+
 **MCP server (PyPI, isolated via uvx) — only after `scan_mcp.py` returned SAFE:**
 
 ```bash

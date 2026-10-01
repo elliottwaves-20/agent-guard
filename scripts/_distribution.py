@@ -9,11 +9,15 @@ agents would bypass it. With
     inbox = "<a directory the sync collects new skills from>"
     sync = ["<program>", "<arg>", ...]     # optional
     sync_timeout = 600                     # optional, seconds
+    origins = "<file>.json"                # optional: enables update_skills.py
+    backup = "<directory>"                 # optional: replaced versions go here
+    quarantine = "<directory>"             # optional: blocked versions are kept here
 
 the installer publishes a SAFE skill into `inbox` and runs `sync` once. What
 the sync does -- store, links, profile assignment -- is the machine's business;
 agent-guard only checks that it did not change the scanned files and prints
 the sync's lines that mention the skill. Without the section nothing changes.
+`origins`, `backup` and `quarantine` are used only by update_skills.py.
 A missing, failing or slow sync is a warning: the skill is already installed
 in the inbox and the next regular sync picks it up.
 """
@@ -29,7 +33,7 @@ from _skillspector import run_bounded
 from _user_config import ConfigError
 
 MODES = {"sync"}
-KEYS = {"mode", "inbox", "sync", "sync_timeout"}
+KEYS = {"mode", "inbox", "sync", "sync_timeout", "origins", "backup", "quarantine"}
 DEFAULT_SYNC_TIMEOUT = 600.0
 
 
@@ -37,6 +41,23 @@ class Distribution(NamedTuple):
     inbox: Path
     sync: tuple | None
     timeout: float
+    origins: Path | None = None
+    backup: Path | None = None
+    quarantine: Path | None = None
+
+
+def _optional_path(section: dict, key: str, *, must_exist: bool) -> Path | None:
+    raw = section.get(key)
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        raise ConfigError(f"[distribution] {key} must be a path")
+    path = Path(raw.strip()).expanduser()
+    if not path.is_absolute():
+        raise ConfigError(f"[distribution] {key} must be an absolute path, got {raw!r}")
+    if must_exist and not path.parent.is_dir():
+        raise ConfigError(f"[distribution] {key}: parent directory does not exist: {path.parent}")
+    return path
 
 
 def from_config(config: dict) -> Distribution | None:
@@ -76,7 +97,10 @@ def from_config(config: dict) -> Distribution | None:
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
         raise ConfigError("[distribution] sync_timeout must be a positive number of seconds")
 
-    return Distribution(inbox=inbox.resolve(), sync=sync, timeout=timeout)
+    return Distribution(inbox=inbox.resolve(), sync=sync, timeout=timeout,
+                        origins=_optional_path(section, "origins", must_exist=True),
+                        backup=_optional_path(section, "backup", must_exist=False),
+                        quarantine=_optional_path(section, "quarantine", must_exist=False))
 
 
 def run_sync(distribution: Distribution, name: str) -> bool:
