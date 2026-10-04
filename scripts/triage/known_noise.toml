@@ -1,0 +1,37 @@
+# Known false-positive patterns of the pinned SkillSpector.
+#
+# An entry is not an exception. It names a check that the concrete finding must
+# pass at its own location; a finding that fails the check stays open. Hard
+# evidence (scripts/_triage.py: HARD_RULES) is never looked up here.
+#
+# The catalog is bound to one scanner version. With any other version no entry
+# applies until the calibration corpus (tests/corpus/) passes again.
+
+version = 1
+skillspector = "2.12.0"
+
+[[entry]]
+id = "vendor-installer"
+rules = ["TM2", "SC2"]
+check = "vendor_installer"
+why = """A documented installer for the skill's own tool: every URL on the flagged
+line belongs to the publisher of the source repository, uses https, and the
+command neither uses sudo nor touches credential stores."""
+
+[[entry]]
+id = "service-key-env"
+rules = ["PE3"]
+check = "service_key_env"
+why = """The skill names one API key or setting of its own service in an
+environment variable or a .env file. No credential store (SSH, cloud, package
+registry) is touched, and the same file has no exfiltration finding."""
+
+[[entry]]
+id = "purpose-mismatch-without-risk"
+rules = ["TP4"]
+check = "no_risk_signal"
+why = """The LLM compares every snippet with the skill's whole declared purpose
+and flags parts that do less (install the CLI, create a client, read a file).
+Cleared only when the snippet carries no risk signal: every URL belongs to the
+publisher, no sudo, credential store, deletion, persistence or dynamic
+execution, and the file has no exfiltration or hard-evidence finding."""

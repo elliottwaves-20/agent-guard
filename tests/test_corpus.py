@@ -69,12 +69,47 @@ class VerifyTests(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get("AGENT_GUARD_INTEGRATION") == "1",
-                     "set AGENT_GUARD_INTEGRATION=1 to fetch the corpus")
-class FetchTests(unittest.TestCase):
+                     "set AGENT_GUARD_INTEGRATION=1 to fetch and scan the corpus")
+class CorpusAcceptanceTests(unittest.TestCase):
+    """Every triage change must keep attacks dangerous and the known noise safe."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.samples = {s.id: s for s in corpus.load_manifest()}
+        cls.fetched = corpus.fetch_all(Path(cls.tmp.name) / "src", tuple(cls.samples.values()))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
     def test_every_entry_resolves_to_its_pinned_content(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            fetched = corpus.fetch_all(Path(tmp))
-            self.assertEqual(set(fetched), {s.id for s in corpus.load_manifest()})
+        self.assertEqual(set(self.fetched), set(self.samples))
+
+    def test_static_triage_meets_every_expectation(self):
+        import contextlib
+        import io
+        import json
+        import subprocess
+        import _skillspector as ss
+        import _triage
+        ss.need_skillspector()
+        for sid, path in sorted(self.fetched.items()):
+            sample = self.samples[sid]
+            if sample.needs_llm:
+                continue
+            with self.subTest(sid):
+                out = Path(self.tmp.name) / f"{sid}.json"
+                cmd = ss.skillspector_command() + ["scan", str(path), "--no-llm", "--format",
+                                                   "json", "--output", str(out)]
+                done = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                                      errors="replace", env=ss.skillspector_env(), timeout=900)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    raw = ss.verdict_skillspector(out, done.returncode)
+                result = _triage.triage(json.loads(out.read_text(encoding="utf-8")), path, raw,
+                                        origin=_triage.Origin(sample.source, sample.ref))
+                still_open = [(d.finding.rule, d.reason) for d in result.by_status(_triage.OPEN)]
+                self.assertEqual(result.verdict, sample.expect, still_open)
 
 
 if __name__ == "__main__":

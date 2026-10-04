@@ -10,6 +10,7 @@
 #              repository, so agent-guard's own tree never carries them.
 #
 # expect: "safe" or "dangerous" -- the final verdict after triage.
+# needs_llm: the static scan alone finds nothing; only the LLM layer can.
 
 version = 1
 
@@ -23,7 +24,7 @@ source = "elevenlabs/skills"
 ref = "279173d974ea5cf0c4c4f91d4e7e65202b406dab"
 tree_hash = "6cfecbf43ddc4a7e806a3680a36fea1067dbdcb732ef0b49746a362b38d371c0"
 expect = "safe"
-noise = ["TP4"]
+noise = ["TP4", "TM2", "PE3"]
 
 [[benign]]
 name = "firecrawl"
@@ -31,7 +32,7 @@ source = "firecrawl/cli"
 ref = "4d145f7fae1f089fd29317984d7d6a7a4f5e70f8"
 tree_hash = "583c84325f7ab52e7f54435725f699fefbbd7d5f75133f375c4867202aa086c5"
 expect = "safe"
-noise = ["TP4", "PE3"]
+noise = ["TP4", "RP1"]
 
 [[benign]]
 name = "firecrawl-build-onboarding"
@@ -39,7 +40,7 @@ source = "firecrawl/skills"
 ref = "28c134e8586268e2e9112a0f865bf1ddc3c4d4d6"
 tree_hash = "3680b4ea922374aa66c61b0dc8d0c8d6b667cc5b2b5e34b1bfad04ae5fc81b59"
 expect = "safe"
-noise = ["TP4", "PE3"]
+noise = ["TP4", "PE3", "RP1"]
 
 [[benign]]
 name = "alphagenome-single-variant-analysis"
@@ -55,7 +56,7 @@ source = "tavily-ai/skills"
 ref = "0ea2d76840d5b63f568c258a5f110f2930650f23"
 tree_hash = "9cdf493b115432a22657b313659dc102ae2a9d46c2aae0a3e858abfcf30ba900"
 expect = "safe"
-noise = ["TM2", "RP1"]  # vendor installer from the vendor's own domain
+noise = ["SC2"]  # vendor installer from the vendor's own domain
 
 [[malicious]]
 id = "m1-exfil"
@@ -86,3 +87,4 @@ id = "m5-subtle"
 tree_hash = "0862ddc0774062608a7b773cf61ff24423c9e9129dbc2804b4c3b44102830f94"
 expect = "dangerous"
 hard = false
+needs_llm = true

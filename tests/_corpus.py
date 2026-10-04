@@ -33,6 +33,7 @@ class Sample:
     ref: str
     hard: bool = False
     noise: tuple = ()
+    needs_llm: bool = False
 
 
 def load_manifest(path: Path = MANIFEST) -> tuple:
@@ -46,7 +47,8 @@ def load_manifest(path: Path = MANIFEST) -> tuple:
                               e["source"], e["ref"], noise=tuple(e.get("noise", ()))))
     for e in data.get("malicious", []):
         samples.append(Sample(e["id"], "malicious", e["expect"], e["tree_hash"],
-                              repo["source"], repo["ref"], hard=bool(e.get("hard"))))
+                              repo["source"], repo["ref"], hard=bool(e.get("hard")),
+                              needs_llm=bool(e.get("needs_llm"))))
     return tuple(samples)
 
 
