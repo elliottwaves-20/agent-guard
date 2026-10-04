@@ -156,15 +156,17 @@ class InstalledScannerBaselineTests(unittest.TestCase):
             "import json, importlib.metadata as m; "
             "from skillspector.state import WorkflowResourceBudget; "
             "d=m.distribution('skillspector'); "
+            "u=json.loads(d.read_text('direct_url.json')); "
             "print(json.dumps([d.version, WorkflowResourceBudget().max_seconds, "
-            "json.loads(d.read_text('direct_url.json'))['vcs_info']['commit_id']]))"
+            "u['url'], u['vcs_info']['commit_id']]))"
         )
         result = subprocess.run([python, "-c", probe], capture_output=True,
                                 text=True, encoding="utf-8", env=env, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         import _pins
         self.assertEqual(json.loads(result.stdout),
-                         [_pins.SKILLSPECTOR_VERSION, 780.0, _pins.SKILLSPECTOR_SHA])
+                         [_pins.SKILLSPECTOR_VERSION, 780.0, _pins.SKILLSPECTOR_REPO,
+                          _pins.SKILLSPECTOR_SHA])
 
     def test_real_fingerprints_reject_modified_source_and_new_payload(self):
         ss.need_skillspector()

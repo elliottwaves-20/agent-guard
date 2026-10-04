@@ -15,6 +15,7 @@ class PinTests(unittest.TestCase):
         for script in ("setup.sh", "setup.ps1"):
             with self.subTest(script=script):
                 text = (ROOT / script).read_text(encoding="utf-8")
+                self.assertIn(f'"{_pins.SKILLSPECTOR_REPO}"', text)
                 self.assertIn(f'"{_pins.SKILLSPECTOR_SHA}"', text)
                 self.assertIn(f"# v{_pins.SKILLSPECTOR_VERSION}", text)
 

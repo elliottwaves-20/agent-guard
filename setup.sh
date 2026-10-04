@@ -11,8 +11,8 @@ set -euo pipefail
 # SkillSpector ships tagged GitHub releases but is not on PyPI. We pin the exact
 # commit behind a release tag (tags can move, commits cannot) so "scan = install"
 # applies to the scanner itself. Bump deliberately; keep the tag comment in sync.
-SKILLSPECTOR_REPO="https://github.com/NVIDIA/SkillSpector"
-SKILLSPECTOR_SHA="c7958a3268d9498644b22edb75d0f051bbc8cbfc"   # v2.12.0
+SKILLSPECTOR_REPO="https://github.com/elliottwaves-20/SkillSpector"   # v2.12.0 + NVIDIA/SkillSpector#697 until 2.13.0
+SKILLSPECTOR_SHA="92bb52130513e9482f8e59fb580965ff6f9430cb"   # v2.12.0 + #697
 
 echo "Checking prerequisites..."
 

@@ -16,6 +16,15 @@
   stops with an error instead of being guessed around.
 - `[distribution]` accepts the optional keys `origins`, `backup` and
   `quarantine`; without them nothing changes.
+- SkillSpector is pinned to v2.12.0 plus the merged upstream fix
+  NVIDIA/SkillSpector#697 (commit `92bb521` on a branch of the maintainer's
+  fork; both changed files are identical to the upstream merge `9ee7fbf`).
+  A command-line flag such as `--remove` in documentation is no longer read as
+  an obfuscated text-removal directive, so agent-guard's own tree is fully
+  inspected again. The pin returns to NVIDIA with SkillSpector 2.13.0.
+- Calibration corpus for finding triage: `tests/corpus/manifest.toml` pins five
+  public false-positive skills and five inert attack samples from
+  `elliottwaves-20/agent-guard-corpus` by commit and content hash.
 
 ## 0.4.0 - 2026-09-30
 
