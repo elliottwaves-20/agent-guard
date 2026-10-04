@@ -8,14 +8,20 @@ installed copy, and -- only when it differs -- scanned. A SAFE version replaces
 the installed one (the old one goes to `backup`); anything else leaves the
 installed version active.
 
-A BLOCK is not just skipped. The blocked version is kept in `quarantine`, every
+The raw scan is judged by the triage (_triage.py): hard evidence is final,
+known false-positive patterns and files approved earlier are cleared, and the
+verifier LLM of the `[llm.use] skills` profile looks at what is still open.
+Only a `safe` triage verdict installs. `dangerous` and `unclear` are blocked.
+
+A block is not just skipped. The blocked version is kept in `quarantine`, every
 other skill from the same source is paused, and the skill stays `blocked` in
 each run's report until someone decides:
 
-  --accept NAME --reason TEXT   install the quarantined version after review; its
-                                MEDIUM/LOW findings (rule + file) stay accepted for
-                                later versions of this skill. HIGH and CRITICAL
-                                findings are never carried over: they block again.
+  --accept NAME --reason TEXT   install the quarantined version after review and
+                                approve the content of each of its files. A later
+                                version's findings in files with exactly that
+                                content count as reviewed; changed or new files
+                                are judged anew, and hard evidence always blocks.
   --reject NAME                 keep the installed version, never alert on this one again
   --remove NAME                 stop managing the skill (its files stay where they are)
 
@@ -35,7 +41,10 @@ from collections import defaultdict
 from pathlib import Path
 
 import _distribution
+import _dossier
 import _staging
+import _triage
+import _verifier
 from _skillspector import USER_CONFIG, run_skillspector
 from _staging import StageError, now
 from _user_config import ConfigError
@@ -45,34 +54,27 @@ UNCHANGED, UPDATED, INSTALLED, WOULD_SCAN = "unchanged", "updated", "installed",
 BLOCKED, PAUSED, REJECTED = "blocked", "paused", "rejected"
 FAILED, NO_VERDICT = "failed", "no-verdict"
 WAITING = {BLOCKED, PAUSED}
-NEVER_CARRIED = {"HIGH", "CRITICAL"}
+BROKEN = {FAILED, NO_VERDICT}
 
 
-def report_findings(report: Path) -> list:
-    """(rule, file, severity) of every issue in a SkillSpector JSON report."""
+def load_report(report: Path) -> dict | None:
+    """The SkillSpector JSON report, or None when it cannot be read."""
     try:
         data = json.loads(report.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
-    found = []
-    for issue in data.get("issues") or []:
-        if not isinstance(issue, dict):
-            continue
-        loc = issue.get("location") if isinstance(issue.get("location"), dict) else {}
-        found.append((str(issue.get("id") or ""), str(loc.get("file") or "").replace("\\", "/"),
-                      str(issue.get("severity") or "").upper()))
-    return found
+        return None
+    return data if isinstance(data, dict) and isinstance(data.get("issues", []), list) else None
 
 
-def covered_by_acceptance(findings: list, entry: dict) -> bool:
-    """A BLOCK counts as reviewed when every finding is a MEDIUM/LOW (rule, file)
-    pair accepted earlier for this skill. Anything new or severe blocks again."""
-    if not findings:
-        return False
-    accepted = {(a["rule"], a["file"]) for a in entry.get("accepted_findings", [])}
-    return all(sev not in NEVER_CARRIED and (rule, path) in accepted
-               for rule, path, sev in findings)
-BROKEN = {FAILED, NO_VERDICT}
+def triage_line(summary: dict) -> str:
+    counts, cleared = summary["counts"], summary["cleared_by"]
+    parts = [f"triage: {summary['verdict']}"]
+    if cleared:
+        parts.append("cleared " + ", ".join(f"{n} by {check}" for check, n in sorted(cleared.items())))
+    rest = {k: v for k, v in counts.items() if k != _triage.CLEARED}
+    if rest:
+        parts.append(", ".join(f"{n} {status}" for status, n in sorted(rest.items())))
+    return "  " + "; ".join(parts)
 
 
 def load_distribution():
@@ -91,6 +93,15 @@ class Run:
         self.dist, self.origins, self.dry = dist, origins, dry
         self.results = {}
         self.changed = []
+        self._verifier = None
+        self._verifier_loaded = False
+
+    @property
+    def verifier(self):
+        """Stage d of the triage, built once and only when a scan needs it."""
+        if not self._verifier_loaded:
+            self._verifier, self._verifier_loaded = _verifier.from_profile(), True
+        return self._verifier
 
     def report(self, name, status, **extra):
         self.results[name] = {"status": status, **extra}
@@ -144,11 +155,12 @@ class Run:
             self.report(name, FAILED, source=source, detail=str(exc))
             return True
         entry["checked_at"] = now()
+        entry.setdefault("kind", "skill")
         if new == current:
-            entry.update(ref=ref, tree_hash=new)
+            entry.update(ref=ref, tree_hash=new, files=_dossier.file_hashes(target))
             self.report(name, UNCHANGED, source=source)
             return True
-        if new in entry.get("rejected", []):
+        if _dossier.rejected(entry, new):
             self.report(name, REJECTED, source=source, detail="this version was rejected before")
             return True
         if self.dry:
@@ -157,11 +169,16 @@ class Run:
 
         print(f"\n-- scanning {name} ({source}#{ref[:12]}) --")
         report = staged.path.parent.parent.parent / f"report-{name}.json"
-        verdict = run_skillspector(staged.path, report_output=report)
-        findings = report_findings(report)
-        carried = verdict == 1 and covered_by_acceptance(findings, entry)
-        if carried:
-            print(f"  {len(findings)} finding(s), all accepted earlier for {name} (rule + file)")
+        raw = run_skillspector(staged.path, report_output=report)
+        data = load_report(report) if raw in (0, 1) else None
+        if data is None:
+            result = _triage.Result(_triage.NO_VERDICT, [])
+        else:
+            result = _triage.triage(data, staged.path, raw, origin=_triage.Origin(source, ref),
+                                    approved=_dossier.approved(entry), verifier=self.verifier)
+        summary = _dossier.summary(result)
+        if result.verdict != _triage.NO_VERDICT:
+            print(triage_line(summary))
         try:
             unchanged = _staging.tree_digest(staged.path) == new
         except StageError:
@@ -169,27 +186,25 @@ class Run:
         if not unchanged:
             self.report(name, FAILED, source=source, detail="staged files changed during the scan")
             return True
-        if verdict == 0 or carried:
+        if result.verdict == _triage.SAFE:
             try:
                 old = _staging.promote(staged.path, target, new, self.dist.backup)
             except StageError as exc:
                 self.report(name, FAILED, source=source, detail=str(exc))
                 return True
-            entry.update(ref=ref, tree_hash=new, updated_at=now(),
-                         verdict="ACCEPTED-FINDINGS" if carried else "SAFE")
+            entry.update(ref=ref, tree_hash=new, updated_at=now(), verdict="SAFE",
+                         files=_dossier.file_hashes(target), triage=summary)
             self.changed.append(name)
             self.report(name, UPDATED if current else INSTALLED, source=source, ref=ref,
-                        backup=str(old) if old else None,
-                        accepted_findings=len(findings) if carried else 0)
+                        backup=str(old) if old else None)
             return True
-        if verdict == 1:
+        if result.verdict in (_triage.DANGEROUS, _triage.UNCLEAR):
             kept = _staging.quarantine_copy(staged.path, self.dist.quarantine, name, new)
             if kept is not None and report.is_file():
                 kept.with_name(kept.name + ".report.json").write_bytes(report.read_bytes())
             entry["blocked"] = {"hash": new, "ref": ref, "at": now(),
                                 "quarantine": str(kept) if kept else None,
-                                "findings": [{"rule": r, "file": f, "severity": v}
-                                             for r, f, v in findings]}
+                                "verdict": result.verdict, "findings": summary["findings"]}
             self.origins["sources"].setdefault(source, {})["paused"] = {"skill": name, "at": now()}
             self.report_blocked(name)
             return False
@@ -235,22 +250,12 @@ def accept(dist, origins, name, reason):
         old = _staging.promote(kept, dist.inbox / name, blocked["hash"], dist.backup)
     except StageError as exc:
         sys.exit(f"ERROR: {exc}")
+    target = dist.inbox / name
     entry.update(ref=blocked["ref"], tree_hash=blocked["hash"], verdict="ACCEPTED",
-                 updated_at=now())
-    entry.setdefault("accepted", []).append({"hash": blocked["hash"], "reason": reason.strip(),
-                                             "at": now()})
-    known = {(a["rule"], a["file"]) for a in entry.get("accepted_findings", [])}
-    severe = 0
-    for f in blocked.get("findings", []):
-        if f["severity"] in NEVER_CARRIED:
-            severe += 1
-        elif (f["rule"], f["file"]) not in known:
-            known.add((f["rule"], f["file"]))
-            entry.setdefault("accepted_findings", []).append(
-                {"rule": f["rule"], "file": f["file"], "reason": reason.strip(), "at": now()})
-    if severe:
-        print(f"  note: {severe} HIGH/CRITICAL finding(s) are not carried over; "
-              "they will block again in later versions")
+                 updated_at=now(), files=_dossier.file_hashes(target))
+    _dossier.approve(entry, target, blocked["hash"], reason.strip(), at=now())
+    print(f"  approved {len(entry['files'])} file(s) by content: unchanged files stay approved "
+          "in later versions; hard evidence always blocks")
     clear_block(origins, name)
     print(f"[OK] {name}: accepted version installed" + (f"; previous version in {old}" if old else ""))
     return name
@@ -266,9 +271,9 @@ def pending_text(origins: dict, origins_path) -> str:
         blocked = entry.get("blocked")
         if not blocked:
             continue
-        severe = sum(1 for f in blocked.get("findings", []) if f.get("severity") in NEVER_CARRIED)
-        lines.append(f"- {name} ({entry['source']}#{blocked['ref'][:12]}): blocked since {blocked['at']}, "
-                     f"{len(blocked.get('findings', []))} finding(s), {severe} HIGH/CRITICAL")
+        lines.append(f"- {name} ({entry['source']}#{blocked['ref'][:12]}): "
+                     f"{blocked.get('verdict', 'blocked')} since {blocked['at']}, "
+                     f"{len(blocked.get('findings', []))} open finding(s)")
         if blocked.get("quarantine"):
             lines.append(f"  quarantined copy: {blocked['quarantine']} (report next to it)")
         lines.append(f"  decide: update_skills.py --accept {name} --reason '...' | --reject {name}")
@@ -286,7 +291,7 @@ def pending_text(origins: dict, origins_path) -> str:
 def reject(origins, name):
     entry = origins["skills"].get(name) or sys.exit(f"ERROR: {name} is not managed")
     blocked = entry.get("blocked") or sys.exit(f"ERROR: {name} is not blocked")
-    entry.setdefault("rejected", []).append(blocked["hash"])
+    _dossier.record(entry, "reject", blocked["hash"], at=now())
     clear_block(origins, name)
     print(f"[OK] {name}: blocked version rejected; the installed version stays")
 
@@ -348,7 +353,7 @@ def main(argv=None) -> int:
         if (dist.inbox / name).exists():
             sys.exit(f"ERROR: {dist.inbox / name} exists but is not managed; "
                      "adopt it with --import-lock or review it first")
-        origins["skills"][name] = {"source": source, "added": now()}
+        origins["skills"][name] = {"kind": "skill", "source": source, "added": now()}
         names = [name]
     elif args.all:
         names = sorted(origins["skills"])

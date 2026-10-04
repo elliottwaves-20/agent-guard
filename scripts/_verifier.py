@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -177,14 +178,70 @@ def cache_key(f: _triage.Finding, skill_dir: Path, model: str) -> str | None:
     return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
 
 
-class Verifier:
-    """Callable for _triage.triage(verifier=...). `runner(prompts) -> results`."""
+CACHE_VERSION = 1
 
-    def __init__(self, cli: str, model: str, runner, cache: dict | None = None):
+
+def default_cache_path(env=None, *, platform: str | None = None, home: Path | None = None):
+    """Where settled verifier answers are kept between runs, or None."""
+    import sys
+    env = os.environ if env is None else env
+    platform = sys.platform if platform is None else platform
+    if platform == "win32":
+        base = Path(env["APPDATA"]) if env.get("APPDATA", "").strip() else None
+    elif env.get("XDG_STATE_HOME", "").strip():
+        base = Path(env["XDG_STATE_HOME"])
+    else:
+        if home is None:
+            try:
+                home = Path.home()
+            except RuntimeError:
+                home = None
+        base = home / ".local" / "state" if home is not None else None
+    return base / "agent-guard" / "verifier-cache.json" if base is not None else None
+
+
+def settled(item) -> bool:
+    return (isinstance(item, list) and len(item) == 3 and item[0] in ("benign", "malicious")
+            and isinstance(item[1], str) and isinstance(item[2], list)
+            and all(type(n) is int for n in item[2]))
+
+
+def load_cache(path) -> dict:
+    """Settled answers from `path`; a missing or unreadable file is an empty
+    cache (the findings are simply asked again)."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, TypeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict) or data.get("version") != CACHE_VERSION:
+        return {}
+    entries = data.get("entries")
+    if not isinstance(entries, dict):
+        return {}
+    return {k: v for k, v in entries.items()
+            if isinstance(k, str) and re.fullmatch(r"[0-9a-f]{64}", k) and settled(v)}
+
+
+def save_cache(path, cache: dict):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"version": CACHE_VERSION, "entries": cache}, indent=1) + "\n",
+                   encoding="utf-8")
+    os.replace(tmp, path)
+
+
+class Verifier:
+    """Callable for _triage.triage(verifier=...). `runner(prompts) -> results`.
+    With `cache_path`, new settled answers are written there after each call."""
+
+    def __init__(self, cli: str, model: str, runner, cache: dict | None = None,
+                 cache_path: Path | None = None):
         if cli not in SUPPORTED_CLIS:
             raise ValueError(f"verifier needs an agent CLI profile, got {cli!r}")
         self.cli, self.model, self.runner = cli, model, runner
         self.cache = cache if cache is not None else {}
+        self.cache_path = cache_path
 
     def __call__(self, open_items: list, skill_dir: Path) -> list:
         answers = [UNSURE] * len(open_items)
@@ -203,6 +260,7 @@ class Verifier:
                 continue
             pending.append((i, key, built[1]))
             prompts.append(built[0])
+        added = False
         if prompts:
             for (i, key, shown), result in zip(pending, self.runner(prompts)):
                 if not isinstance(result, dict) or not result.get("ok"):
@@ -213,15 +271,21 @@ class Verifier:
                 if key and answers[i].verdict != "unsure":
                     self.cache[key] = [answers[i].verdict, answers[i].reason,
                                        list(answers[i].evidence_lines)]
+                    added = True
+        if added and self.cache_path is not None:
+            try:
+                save_cache(self.cache_path, self.cache)
+            except OSError:
+                pass  # a lost cache only costs a second question next time
         return answers
 
 
-def from_profile(env=None):
+def from_profile(env=None, cache_path=None):
     """The verifier for this machine's `[llm.use] skills` profile, or None.
 
     Only agent-CLI profiles are supported (subscription login, no key); any
-    other setup simply leaves stage d out, so open findings stay open."""
-    import os
+    other setup simply leaves stage d out, so open findings stay open.
+    Settled answers persist in `cache_path` (default: default_cache_path())."""
     import shutil
     import _llm_profile
     import _skillspector
@@ -240,4 +304,6 @@ def from_profile(env=None):
     python = _skillspector.skillspector_python()
     if python is None or shutil.which(cli) is None:
         return None
-    return Verifier(cli, model, lambda prompts: run_boot(python, cli, model, prompts))
+    path = cache_path if cache_path is not None else default_cache_path(env)
+    return Verifier(cli, model, lambda prompts: run_boot(python, cli, model, prompts),
+                    cache=load_cache(path) if path is not None else None, cache_path=path)

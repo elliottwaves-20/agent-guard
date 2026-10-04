@@ -170,5 +170,57 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(cache, {})
 
 
+class PersistentCacheTests(unittest.TestCase):
+    def cache_path(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return Path(tmp.name) / "agent-guard" / "verifier-cache.json"
+
+    def judge(self, path, runner):
+        case = Case(self)
+        verifier = v.Verifier("codex", "m", runner, v.load_cache(path), cache_path=path)
+        return t.triage(case.report, case.dir, 1, origin=ORIGIN, verifier=verifier)
+
+    def test_answers_survive_a_restart(self):
+        path = self.cache_path()
+        self.judge(path, Runner(reply("benign")))
+        self.assertTrue(path.is_file())
+        runner = Runner()
+        self.assertEqual(self.judge(path, runner).verdict, t.SAFE)
+        self.assertEqual(runner.prompts, [])
+
+    def test_unsure_is_not_written(self):
+        path = self.cache_path()
+        self.judge(path, Runner(reply("unsure")))
+        self.assertEqual(v.load_cache(path), {})
+
+    def test_missing_or_broken_file_means_an_empty_cache(self):
+        path = self.cache_path()
+        self.assertEqual(v.load_cache(path), {})
+        path.parent.mkdir(parents=True)
+        for broken in ("not json", json.dumps([1]), json.dumps({"version": 99, "entries": {}})):
+            path.write_text(broken, encoding="utf-8")
+            self.assertEqual(v.load_cache(path), {})
+
+    def test_only_settled_well_formed_entries_are_loaded(self):
+        path = self.cache_path()
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"version": 1, "entries": {
+            "a" * 64: ["benign", "ok", []],
+            "b" * 64: ["unsure", "x", []],
+            "c" * 64: ["malicious", "bad", ["7"]],
+            "d" * 64: "benign"}}), encoding="utf-8")
+        self.assertEqual(v.load_cache(path), {"a" * 64: ["benign", "ok", []]})
+
+    def test_default_path_follows_the_platform(self):
+        win = v.default_cache_path({"APPDATA": "C:/Users/x/AppData/Roaming"}, platform="win32")
+        self.assertEqual(win, Path("C:/Users/x/AppData/Roaming/agent-guard/verifier-cache.json"))
+        nix = v.default_cache_path({"XDG_STATE_HOME": "/s"}, platform="linux", home=Path("/h"))
+        self.assertEqual(nix, Path("/s/agent-guard/verifier-cache.json"))
+        self.assertEqual(v.default_cache_path({}, platform="linux", home=Path("/h")),
+                         Path("/h/.local/state/agent-guard/verifier-cache.json"))
+        self.assertIsNone(v.default_cache_path({}, platform="win32", home=None))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -25,13 +25,13 @@ import subprocess
 from pathlib import Path
 from typing import NamedTuple
 
+import _dossier
 import _skills_cli
 from _skillspector import run_bounded
 
 LOCK_FILE = "skills-lock.json"
 LOCK_VERSION = 1
 GLOBAL_LOCK_VERSION = 3
-ORIGINS_VERSION = 1
 STAGE_TIMEOUT = float(os.environ.get("AGENT_GUARD_STAGE_TIMEOUT", "600"))
 
 # `codex` is one of the CLI's "universal" agents: in project mode its skills
@@ -163,20 +163,15 @@ def tree_digest(root: Path) -> str:
 # -- origins file -------------------------------------------------------------
 
 def load_origins(path: Path) -> dict:
-    if not path.exists():
-        return {"version": ORIGINS_VERSION, "skills": {}, "sources": {}}
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("version") != ORIGINS_VERSION:
-        raise StageError(f"{path}: unknown origins format {data.get('version')!r}")
-    data.setdefault("skills", {})
-    data.setdefault("sources", {})
-    return data
+    """The review file (see _dossier.py); version 1 is migrated on load."""
+    try:
+        return _dossier.load(path)
+    except _dossier.DossierError as exc:
+        raise StageError(str(exc)) from exc
 
 
 def save_origins(path: Path, data: dict):
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    _dossier.save(path, data)
 
 
 def import_global_lock(lock_path: Path, origins: dict, inbox: Path) -> tuple:
@@ -198,7 +193,7 @@ def import_global_lock(lock_path: Path, origins: dict, inbox: Path) -> tuple:
                 or not (inbox / name / "SKILL.md").is_file()):
             skipped.append(name)
             continue
-        origins["skills"][name] = {"source": source, "imported": now()}
+        origins["skills"][name] = {"kind": "skill", "source": source, "imported": now()}
         added.append(name)
     return added, skipped
 

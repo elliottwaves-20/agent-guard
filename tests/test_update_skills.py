@@ -27,9 +27,15 @@ REF = "a" * 40
 REF2 = "b" * 40
 
 
-def write_skill(path: Path, body: str):
+def write_skill(path: Path, body):
+    """`body` is the SKILL.md text, or {relative path: content} for more files."""
+    files = body if isinstance(body, dict) else {"SKILL.md": body}
     path.mkdir(parents=True, exist_ok=True)
-    (path / "SKILL.md").write_text(f"---\nname: {path.name}\n---\n{body}\n", encoding="utf-8")
+    for rel, content in files.items():
+        if rel == "SKILL.md":
+            content = f"---\nname: {path.name}\n---\n{content}\n"
+        (path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (path / rel).write_bytes(content.encode("utf-8"))
 
 
 class Env:
@@ -48,8 +54,12 @@ class Env:
         self.verdicts = {}          # name -> exit code
         self.findings = {}          # name -> [(rule, file, severity)]
         self.scanned = []
+        self.verifier = None        # stage d of the triage; off unless a test sets it
 
-    def origins(self, **skills):
+    def origins(self, skills=None):
+        # A mapping, not keywords: `env.x(name="...")` reads to SkillSpector like a
+        # shell `env NAME=...` command and exhausts its static parser.
+        skills = skills or {}
         data = {"version": 1, "skills": {n: {"source": s} for n, s in skills.items()}, "sources": {}}
         staging.save_origins(self.dist.origins, data)
 
@@ -67,17 +77,21 @@ class Env:
     def fake_scan(self, path, report_output=None, **_):
         name = Path(path).name
         self.scanned.append(name)
+        code = self.verdicts.get(name, 0)
+        # A raw BLOCK always comes with a finding; HIGH unless the test names one.
+        findings = self.findings.get(name) or ([("TP4", "SKILL.md", "HIGH")] if code == 1 else [])
         if report_output is not None:
             issues = [{"id": r, "severity": v, "location": {"file": f, "start_line": 1}}
-                      for r, f, v in self.findings.get(name, [])]
+                      for r, f, v in findings]
             Path(report_output).write_text(json.dumps({"issues": issues}), encoding="utf-8")
-        return self.verdicts.get(name, 0)
+        return code
 
     def run(self, *argv):
         with patch.object(updater, "load_distribution", return_value=self.dist), \
              patch.object(staging, "resolve_ref", return_value=REF), \
              patch.object(staging, "stage", side_effect=self.fake_stage), \
              patch.object(updater, "run_skillspector", side_effect=self.fake_scan), \
+             patch.object(updater._verifier, "from_profile", return_value=self.verifier), \
              patch.object(distribution, "run_sync", return_value=True):
             try:
                 return updater.main(list(argv))
@@ -93,7 +107,7 @@ class UpdateFlowTests(unittest.TestCase):
         env = Env(self)
         write_skill(env.inbox / "alpha", "v1")
         env.upstream[("o/r", "alpha")] = "v1"
-        env.origins(alpha="o/r")
+        env.origins({"alpha": "o/r"})
         self.assertEqual(env.run("--all"), 0)
         self.assertEqual(env.scanned, [])
         self.assertEqual(env.data()["skills"]["alpha"]["ref"], REF)
@@ -102,7 +116,7 @@ class UpdateFlowTests(unittest.TestCase):
         env = Env(self)
         write_skill(env.inbox / "alpha", "v1")
         env.upstream[("o/r", "alpha")] = "v2"
-        env.origins(alpha="o/r")
+        env.origins({"alpha": "o/r"})
         report = env.inbox.parent / "report.json"
         self.assertEqual(env.run("--all", "--json", str(report)), 0)
         self.assertIn("v2", (env.inbox / "alpha" / "SKILL.md").read_text())
@@ -116,7 +130,7 @@ class UpdateFlowTests(unittest.TestCase):
         for name in ("alpha", "beta"):
             write_skill(env.inbox / name, "v1")
             env.upstream[("o/r", name)] = "v2"
-        env.origins(alpha="o/r", beta="o/r")
+        env.origins({"alpha": "o/r", "beta": "o/r"})
         env.verdicts["alpha"] = 1
         report = env.inbox.parent / "report.json"
         self.assertEqual(env.run("--all", "--json", str(report)), 1)
@@ -137,7 +151,7 @@ class UpdateFlowTests(unittest.TestCase):
         env = Env(self)
         write_skill(env.inbox / "alpha", "v1")
         env.upstream[("o/r", "alpha")] = "v2"
-        env.origins(alpha="o/r")
+        env.origins({"alpha": "o/r"})
         env.verdicts["alpha"] = 1
         env.run("--all")
         self.assertNotEqual(env.run("--accept", "alpha"), 0)          # reason is mandatory
@@ -151,7 +165,7 @@ class UpdateFlowTests(unittest.TestCase):
         env = Env(self)
         write_skill(env.inbox / "alpha", "v1")
         env.upstream[("o/r", "alpha")] = "v2"
-        env.origins(alpha="o/r")
+        env.origins({"alpha": "o/r"})
         env.verdicts["alpha"] = 1
         env.run("--all")
         kept = Path(env.data()["skills"]["alpha"]["blocked"]["quarantine"])
@@ -163,7 +177,7 @@ class UpdateFlowTests(unittest.TestCase):
         env = Env(self)
         write_skill(env.inbox / "alpha", "v1")
         env.upstream[("o/r", "alpha")] = "v2"
-        env.origins(alpha="o/r")
+        env.origins({"alpha": "o/r"})
         env.verdicts["alpha"] = 1
         env.run("--all")
         self.assertEqual(env.run("--reject", "alpha"), 0)
@@ -179,7 +193,7 @@ class UpdateFlowTests(unittest.TestCase):
         env = Env(self)
         write_skill(env.inbox / "alpha", "v1")
         env.upstream[("o/r", "alpha")] = "v2"
-        env.origins(alpha="o/r")
+        env.origins({"alpha": "o/r"})
         env.verdicts["alpha"] = 2
         self.assertEqual(env.run("--all"), 2)
         self.assertIn("v1", (env.inbox / "alpha" / "SKILL.md").read_text())
@@ -188,7 +202,7 @@ class UpdateFlowTests(unittest.TestCase):
         env = Env(self)
         write_skill(env.inbox / "alpha", "v1")
         env.upstream[("o/r", "alpha")] = "v2"
-        env.origins(alpha="o/r")
+        env.origins({"alpha": "o/r"})
         before = env.dist.origins.read_text()
         self.assertEqual(env.run("--all", "--dry-run"), 0)
         self.assertEqual(env.scanned, [])
@@ -215,48 +229,8 @@ class UpdateFlowTests(unittest.TestCase):
     def test_missing_skill_in_source_is_a_failure(self):
         env = Env(self)
         write_skill(env.inbox / "alpha", "v1")
-        env.origins(alpha="o/r")
+        env.origins({"alpha": "o/r"})
         self.assertEqual(env.run("--all"), 2)
-
-
-class AcceptedFindingsTests(unittest.TestCase):
-    """--accept carries MEDIUM/LOW (rule, file) pairs to later versions, never HIGH."""
-
-    def blocked_then_accepted(self, findings):
-        env = Env(self)
-        write_skill(env.inbox / "alpha", "v1")
-        env.upstream[("o/r", "alpha")] = "v2"
-        env.origins(alpha="o/r")
-        env.verdicts["alpha"] = 1
-        env.findings["alpha"] = findings
-        self.assertEqual(env.run("--all"), 1)
-        self.assertEqual(env.run("--accept", "alpha", "--reason", "reviewed: docs only"), 0)
-        env.upstream[("o/r", "alpha")] = "v3"
-        return env
-
-    def test_same_medium_findings_pass_in_next_version(self):
-        env = self.blocked_then_accepted([("RP1", "SKILL.md", "MEDIUM")])
-        self.assertEqual(env.run("--all"), 0)
-        self.assertIn("v3", (env.inbox / "alpha" / "SKILL.md").read_text())
-        self.assertEqual(env.data()["skills"]["alpha"]["verdict"], "ACCEPTED-FINDINGS")
-
-    def test_new_finding_blocks_again(self):
-        env = self.blocked_then_accepted([("RP1", "SKILL.md", "MEDIUM")])
-        env.findings["alpha"] = [("RP1", "SKILL.md", "MEDIUM"), ("E1", "run.sh", "MEDIUM")]
-        self.assertEqual(env.run("--all"), 1)
-        self.assertIn("v2", (env.inbox / "alpha" / "SKILL.md").read_text())
-
-    def test_same_finding_in_other_file_blocks_again(self):
-        env = self.blocked_then_accepted([("RP1", "SKILL.md", "MEDIUM")])
-        env.findings["alpha"] = [("RP1", "rules/install.md", "MEDIUM")]
-        self.assertEqual(env.run("--all"), 1)
-
-    def test_high_findings_are_never_carried_over(self):
-        env = self.blocked_then_accepted([("TP4", "SKILL.md", "HIGH")])
-        self.assertIn("v2", (env.inbox / "alpha" / "SKILL.md").read_text())   # accepted once
-        self.assertEqual(env.run("--all"), 1)                                 # but not again
-        self.assertIn("v2", (env.inbox / "alpha" / "SKILL.md").read_text())
-        self.assertNotIn("accepted_findings", env.data()["skills"]["alpha"])
 
 
 class StagingBoundaryTests(unittest.TestCase):
