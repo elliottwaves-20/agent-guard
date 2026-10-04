@@ -73,14 +73,97 @@ def check_name(name: str) -> str:
     return name
 
 
-def resolve_ref(source: str) -> str:
-    """The current default-branch commit of a GitHub source."""
-    import _url_resolver
-    owner, repo = check_source(source).split("/", 1)
+def remote_head(source: str, run=subprocess.run) -> tuple:
+    """(default branch, head commit) of a GitHub source, by `git ls-remote`:
+    no API call, so no rate limit for the check that runs every time."""
+    url = f"https://github.com/{check_source(source)}.git"
+    argv = ["git", "ls-remote", "--symref", url, "HEAD"]
     try:
-        return _url_resolver.github_default_sha(owner, repo)
-    except _url_resolver.FetchError as exc:
-        raise StageError(str(exc)) from exc
+        done = run(argv, capture_output=True, text=True, timeout=60,
+                   env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise StageError(f"git ls-remote {source} failed: {exc}") from exc
+    if done.returncode != 0:
+        raise StageError(f"git ls-remote {source} failed: {(done.stderr or '').strip()[:200]}")
+    branch = sha = None
+    for line in (done.stdout or "").splitlines():
+        if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
+            branch = line[len("ref: refs/heads/"):-len("\tHEAD")]
+        elif line.endswith("\tHEAD") and SHA.fullmatch(line[:40]):
+            sha = line[:40]
+    if not branch or not sha:
+        raise StageError(f"git ls-remote {source}: no default branch and commit in the answer")
+    return branch, sha
+
+
+# -- the 7-day rule -----------------------------------------------------------
+
+# A commit is staged only once it has been on the branch this long: a hijacked
+# repository is usually noticed and cleaned up within days, and a version that
+# is never staged costs no download and no scan.
+COOLDOWN_DAYS = 7
+ACTIVITY_PAGE = 100
+ACTIVITY_MAX_PAGES = 5
+NULL_SHA = "0" * 40
+
+
+def _timestamp(value) -> _dt.datetime:
+    try:
+        stamp = _dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise StageError(f"invalid activity timestamp {value!r}") from exc
+    if stamp.tzinfo is None:
+        raise StageError(f"activity timestamp without time zone: {value!r}")
+    return stamp
+
+
+def settled_ref(source: str, branch: str, head: str, *, now=None,
+                days: int = COOLDOWN_DAYS, fetch=None) -> tuple:
+    """(commit, time) of the newest state of `branch` that is at least `days` old.
+
+    The times come from GitHub's repository activity (push, merge, force push):
+    GitHub sets them when the branch moves, so unlike a commit's own date they
+    cannot be backdated by whoever writes the commit. No activity at all means
+    the head itself is old (time None). Any doubt stops with StageError."""
+    import urllib.parse
+    import _url_resolver
+    fetch = fetch or _url_resolver.http_json
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    cutoff = now - _dt.timedelta(days=days)
+    ref = urllib.parse.quote(f"refs/heads/{branch}", safe="")
+    base = f"https://api.github.com/repos/{check_source(source)}/activity?ref={ref}&per_page={ACTIVITY_PAGE}"
+    oldest = None
+    for page in range(1, ACTIVITY_MAX_PAGES + 1):
+        try:
+            items = fetch(f"{base}&page={page}")
+        except _url_resolver.FetchError as exc:
+            raise StageError(f"{source}: branch activity unavailable ({exc})") from exc
+        if not isinstance(items, list):
+            raise StageError(f"{source}: unexpected branch activity answer")
+        entries = []
+        for item in items:
+            if not isinstance(item, dict) or item.get("ref", f"refs/heads/{branch}") != f"refs/heads/{branch}":
+                continue
+            after = str(item.get("after") or "")
+            if not SHA.fullmatch(after):
+                raise StageError(f"{source}: invalid commit in branch activity")
+            entries.append((_timestamp(item.get("timestamp")), after, str(item.get("before") or "")))
+        for stamp, after, before in sorted(entries, reverse=True):
+            if stamp <= cutoff:
+                return after, stamp.isoformat()
+            if oldest is None or stamp < oldest[0]:
+                oldest = (stamp, after, before)
+        if len(items) < ACTIVITY_PAGE:
+            break
+    else:
+        raise StageError(f"{source}: more than {ACTIVITY_PAGE * ACTIVITY_MAX_PAGES} branch changes "
+                         f"in {days} days; not choosing a version")
+    if oldest is None:
+        return head, None
+    before = oldest[2]
+    if not SHA.fullmatch(before) or before == NULL_SHA:
+        raise StageError(f"{source}: the branch is younger than {days} days")
+    return before, None
 
 
 # -- staging ------------------------------------------------------------------

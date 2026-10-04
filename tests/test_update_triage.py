@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from test_update_skills import Env, write_skill
+from test_update_skills import REF, REF2, Env, write_skill
 
 
 class ApprovalByHashTests(unittest.TestCase):
@@ -23,6 +23,7 @@ class ApprovalByHashTests(unittest.TestCase):
         env.findings["alpha"] = findings
         self.assertEqual(env.run("--all"), 1)
         self.assertEqual(env.run("--accept", "alpha", "--reason", "reviewed: vendor installer"), 0)
+        env.head = env.settled = REF2       # the next version is a new, settled commit
         return env
 
     def test_accept_approves_every_file_and_records_the_decision(self):
@@ -117,6 +118,53 @@ class TriageInUpdateTests(unittest.TestCase):
         self.assertEqual(data["version"], 2)
         self.assertEqual(list(data["skills"]["alpha"]["files"]), ["SKILL.md"])
         self.assertEqual(data["skills"]["alpha"]["kind"], "skill")
+
+
+class CooldownTests(unittest.TestCase):
+    """Only a branch state at least 7 days old is staged; a source whose head is
+    already installed is not downloaded at all."""
+
+    def installed_at(self, ref):
+        env = Env(self)
+        write_skill(env.inbox / "alpha", "v1")
+        env.upstream[("o/r", "alpha")] = "v2"
+        env.origins({"alpha": "o/r"})
+        data = env.data()
+        data["skills"]["alpha"]["ref"] = ref
+        env.dist.origins.write_text(json.dumps(data), encoding="utf-8")
+        return env
+
+    def test_installed_head_is_not_downloaded(self):
+        env = self.installed_at(REF)
+        self.assertEqual(env.run("--all"), 0)
+        self.assertEqual(env.staged_refs, [])
+        self.assertEqual(env.scanned, [])
+
+    def test_newer_head_inside_the_cooldown_waits_without_a_scan(self):
+        env = self.installed_at(REF)
+        env.head = REF2
+        report = env.inbox.parent / "report.json"
+        self.assertEqual(env.run("--all", "--json", str(report)), 0)
+        self.assertEqual(env.staged_refs, [])
+        self.assertEqual(env.scanned, [])
+        self.assertEqual(json.loads(report.read_text())["skills"]["alpha"]["status"], "cooldown")
+        self.assertIn("v1", (env.inbox / "alpha" / "SKILL.md").read_text())
+
+    def test_only_the_settled_state_is_staged(self):
+        env = self.installed_at("c" * 40)
+        env.head, env.settled = REF2, REF
+        self.assertEqual(env.run("--all"), 0)
+        self.assertEqual(env.staged_refs, [REF])
+        self.assertIn("v2", (env.inbox / "alpha" / "SKILL.md").read_text())
+        self.assertEqual(env.data()["skills"]["alpha"]["ref"], REF)
+
+    def test_a_new_skill_is_installed_at_the_settled_state(self):
+        env = Env(self)
+        env.origins()
+        env.upstream[("o/r", "gamma")] = "v1"
+        env.head, env.settled = REF2, REF
+        self.assertEqual(env.run("--add", "gamma", "--source", "o/r"), 0)
+        self.assertEqual(env.staged_refs, [REF])
 
 
 if __name__ == "__main__":

@@ -8,6 +8,12 @@ installed copy, and -- only when it differs -- scanned. A SAFE version replaces
 the installed one (the old one goes to `backup`); anything else leaves the
 installed version active.
 
+The 7-day rule comes first: `git ls-remote` tells whether a source moved; if
+it did, only the newest branch state that has been on GitHub for at least
+7 days is staged (GitHub's own push and merge times, see
+_staging.settled_ref). A newer commit is reported as `cooldown` and costs no
+download and no scan. New skills go the same way.
+
 The raw scan is judged by the triage (_triage.py): hard evidence is final,
 known false-positive patterns and files approved earlier are cleared, and the
 verifier LLM of the `[llm.use] skills` profile looks at what is still open.
@@ -51,6 +57,7 @@ from _user_config import ConfigError
 
 # Statuses in the JSON report. `blocked` and `paused` wait for a decision.
 UNCHANGED, UPDATED, INSTALLED, WOULD_SCAN = "unchanged", "updated", "installed", "would-scan"
+COOLDOWN = "cooldown"   # a newer commit exists but is younger than the 7-day rule
 BLOCKED, PAUSED, REJECTED = "blocked", "paused", "rejected"
 FAILED, NO_VERDICT = "failed", "no-verdict"
 WAITING = {BLOCKED, PAUSED}
@@ -120,12 +127,29 @@ class Run:
                     self.report(name, PAUSED, source=source,
                                 detail=f"source paused since {paused['at']} ({paused['skill']} blocked)")
             return
+        entries = [self.origins["skills"][name] for name in names]
         try:
-            ref = _staging.resolve_ref(source)
+            branch, head = _staging.remote_head(source)
+            if all(e.get("ref") == head for e in entries):
+                for name, entry in zip(names, entries):
+                    entry["checked_at"] = now()
+                    self.report(name, UNCHANGED, source=source)
+                return
+            ref, _since = _staging.settled_ref(source, branch, head)
         except StageError as exc:
             for name in names:
                 self.report(name, FAILED, source=source, detail=str(exc))
             return
+        if all(e.get("ref") == ref for e in entries):
+            for name, entry in zip(names, entries):
+                entry["checked_at"] = now()
+                self.report(name, COOLDOWN, source=source, head=head,
+                            detail=f"newer commit {head[:12]} is less than "
+                                   f"{_staging.COOLDOWN_DAYS} days on the branch; not fetched yet")
+            return
+        if ref != head:
+            print(f"  {source}: staging {ref[:12]}, the newest state at least "
+                  f"{_staging.COOLDOWN_DAYS} days old (head {head[:12]} is newer)")
         with tempfile.TemporaryDirectory(prefix="agent-guard-stage-") as work:
             try:
                 staged = _staging.stage(source, ref, names, Path(work))

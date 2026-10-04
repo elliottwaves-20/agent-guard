@@ -55,6 +55,9 @@ class Env:
         self.findings = {}          # name -> [(rule, file, severity)]
         self.scanned = []
         self.verifier = None        # stage d of the triage; off unless a test sets it
+        self.head = REF             # the branch head ls-remote reports
+        self.settled = REF          # the newest state at least 7 days old
+        self.staged_refs = []
 
     def origins(self, skills=None):
         # A mapping, not keywords: `env.x(name="...")` reads to SkillSpector like a
@@ -64,6 +67,7 @@ class Env:
         staging.save_origins(self.dist.origins, data)
 
     def fake_stage(self, source, ref, names, workdir, timeout=0):
+        self.staged_refs.append(ref)
         out = {}
         for name in names:
             body = self.upstream.get((source, name))
@@ -88,7 +92,9 @@ class Env:
 
     def run(self, *argv):
         with patch.object(updater, "load_distribution", return_value=self.dist), \
-             patch.object(staging, "resolve_ref", return_value=REF), \
+             patch.object(staging, "remote_head", side_effect=lambda source: ("main", self.head)), \
+             patch.object(staging, "settled_ref",
+                          side_effect=lambda source, branch, head: (self.settled, None)), \
              patch.object(staging, "stage", side_effect=self.fake_stage), \
              patch.object(updater, "run_skillspector", side_effect=self.fake_scan), \
              patch.object(updater._verifier, "from_profile", return_value=self.verifier), \
