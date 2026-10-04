@@ -1,0 +1,88 @@
+# Calibration corpus: the acceptance test for every change to finding triage.
+#
+# Only references live here. Each entry is fetched at test time from a pinned
+# commit and must match `tree_hash` (_staging.tree_digest) before it is used.
+#
+# benign    -- public skills the raw scanner blocked although they are harmless
+#              (false positives from the first update run, 2026-09-30). Fetched
+#              through the pinned skills CLI like a real update.
+# malicious -- inert attack samples (.invalid hosts only) kept in a separate
+#              repository, so agent-guard's own tree never carries them.
+#
+# expect: "safe" or "dangerous" -- the final verdict after triage.
+
+version = 1
+
+[malicious_repo]
+source = "elliottwaves-20/agent-guard-corpus"
+ref = "bd70d824ad042bafb703b81a6ce588eacc5d0963"
+
+[[benign]]
+name = "music"
+source = "elevenlabs/skills"
+ref = "279173d974ea5cf0c4c4f91d4e7e65202b406dab"
+tree_hash = "6cfecbf43ddc4a7e806a3680a36fea1067dbdcb732ef0b49746a362b38d371c0"
+expect = "safe"
+noise = ["TP4"]
+
+[[benign]]
+name = "firecrawl"
+source = "firecrawl/cli"
+ref = "4d145f7fae1f089fd29317984d7d6a7a4f5e70f8"
+tree_hash = "583c84325f7ab52e7f54435725f699fefbbd7d5f75133f375c4867202aa086c5"
+expect = "safe"
+noise = ["TP4", "PE3"]
+
+[[benign]]
+name = "firecrawl-build-onboarding"
+source = "firecrawl/skills"
+ref = "28c134e8586268e2e9112a0f865bf1ddc3c4d4d6"
+tree_hash = "3680b4ea922374aa66c61b0dc8d0c8d6b667cc5b2b5e34b1bfad04ae5fc81b59"
+expect = "safe"
+noise = ["TP4", "PE3"]
+
+[[benign]]
+name = "alphagenome-single-variant-analysis"
+source = "google-deepmind/science-skills"
+ref = "68832757cbbf941c620b71df5756cf6e5cc287b0"
+tree_hash = "e019449a9102cf035d210b14e8248fa0d1b722f337b03fde6dfd8c18980a5aba"
+expect = "safe"
+noise = ["TP4", "PE3"]
+
+[[benign]]
+name = "tavily-search"
+source = "tavily-ai/skills"
+ref = "0ea2d76840d5b63f568c258a5f110f2930650f23"
+tree_hash = "9cdf493b115432a22657b313659dc102ae2a9d46c2aae0a3e858abfcf30ba900"
+expect = "safe"
+noise = ["TM2", "RP1"]  # vendor installer from the vendor's own domain
+
+[[malicious]]
+id = "m1-exfil"
+tree_hash = "a6dbd74d5c57ef6f6abe62074fa5862c0e5e20d1491d074ffca33c412327443f"
+expect = "dangerous"
+hard = true
+
+[[malicious]]
+id = "m2-injection"
+tree_hash = "f4021b3b22a66339c7461e70008197d4b4162de5e4b19de7eeb661e3063059f0"
+expect = "dangerous"
+hard = false
+
+[[malicious]]
+id = "m3-curlsh"
+tree_hash = "5ee7d531d77ce5d35a38d4731f3e4af025f1cc05a368b35058ec639e31cf8676"
+expect = "dangerous"
+hard = false
+
+[[malicious]]
+id = "m4-obfuscated"
+tree_hash = "33bd97562ae0b5aa6a43a1d15d09623f054017fca0815efcb47f6252c55b1090"
+expect = "dangerous"
+hard = true
+
+[[malicious]]
+id = "m5-subtle"
+tree_hash = "0862ddc0774062608a7b773cf61ff24423c9e9129dbc2804b4c3b44102830f94"
+expect = "dangerous"
+hard = false
