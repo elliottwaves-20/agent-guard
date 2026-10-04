@@ -9,10 +9,10 @@ Stages, cheapest first:
   a) hard evidence (HARD_RULES)                -> dangerous, never cleared
   b) file already approved by content hash     -> cleared
   c) known-noise catalog check for this finding -> cleared, or stays open
-  d) verifier LLM (not yet wired)               -> open LLM findings stay unclear
+  d) verifier LLM (_verifier.py), if given    -> benign clears, malicious confirms
 
-Verdict: dangerous if any hard evidence or any open static finding; unclear if
-only LLM findings stay open; safe otherwise.
+Verdict: dangerous if any hard evidence, any confirmed finding or any open static
+finding; unclear if only LLM findings stay open; safe otherwise.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 CATALOG = Path(__file__).resolve().parent / "triage" / "known_noise.toml"
 
 SAFE, DANGEROUS, UNCLEAR, NO_VERDICT = "safe", "dangerous", "unclear", "no_verdict"
-HARD, CLEARED, OPEN = "hard", "cleared", "open"
+HARD, CLEARED, OPEN, CONFIRMED = "hard", "cleared", "open", "confirmed"
 
 # Evidence no catalog entry, approval or verifier may clear: malware signatures,
 # decoded-payload execution, obfuscated code, credentials flowing to the network,
@@ -109,8 +109,8 @@ class Finding:
 @dataclass
 class Disposition:
     finding: Finding
-    status: str          # HARD, CLEARED or OPEN
-    check: str | None    # catalog entry id, "approved" or None
+    status: str          # HARD, CLEARED, OPEN or CONFIRMED
+    check: str | None    # catalog entry id, "approved", "verifier" or None
     reason: str
 
 
@@ -241,9 +241,11 @@ def sha256_file(path: Path) -> str:
 
 
 def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | None = None,
-           catalog: dict | None = None, approved: frozenset = frozenset()) -> Result:
+           catalog: dict | None = None, approved: frozenset = frozenset(),
+           verifier=None) -> Result:
     """Judge a SkillSpector report. `raw_code` is verdict_skillspector's exit code;
-    `approved` holds SHA-256 hashes of files a person already approved."""
+    `approved` holds SHA-256 hashes of files a person already approved;
+    `verifier(open_dispositions, skill_dir) -> answers` is stage d (optional)."""
     if raw_code not in (0, 1):
         return Result(NO_VERDICT, [])
     catalog = catalog if catalog is not None else load_catalog()
@@ -276,7 +278,17 @@ def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | Non
                 disposition.reason = reason
         out.append(disposition)
 
-    if any(d.status == HARD for d in out):
+    still_open = [d for d in out if d.status == OPEN]
+    if verifier is not None and still_open and not any(d.status == HARD for d in out):
+        for d, answer in zip(still_open, verifier(still_open, Path(skill_dir))):
+            if answer.verdict == "benign":
+                d.status, d.check, d.reason = CLEARED, "verifier", answer.reason
+            elif answer.verdict == "malicious":
+                d.status, d.check, d.reason = CONFIRMED, "verifier", answer.reason
+            elif answer.reason:
+                d.reason = f"{d.reason}; verifier unsure: {answer.reason}"
+
+    if any(d.status in (HARD, CONFIRMED) for d in out):
         verdict = DANGEROUS
     elif any(d.status == OPEN and not d.finding.llm for d in out):
         verdict = DANGEROUS
