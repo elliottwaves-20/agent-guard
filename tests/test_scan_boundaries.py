@@ -243,6 +243,14 @@ class ScanBoundaryTests(unittest.TestCase):
             self.assertEqual(scan_mcp.verdict(output, code), 2)
         self.assertEqual(scan_mcp.verdict('Total tools scanned: 2\nUnsafe items: 0', 0), 0)
 
+    def test_cisco_incomplete_items_are_not_safe(self):
+        # Since 4.8.5 a crashed analyzer yields is_safe=None, reported as
+        # "Incomplete items: N" next to "Unsafe items: 0".
+        partial = 'Total tools scanned: 2\nSafe items: 1\nUnsafe items: 0\nIncomplete items: 1'
+        self.assertEqual(scan_mcp.verdict(partial, 0), 2)
+        both = 'Total tools scanned: 2\nSafe items: 0\nUnsafe items: 1\nIncomplete items: 1'
+        self.assertEqual(scan_mcp.verdict(both, 0), 1)
+
     def test_unresolved_git_ref_never_falls_back_to_mutable_branch(self):
         for result in [{}, {'sha': 'main'}]:
             with patch.object(resolver, 'http_json', return_value=result):

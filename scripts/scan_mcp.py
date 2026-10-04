@@ -603,6 +603,13 @@ def verdict(output: str, code: int) -> int:
         print("[WARN] NO VERDICT -- could not parse scanner output. Review manually "
               "before installing.")
         return 2
+    # Since 4.8.5 an analyzer that crashed leaves its item at is_safe=None,
+    # listed as "Incomplete items: N". Unchecked is not clean.
+    incomplete = _summary_int(output, "incomplete items:")
+    if unsafe == 0 and incomplete:
+        print(f"[BLOCK] NO VERDICT -- {incomplete} item(s) not fully analyzed (an "
+              "analyzer failed, see above). Do NOT install. Re-run the scan.")
+        return 2
     if unsafe == 0:
         extra = f" ({tools} tool(s) checked)" if tools else ""
         print(f"[SAFE] -- no unsafe items{extra}. Installation reasonable.")
