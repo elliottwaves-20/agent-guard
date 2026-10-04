@@ -46,10 +46,10 @@ from _skillspector import run_bounded
 # -- pinned release -----------------------------------------------------------
 
 SKILLS_PACKAGE = "skills"
-SKILLS_VERSION = "1.5.26"
-SKILLS_SHASUM = "1fa24b1ae298034ec5153277630a05433a3f42a9"
+SKILLS_VERSION = "1.7.0"
+SKILLS_SHASUM = "28a0d4f65a261d38cbd1737fb10f1b7f99926ac5"
 SKILLS_INTEGRITY = (
-    "sha512-D5jnWoMPDRQ3fJM3RpQH8SBrAS9tmVlTC7OdOB2tk7D6nORbRnw8RLwjVj81IIGlxwWuBthEgUChM7SOZGvTHQ=="
+    "sha512-OfePnDft+Xt9/tCoHdCUe5fkM8i+Q3QOSQO53hm7mKtsXyvc+CKOAAliVWZ484HS3cWx+6r+ob0AArixs3jYXw=="
 )
 REGISTRY_BASE = "https://registry.npmjs.org"
 

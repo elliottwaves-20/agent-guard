@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "package": "skills",
+  "package_version": "1.7.0",
+  "shasum": "28a0d4f65a261d38cbd1737fb10f1b7f99926ac5",
+  "integrity": "sha512-OfePnDft+Xt9/tCoHdCUe5fkM8i+Q3QOSQO53hm7mKtsXyvc+CKOAAliVWZ484HS3cWx+6r+ob0AArixs3jYXw==",
+  "source": "https://github.com/vercel-labs/skills",
+  "scanner": "guarddog npm scan (ghcr.io/datadog/guarddog:latest)",
+  "reviewed_on": "2026-10-04",
+  "note": "agent-guard runs this CLI to distribute an already-scanned skill into every agent on the machine, and in project mode to stage a pinned commit (owner/repo#sha) into a throw-away directory before the scan. GuardDog returns BLOCK on the same four findings as for 1.5.26; each is accepted with a reason AND neutralised by how the wrapper invokes the CLI (npm_config_ignore_scripts=true, reduced environment without credentials). New in 1.7.0 compared with 1.5.26: Notion as a skill source (notion / notion.so URLs, needs the separate `ntn` CLI); agent-guard only passes GitHub owner/repo#sha or local paths, so that code path is never reached. Any other finding, in this or a later version, stops delegation and the built-in installer takes over.",
+  "findings": [
+    {
+      "rule": "capability-process-hooks",
+      "file": "package/package.json",
+      "match": "\"prepare\": \"husky",
+      "reason": "husky is the package's own git-hook tooling for development. npm runs `prepare` only on publish/pack, on an argument-less local `npm install`, on `npm install <folder>` and for git dependencies -- never for a registry tarball and not under npx. The wrapper additionally sets npm_config_ignore_scripts=true, so no lifecycle script can run at all."
+    },
+    {
+      "rule": "threat-runtime-environment-read",
+      "file": "package/dist/cli.mjs",
+      "match": "process.env.GITHUB_TOKEN",
+      "reason": "Documented feature: the CLI reads a GitHub token and sends it only as the Authorization header of its GitHub requests, to reach private repositories. agent-guard stages public repositories, and the delegated process runs with a reduced environment that contains no token variables."
+    },
+    {
+      "rule": "threat-runtime-environment-read",
+      "file": "package/dist/cli.mjs",
+      "match": "process.env.GH_TOKEN",
+      "reason": "Same private-repository code path as GITHUB_TOKEN, reading the GitHub CLI's variable. Not present in the reduced environment the wrapper passes."
+    },
+    {
+      "rule": "threat-runtime-environment-read",
+      "file": "package/dist/_chunks/libs/@vercel/detect-agent.mjs",
+      "match": "process.env.COPILOT_GITHUB_TOKEN",
+      "reason": "Agent detection: the presence of COPILOT_* variables identifies a GitHub Copilot session. The value is used as a signal, and the variable is not present in the reduced environment the wrapper passes."
+    }
+  ]
+}
