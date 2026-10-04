@@ -11,8 +11,11 @@ Stages, cheapest first:
   c) known-noise catalog check for this finding -> cleared, or stays open
   d) verifier LLM (_verifier.py), if given    -> benign clears, malicious confirms
 
-Verdict: dangerous if any hard evidence, any confirmed finding or any open static
-finding; unclear if only LLM findings stay open; safe otherwise.
+Verdict: dangerous if any hard evidence, any finding the verifier confirmed, or
+any open finding the scanner stands behind; unclear if the only open findings
+are ones SkillSpector's own LLM meta-review did not confirm (tag
+`llm-unconfirmed`); safe otherwise. A static-only scan has no meta-review, so
+every open finding there counts as dangerous.
 """
 from __future__ import annotations
 
@@ -85,7 +88,7 @@ class Finding:
     file: str
     line: int | None
     snippet: str
-    llm: bool
+    unconfirmed: bool   # meta-review by the LLM did not confirm it (tag llm-unconfirmed)
     evidence_file: str | None = None
     evidence_lines: tuple = ()
     raw: dict = field(default_factory=dict, repr=False)
@@ -102,7 +105,7 @@ class Finding:
         return cls(rule=str(issue.get("id") or ""), severity=str(issue.get("severity") or "").upper(),
                    file=str(loc.get("file") or ""), line=loc.get("start_line"),
                    snippet=str(issue.get("code_snippet") or ""),
-                   llm=any(t.lower().startswith("llm") for t in tags),
+                   unconfirmed="llm-unconfirmed" in tags,
                    evidence_file=ev.get("code_path"), evidence_lines=lines, raw=issue)
 
 
@@ -290,7 +293,7 @@ def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | Non
 
     if any(d.status in (HARD, CONFIRMED) for d in out):
         verdict = DANGEROUS
-    elif any(d.status == OPEN and not d.finding.llm for d in out):
+    elif any(d.status == OPEN and not d.finding.unconfirmed for d in out):
         verdict = DANGEROUS
     elif any(d.status == OPEN for d in out):
         verdict = UNCLEAR

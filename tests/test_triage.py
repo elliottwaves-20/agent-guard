@@ -21,10 +21,10 @@ ORIGIN = t.Origin("acme-ai/skills", "a" * 40)
 VERSION = "2.12.0"
 
 
-def issue(rule, file="SKILL.md", line=1, severity="HIGH", snippet="", llm=False,
+def issue(rule, file="SKILL.md", line=1, severity="HIGH", snippet="", unconfirmed=False,
           evidence=None):
     item = {"id": rule, "severity": severity, "location": {"file": file, "start_line": line},
-            "code_snippet": snippet, "tags": ["llm-unconfirmed"] if llm else []}
+            "code_snippet": snippet, "tags": ["llm-unconfirmed"] if unconfirmed else []}
     if evidence:
         path, start, end = evidence
         item["evidence"] = {"code_path": path, "code_start_line": start, "code_end_line": end}
@@ -98,9 +98,9 @@ class VerdictTests(unittest.TestCase):
         skill = Skill(self, {"SKILL.md": "x\n"})
         self.assertEqual(skill.judge(report(issue("P2"))).verdict, t.DANGEROUS)
 
-    def test_open_llm_finding_is_unclear_until_verified(self):
+    def test_open_unconfirmed_finding_is_unclear_until_verified(self):
         skill = Skill(self, {"SKILL.md": "x\n", "run.py": "requests.get('https://other.example')\n"})
-        result = skill.judge(report(issue("TP4", llm=True, evidence=("run.py", 1, 1))))
+        result = skill.judge(report(issue("TP4", unconfirmed=True, evidence=("run.py", 1, 1))))
         self.assertEqual(result.verdict, t.UNCLEAR)
 
     def test_approved_file_clears_ordinary_findings(self):
@@ -189,7 +189,7 @@ class ServiceKeyTests(unittest.TestCase):
 class PurposeMismatchTests(unittest.TestCase):
     def judge(self, snippet, extra=()):
         skill = Skill(self, {"SKILL.md": "# Acme\n", "docs/use.md": f"# Use\n{snippet}\n"})
-        item = issue("TP4", llm=True, evidence=("docs/use.md", 2, 2))
+        item = issue("TP4", unconfirmed=True, evidence=("docs/use.md", 2, 2))
         return skill.judge(report(item, *extra))
 
     def test_harmless_off_purpose_snippet_is_cleared(self):
@@ -207,12 +207,12 @@ class PurposeMismatchTests(unittest.TestCase):
 
     def test_missing_evidence_stays_open(self):
         skill = Skill(self, {"SKILL.md": "# Acme\n"})
-        item = issue("TP4", llm=True, evidence=("docs/missing.md", 2, 2))
+        item = issue("TP4", unconfirmed=True, evidence=("docs/missing.md", 2, 2))
         self.assertEqual(skill.judge(report(item)).verdict, t.UNCLEAR)
 
     def test_evidence_outside_the_skill_is_not_read(self):
         skill = Skill(self, {"SKILL.md": "# Acme\n"})
-        item = issue("TP4", llm=True, evidence=("../outside.md", 1, 1))
+        item = issue("TP4", unconfirmed=True, evidence=("../outside.md", 1, 1))
         self.assertEqual(skill.judge(report(item)).verdict, t.UNCLEAR)
 
     def test_hard_evidence_in_the_file_blocks_the_check(self):

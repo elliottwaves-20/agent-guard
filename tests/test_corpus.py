@@ -112,5 +112,45 @@ class CorpusAcceptanceTests(unittest.TestCase):
                 self.assertEqual(result.verdict, sample.expect, still_open)
 
 
+@unittest.skipUnless(os.environ.get("AGENT_GUARD_LLM_INTEGRATION") == "1",
+                     "set AGENT_GUARD_LLM_INTEGRATION=1 to scan the corpus with the LLM layer "
+                     "and the verifier (real subscription budget, ~25 min)")
+class LiveCorpusAcceptanceTests(unittest.TestCase):
+    """The full chain -- LLM scan, triage, verifier -- meets every expectation,
+    including the sample only an LLM can catch."""
+
+    def test_full_chain_meets_every_expectation(self):
+        import importlib
+        import json
+        from unittest.mock import patch as patch_env
+        import _skillspector as ss
+        import _triage
+        import _verifier
+        from test_llm_integration import live_selection
+        env, label = live_selection(os.environ)
+        with tempfile.TemporaryDirectory() as tmp, patch_env.dict(os.environ, env):
+            importlib.reload(ss)
+            try:
+                self.assertTrue(ss.LLM_READY, f"{label}: {ss.LLM_REASON}")
+                verifier = _verifier.from_profile()
+                self.assertIsNotNone(verifier, f"{label}: no agent-CLI verifier profile")
+                samples = {s.id: s for s in corpus.load_manifest()}
+                fetched = corpus.fetch_all(Path(tmp) / "src", tuple(samples.values()))
+                for sid, path in sorted(fetched.items()):
+                    sample = samples[sid]
+                    with self.subTest(sid):
+                        out = Path(tmp) / f"{sid}.json"
+                        raw = ss.run_skillspector(path, report_output=out)
+                        data = json.loads(out.read_text(encoding="utf-8"))
+                        self.assertEqual(ss.llm_run_incomplete(data, expected=True), "")
+                        result = _triage.triage(data, path, raw, verifier=verifier,
+                                                origin=_triage.Origin(sample.source, sample.ref))
+                        still_open = [(d.finding.rule, d.reason)
+                                      for d in result.by_status(_triage.OPEN)]
+                        self.assertEqual(result.verdict, sample.expect, still_open)
+            finally:
+                importlib.reload(ss)
+
+
 if __name__ == "__main__":
     unittest.main()

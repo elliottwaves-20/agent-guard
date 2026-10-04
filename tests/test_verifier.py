@@ -39,7 +39,7 @@ class Case:
     """A skill whose docs/use.md line 2 carries one open TP4 (or other) finding.
     Bodies name a foreign host, so the catalog leaves the finding to stage d."""
 
-    def __init__(self, test, body="fetch https://data.example/x\n", rule="TP4", llm=True,
+    def __init__(self, test, body="fetch https://data.example/x\n", rule="TP4", unconfirmed=True,
                  evidence=("docs/use.md", 2, 2)):
         tmp = tempfile.TemporaryDirectory()
         test.addCleanup(tmp.cleanup)
@@ -48,7 +48,7 @@ class Case:
         (self.dir / "SKILL.md").write_bytes(SKILL.encode())
         (self.dir / "docs" / "use.md").write_bytes(f"# Use\n{body}".encode())
         item = {"id": rule, "severity": "HIGH", "location": {"file": "SKILL.md", "start_line": 1},
-                "tags": ["llm-unconfirmed"] if llm else [], "explanation": "off purpose"}
+                "tags": ["llm-unconfirmed"] if unconfirmed else [], "explanation": "off purpose"}
         if evidence:
             item["evidence"] = {"code_path": evidence[0], "code_start_line": evidence[1],
                                 "code_end_line": evidence[2]}
@@ -74,7 +74,7 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(Case(self).judge(Runner(reply("unsure"))).verdict, t.UNCLEAR)
 
     def test_open_static_finding_cleared_by_the_verifier(self):
-        case = Case(self, rule="PE2", llm=False, evidence=None)
+        case = Case(self, rule="PE2", unconfirmed=False, evidence=None)
         case.report["issues"][0]["location"]["file"] = "docs/use.md"
         case.report["issues"][0]["location"]["start_line"] = 2
         self.assertEqual(case.judge(Runner(reply("benign"))).verdict, t.SAFE)
@@ -118,7 +118,7 @@ class FailClosedTests(unittest.TestCase):
         for rule in sorted(v.NEVER_CLEARED):
             with self.subTest(rule):
                 runner = Runner()
-                case = Case(self, rule=rule, llm=False)
+                case = Case(self, rule=rule, unconfirmed=False)
                 self.assertEqual(case.judge(runner).verdict, t.DANGEROUS)
                 self.assertEqual(runner.prompts, [])
 

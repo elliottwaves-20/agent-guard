@@ -12,8 +12,8 @@ t = importlib.import_module("_triage")
 x = importlib.import_module("_explain")
 
 
-def disp(rule, status, llm=False, severity="HIGH"):
-    f = t.Finding(rule=rule, severity=severity, file="SKILL.md", line=3, snippet="", llm=llm)
+def disp(rule, status, unconfirmed=False, severity="HIGH"):
+    f = t.Finding(rule=rule, severity=severity, file="SKILL.md", line=3, snippet="", unconfirmed=unconfirmed)
     return t.Disposition(f, status, None, "reason text")
 
 
@@ -23,7 +23,7 @@ def result(verdict, *items):
 
 class ExplainTests(unittest.TestCase):
     def test_safe_counts_checked_notes_without_jargon(self):
-        text = x.explain(result(t.SAFE, disp("TP4", t.CLEARED, llm=True)), "music", lang="en")
+        text = x.explain(result(t.SAFE, disp("TP4", t.CLEARED, unconfirmed=True)), "music", lang="en")
         self.assertIn("SAFE: music", text)
         self.assertIn("1 automatic scanner note(s) were checked and are harmless", text)
         for word in ("TP4", "HIGH", "CRITICAL", "false"):
@@ -44,13 +44,13 @@ class ExplainTests(unittest.TestCase):
             with self.subTest(rule):
                 self.assertEqual(x.why_key(rule), key)
 
-    def test_open_llm_findings_do_not_supply_the_danger_reason(self):
-        text = x.explain(result(t.DANGEROUS, disp("TP4", t.OPEN, llm=True), disp("YR2", t.HARD)),
+    def test_unconfirmed_findings_do_not_supply_the_danger_reason(self):
+        text = x.explain(result(t.DANGEROUS, disp("TP4", t.OPEN, unconfirmed=True), disp("YR2", t.HARD)),
                          "s", lang="en")
         self.assertIn("malware", text)
 
     def test_unclear_asks_with_a_recommendation(self):
-        text = x.explain(result(t.UNCLEAR, disp("TP4", t.OPEN, llm=True)), "abc", lang="en")
+        text = x.explain(result(t.UNCLEAR, disp("TP4", t.OPEN, unconfirmed=True)), "abc", lang="en")
         self.assertIn("YOUR DECISION: abc -- 1 point(s)", text)
         self.assertIn("trust its publisher", text)
 
@@ -59,7 +59,7 @@ class ExplainTests(unittest.TestCase):
         self.assertTrue(text.startswith("NOT INSTALLED"))
 
     def test_details_show_the_scanner_vocabulary(self):
-        text = x.explain(result(t.SAFE, disp("TP4", t.CLEARED, llm=True)), "m", lang="en",
+        text = x.explain(result(t.SAFE, disp("TP4", t.CLEARED, unconfirmed=True)), "m", lang="en",
                          details=True)
         self.assertIn("HIGH TP4 @ SKILL.md:3 -- checked, harmless: reason text", text)
 
@@ -71,10 +71,10 @@ class ExplainTests(unittest.TestCase):
         self.assertEqual(set(x.TEXT["de"]), set(x.TEXT["en"]))
 
     def test_as_dict_carries_everything(self):
-        data = x.as_dict(result(t.UNCLEAR, disp("TP4", t.OPEN, llm=True)), "abc")
+        data = x.as_dict(result(t.UNCLEAR, disp("TP4", t.OPEN, unconfirmed=True)), "abc")
         self.assertEqual(data["verdict"], "unclear")
         self.assertEqual(data["findings"][0]["rule"], "TP4")
-        self.assertTrue(data["findings"][0]["llm"])
+        self.assertTrue(data["findings"][0]["unconfirmed"])
 
 
 if __name__ == "__main__":

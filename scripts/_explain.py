@@ -94,7 +94,7 @@ def why_key(rule: str) -> str:
 
 def blocking(result: _triage.Result) -> list:
     return [d for d in result.dispositions if d.status in (_triage.HARD, _triage.CONFIRMED)
-            or (d.status == _triage.OPEN and not d.finding.llm)]
+            or (d.status == _triage.OPEN and not d.finding.unconfirmed)]
 
 
 def explain(result: _triage.Result, name: str, *, lang: str | None = None,
@@ -126,5 +126,5 @@ def as_dict(result: _triage.Result, name: str) -> dict:
     return {"name": name, "verdict": result.verdict,
             "findings": [{"rule": d.finding.rule, "severity": d.finding.severity,
                           "file": d.finding.evidence_file or d.finding.file,
-                          "line": d.finding.line, "llm": d.finding.llm, "status": d.status,
+                          "line": d.finding.line, "unconfirmed": d.finding.unconfirmed, "status": d.status,
                           "check": d.check, "reason": d.reason} for d in result.dispositions]}
