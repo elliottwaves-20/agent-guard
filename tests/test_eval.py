@@ -51,5 +51,26 @@ class DrawTests(unittest.TestCase):
                              [("one", "benign", "safe", "h1")])
 
 
+class SummaryTests(unittest.TestCase):
+    def test_no_verdict_is_counted_as_blocked(self):
+        import run_benign_eval as r
+        rows = [{"verdict": "safe"}, {"verdict": "unclear"}, {"verdict": "dangerous"},
+                {"verdict": "no_verdict"}]
+        s = r.summarize(rows)
+        self.assertEqual((s["go"], s["blocked"], s["no_verdict"]), (1, 3, 1))
+        self.assertAlmostEqual(s["false_alarm_rate"], 0.75)
+
+    def test_full_scan_report_is_kept_for_the_cause_analysis(self):
+        import tempfile
+        import run_benign_eval as r
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "scan.json"
+            src.write_text('{"issues": []}', encoding="utf-8")
+            kept = r.keep_report(src, "some-skill", Path(tmp) / "out")
+            self.assertEqual(kept, Path(tmp) / "out" / "reports" / "some-skill.json")
+            self.assertEqual(kept.read_text(encoding="utf-8"), '{"issues": []}')
+            self.assertIsNone(r.keep_report(Path(tmp) / "missing.json", "x", Path(tmp) / "out"))
+
+
 if __name__ == "__main__":
     unittest.main()
