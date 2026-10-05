@@ -47,5 +47,7 @@ file was read; its other analyzers ran. Cleared only when that is the sole
 reason, the file is part of the skill and has no exfiltration or hard-evidence
 finding, every passage the parser gave up on was located with the same parser
 (scripts/_parse_spans_boot.py), and those passages carry no risk signal: every
-URL belongs to the publisher, no sudo, credential store, deletion, persistence
-or dynamic execution."""
+URL belongs to the publisher, no sudo, credential store, persistence or dynamic
+execution, and no destructive command word at all (rm, rmdir, del, shred, dd,
+find -delete, Remove-Item ...) in any flag spelling. "Every passage" is proven by
+the parser itself: with the located lines blanked, the whole file parses."""

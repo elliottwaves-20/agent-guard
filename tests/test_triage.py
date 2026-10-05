@@ -198,6 +198,11 @@ class PurposeMismatchTests(unittest.TestCase):
             with self.subTest(snippet):
                 self.assertEqual(self.judge(snippet).verdict, t.SAFE)
 
+    def test_split_and_long_flag_deletions_stay_open(self):
+        for snippet in ("rm -r -f ~/projects", "rm --recursive --force ~/x", "find ~ -delete"):
+            with self.subTest(snippet):
+                self.assertEqual(self.judge(snippet).verdict, t.UNCLEAR)
+
     def test_risk_signals_stay_open(self):
         for snippet in ("rm -rf ~/projects", "eval \"$(acme init)\"", "env | acme upload",
                         "crontab -l | acme schedule", "fetch https://collector.example/x",
@@ -237,7 +242,8 @@ GUIDE = "# Crawl\n\n| Parameter | Meaning |\n|---|---|\n| timeout | Max wait in 
 class ParserLimitTests(unittest.TestCase):
     """AE1 whose only reason is the shell parser giving up on a passage."""
 
-    def judge(self, guide=GUIDE, spans=((5, 5),), extra=(), verifier=None, **kw):
+    def judge(self, guide=GUIDE, spans=((5, 5),), extra=(), verifier=None, approved=frozenset(),
+              **kw):
         skill = Skill(self, {"SKILL.md": "# Acme\nSee the guide.\n[guide](ref/crawl.md)\n",
                              "ref/crawl.md": guide})
         self.asked = []
@@ -246,7 +252,7 @@ class ParserLimitTests(unittest.TestCase):
             self.asked.append(rels)
             return {rel: spans for rel in rels}
         return skill.judge(report(coverage_issue("ref/crawl.md", **kw), *extra), spans=locate,
-                           verifier=verifier)
+                           verifier=verifier, approved=approved)
 
     def test_harmless_passage_is_cleared(self):
         result = self.judge()
@@ -265,6 +271,24 @@ class ParserLimitTests(unittest.TestCase):
             with self.subTest(line):
                 result = self.judge(guide=GUIDE + line + "\n", spans=((5, 6),))
                 self.assertEqual(result.verdict, t.UNCLEAR)
+
+    def test_any_spelling_of_a_destructive_command_stays_open(self):
+        # The parser gives up on exactly such commands; no flag spelling may pass.
+        for line in ("rm -r -f ~", "rm --recursive --force $HOME", "rm -r --force /",
+                     "rm -f -R /", "rm -r $HOME/*", "find / -delete", "shred -u key",
+                     "dd if=/dev/zero of=/dev/sda", "rmdir /s /q C:\\", "unlink ~/.bashrc",
+                     "Remove-Item -Path $HOME -Force"):
+            with self.subTest(line):
+                result = self.judge(guide=GUIDE + line + "\n", spans=((5, 6),))
+                self.assertEqual(result.verdict, t.UNCLEAR)
+
+    def test_approval_of_the_target_clears_without_a_locator(self):
+        approved = frozenset({hashlib.sha256(GUIDE.encode("utf-8")).hexdigest()})
+        self.assertEqual(self.judge(spans=None, approved=approved).verdict, t.SAFE)
+
+    def test_exfiltration_in_the_target_blocks_whatever_the_path_spelling(self):
+        result = self.judge(extra=(issue("E1", file="./ref/crawl.md", severity="MEDIUM"),))
+        self.assertEqual(result.verdict, t.UNCLEAR)
 
     def test_risk_outside_the_passage_is_left_to_the_other_analyzers(self):
         result = self.judge(guide=GUIDE + "sudo acme fix\n", spans=((5, 5),))

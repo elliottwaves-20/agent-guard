@@ -28,7 +28,7 @@ import hashlib
 import re
 import tomllib
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 CATALOG = Path(__file__).resolve().parent / "triage" / "known_noise.toml"
@@ -69,6 +69,18 @@ RISK_SIGNAL = re.compile(
     r"\beval\b|\bexec\s*\(|\bInvoke-Expression\b|\biex\b|FromBase64String|"
     r"\bbase64\s+(?:-d|--decode)\b|\b(?:printenv|env)\s*\|",
     re.IGNORECASE)
+# Command words that destroy data, from triage/destructive_commands.toml.
+_COMMANDS = tomllib.loads((Path(__file__).resolve().parent / "triage"
+                           / "destructive_commands.toml").read_text(encoding="utf-8"))
+_WORDS = "|".join(re.escape(w) for w in _COMMANDS["words"])
+_FIND = "|".join(re.escape(a) for a in _COMMANDS["find_actions"])
+_RM_LONG = "|".join(re.escape(o) for o in _COMMANDS["rm_long_options"])
+# A recursive or forced rm in any flag spelling, or find with a deleting action.
+RISK_DELETE = re.compile(rf"\brm\s+(?:-\S+\s+)*(?:{_RM_LONG}|-[a-z]*[rf])\b|"
+                         rf"\bfind\b[^\n]*\s(?:{_FIND})\b", re.IGNORECASE)
+# Any of those command words, whatever its flags: the shell parser gives up on
+# exactly such commands, so lines it could not settle must not contain one.
+DESTRUCTIVE = re.compile(rf"\b(?:{_WORDS})\b|\bfind\b[^\n]*\s(?:{_FIND})\b", re.IGNORECASE)
 GITHUB_HOSTS = frozenset({"github.com", "raw.githubusercontent.com",
                           "objects.githubusercontent.com", "codeload.github.com"})
 GENERIC_OWNER_TOKENS = frozenset({"ai", "hq", "dev", "inc", "io", "app", "labs", "lab", "official",
@@ -212,6 +224,11 @@ def vendor_url(url: str, origin: Origin | None) -> bool:
     return len(labels) >= 2 and labels[-2] in owner_tokens(origin)
 
 
+def norm_path(p: str) -> str:
+    """One spelling per report path: ./a.md, a.md and a backslash-separated path compare equal."""
+    return PurePosixPath(str(p).replace("\\", "/")).as_posix()
+
+
 def pinned(origin: Origin | None) -> bool:
     return origin is not None and re.fullmatch(r"[0-9a-f]{40}", origin.ref or "") is not None
 
@@ -229,7 +246,7 @@ def check_vendor_installer(f, skill_dir, origin, exfil_files):
         return False, "a URL does not belong to the publisher"
     if SUDO.search(f.snippet or text) or CREDENTIAL_STORE.search(f.snippet or text):
         return False, "uses sudo or a credential store"
-    if f.file in exfil_files:
+    if norm_path(f.file) in exfil_files:
         return False, "the file also shows data leaving the machine"
     return True, f"installer from the publisher's own address ({urlsplit(urls[0]).hostname})"
 
@@ -239,7 +256,7 @@ def check_service_key_env(f, skill_dir, origin, exfil_files):
     context = f"{f.snippet}\n{text}"
     if CREDENTIAL_STORE.search(context):
         return False, "touches a credential store"
-    if f.file in exfil_files:
+    if norm_path(f.file) in exfil_files:
         return False, "the file also shows data leaving the machine"
     if not (SERVICE_VAR.search(context) or DOTENV.search(context)):
         return False, "no named service setting on the flagged lines"
@@ -252,9 +269,10 @@ def check_no_risk_signal(f, skill_dir, origin, exfil_files):
         return False, "evidence lines not found"
     if not all(vendor_url(u, origin) for u in URL.findall(text)):
         return False, "a URL does not belong to the publisher"
-    if SUDO.search(text) or CREDENTIAL_STORE.search(text) or RISK_SIGNAL.search(text):
+    if (SUDO.search(text) or CREDENTIAL_STORE.search(text) or RISK_SIGNAL.search(text)
+            or RISK_DELETE.search(text)):
         return False, "the snippet carries a risk signal"
-    if (f.evidence_file or f.file) in exfil_files:
+    if norm_path(f.evidence_file or f.file) in exfil_files:
         return False, "the file also shows data leaving the machine"
     return True, "differs from the declared purpose but carries no risk signal"
 
@@ -266,7 +284,7 @@ def check_parse_limit_span(f, skill_dir, origin, exfil_files):
     lines = file_text(skill_dir, target).splitlines()
     if not lines:
         return False, "the referenced file is not part of the skill"
-    if target in exfil_files:
+    if norm_path(target) in exfil_files:
         return False, "the file also shows data leaving the machine"
     if f.parse_spans is None:
         return False, "the lines the scanner could not settle were not located"
@@ -275,7 +293,8 @@ def check_parse_limit_span(f, skill_dir, origin, exfil_files):
     text = "\n".join("\n".join(lines[start - 1:end]) for start, end in f.parse_spans)
     if not all(vendor_url(u, origin) for u in URL.findall(text)):
         return False, "a URL in the unsettled lines does not belong to the publisher"
-    if SUDO.search(text) or CREDENTIAL_STORE.search(text) or RISK_SIGNAL.search(text):
+    if (SUDO.search(text) or CREDENTIAL_STORE.search(text) or RISK_SIGNAL.search(text)
+            or DESTRUCTIVE.search(text)):
         return False, "the unsettled lines carry a risk signal"
     return True, (f"the scanner's shell parser stumbled over {len(f.parse_spans)} "
                   f"passage(s) in {target}; they carry no risk signal")
@@ -310,7 +329,7 @@ def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | Non
     exfil_files = set()
     for f in findings:
         if f.rule in EXFIL_RULES or f.rule in HARD_RULES:
-            exfil_files.update(p for p in (f.file, f.evidence_file) if p)
+            exfil_files.update(norm_path(p) for p in (f.file, f.evidence_file) if p)
     locate_spans(findings, skill_dir, spans)
 
     out = []
@@ -320,7 +339,9 @@ def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | Non
             continue
         if f.severity not in BLOCKING:
             continue
-        target = Path(skill_dir) / (f.evidence_file or f.file)
+        # AE1 is about its target file, located or not: one approval key for both.
+        target = Path(skill_dir) / ((f.rule in COVERAGE_RULES and f.coverage_target)
+                                    or f.evidence_file or f.file)
         if approved and target.is_file() and sha256_file(target) in approved:
             out.append(Disposition(f, CLEARED, "approved", "file content approved before"))
             continue

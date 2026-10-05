@@ -1,0 +1,15 @@
+# Command words that destroy data. scripts/_triage.py builds its patterns from
+# this list. The words live here and not in the code because SkillSpector reads
+# such a list inside Python source as a hidden text-removal instruction and
+# stops inspecting the file (agent-guard scans its own tree).
+#
+# The triage never clears lines the shell parser could not settle when they
+# contain one of these words, in any flag spelling, and never treats a snippet
+# with a recursive or forced rm, or find with a deleting action, as harmless.
+version = 1
+words = ["rm", "rmdir", "rd", "del", "erase", "shred", "unlink", "dd", "mkfs",
+         "wipefs", "truncate", "Remove-Item", "Clear-Content", "Format-Volume"]
+# find with this action deletes what it matches.
+find_actions = ["-delete"]
+# Long options that make rm recursive or forced.
+rm_long_options = ["--recursive", "--force"]
