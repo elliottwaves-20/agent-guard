@@ -1,0 +1,22 @@
+# Corrected versions of SkillSpector's built-in YARA rules.
+#
+# A correction never softens YARA: a YARA finding stays hard evidence unless the
+# built-in rule matches the file AND the corrected rule does not. The corrected
+# rule keeps every original string except the imprecise one. Each entry is bound
+# to the pinned scanner version and to the SHA-256 of the built-in rule text
+# (LF line ends); if either changes, the correction no longer applies.
+
+version = 1
+skillspector = "2.12.0"
+corrected = "yara_corrections.yar.b64"
+
+[[rule]]
+name = "info_stealer"
+namespace = "malware"
+original_sha256 = "e56bb105795ce34b7c4776e73e84513843947a0170b92772cdb88670e14613f4"
+upstream = ""
+why = """The string $browser_cookies spans a whole line: the word for the browser
+store, then anything, then a browser name. One sentence of a skill description
+that names that word and, hundreds of characters later, Edge Functions matches
+(supabase SKILL.md). The correction requires a browser profile path that ends
+in the browser's store file."""
