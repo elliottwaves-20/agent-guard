@@ -1,0 +1,213 @@
+# Benign holdout, drawn by tests/_eval.py. Do not edit by hand.
+version = 1
+seed = 20261005
+
+[[benign]]
+name = "internal-comms"
+source = "anthropics/skills"
+ref = "683bc88e56f3e09ba94f7055977f3d3aa499f202"
+tree_hash = "32b359d312bc7cf1699f1819380cfd05f8c44401fccb34c0770b5e4bd73e3461"
+status = "fresh"
+
+[[benign]]
+name = "webapp-testing"
+source = "anthropics/skills"
+ref = "683bc88e56f3e09ba94f7055977f3d3aa499f202"
+tree_hash = "9a59820c8056232d7f83014f62d79d4028e658844740c90b4c9de55782696036"
+status = "fresh"
+
+[[benign]]
+name = "sandbox-migrate-to-next"
+source = "cloudflare/skills"
+ref = "41e0d19858946d18af9ee2c2feebbe2e11d829ff"
+tree_hash = "569cde6108a954e36910a5947c30d311705b92a174e9d21cb13f59ed7dbc542e"
+status = "fresh"
+
+[[benign]]
+name = "durable-objects"
+source = "cloudflare/skills"
+ref = "41e0d19858946d18af9ee2c2feebbe2e11d829ff"
+tree_hash = "d25519d26c219c6f13526453ae25992356ca8a3c4985ff4768bb769a716970fd"
+status = "fresh"
+
+[[benign]]
+name = "eas-update"
+source = "expo/skills"
+ref = "13ad8e05874195633b5c185f6947bb6400e228fc"
+tree_hash = "83c6b3a4b10d4f00ba77b2de93c7b9d161063c00bc55b9bf51455aaf112b8bfe"
+status = "fresh"
+
+[[benign]]
+name = "eas-simulator"
+source = "expo/skills"
+ref = "13ad8e05874195633b5c185f6947bb6400e228fc"
+tree_hash = "65a00bd12a4c2e420ae46d8dcc29086d8d8c73ef055680c4d76bf978b276ef68"
+status = "fresh"
+
+[[benign]]
+name = "firebase-hosting-basics"
+source = "firebase/agent-skills"
+ref = "de359da26586e4fad59b7ebab7592aa137c49b8a"
+tree_hash = "2e2fbcd2d6d35b42c9324523cccf38f98f5eb2930db2bb6717e473aa358adf7f"
+status = "fresh"
+
+[[benign]]
+name = "xcode-project-setup"
+source = "firebase/agent-skills"
+ref = "de359da26586e4fad59b7ebab7592aa137c49b8a"
+tree_hash = "59a1566a5ddeeec35134c9db11e8ed0695447c757955d40ba81ba7f345b7a05f"
+status = "fresh"
+
+[[benign]]
+name = "agents-md"
+source = "getsentry/skills"
+ref = "d18b7aa8ba878354e5c348310230e652f7690f9c"
+tree_hash = "f7f98e577bf7cf235e4b9efac97d2818fbaf4e80e0a4790618840c8e345d36e7"
+status = "fresh"
+
+[[benign]]
+name = "brand-guidelines"
+source = "getsentry/skills"
+ref = "d18b7aa8ba878354e5c348310230e652f7690f9c"
+tree_hash = "8ab3a107ccc8d19c363cf9b5128a1c547db4c9669c6d7bba870b423feac0c646"
+status = "fresh"
+
+[[benign]]
+name = "gemini-api-dev"
+source = "google-gemini/gemini-skills"
+ref = "6fee1bec62d6a0ca92c1d0e34d62ff11f70c498a"
+tree_hash = "31d6a520e247cdcf67f3fc80b4a33c993bba3fb717ab3d09fdc38a4fa32d5bb9"
+status = "fresh"
+
+[[benign]]
+name = "gemini-live-api-dev"
+source = "google-gemini/gemini-skills"
+ref = "6fee1bec62d6a0ca92c1d0e34d62ff11f70c498a"
+tree_hash = "32e5910caf5367181a622ffa8e5ba3c1af2dff625cff5f2958d0d9c65617c0de"
+status = "fresh"
+
+[[benign]]
+name = "terraform-style-guide"
+source = "hashicorp/agent-skills"
+ref = "f706481af9b8fedb66de909f6243ad29601afa0c"
+tree_hash = "eb864823cb00fed294d3c6b9ffef19a12d111d6f9bd3f1ec23ab4a0aa78c4b1c"
+status = "fresh"
+
+[[benign]]
+name = "provider-resources"
+source = "hashicorp/agent-skills"
+ref = "f706481af9b8fedb66de909f6243ad29601afa0c"
+tree_hash = "2e1e8a86053b7115c0482e407a3f0646ad41da46bbeacef87355e32051dd5d3d"
+status = "fresh"
+
+[[benign]]
+name = "transformers-js"
+source = "huggingface/skills"
+ref = "ca0325bb20b2d0a1b2efa893670c4c72f79e707b"
+tree_hash = "696f030e63d1bad8ac4a01221dd2c092f2727014a6da507a2d12dd8d60735644"
+status = "fresh"
+
+[[benign]]
+name = "huggingface-lora-space-builder"
+source = "huggingface/skills"
+ref = "ca0325bb20b2d0a1b2efa893670c4c72f79e707b"
+tree_hash = "642f446da8746afc62a2145841b4a1dda5eb5fa8d9360d0af969c38443d94ea0"
+status = "fresh"
+
+[[benign]]
+name = "microsoft-docs"
+source = "microsoft/skills"
+ref = "ce7edea90860e0c69fa36db164584c87908e09f5"
+tree_hash = "7e0da27b1926a16bd42bb942b15b8d04875473c89a41e07b6134772f85cd8093"
+status = "fresh"
+
+[[benign]]
+name = "frontend-design-review"
+source = "microsoft/skills"
+ref = "ce7edea90860e0c69fa36db164584c87908e09f5"
+tree_hash = "f6946fc80968eab80681c9f4f24030c463346cc470bf3282030dffc0c42e950b"
+status = "fresh"
+
+[[benign]]
+name = "mongodb-schema-design"
+source = "mongodb/agent-skills"
+ref = "18b014ee53f5e8a824942cc6b0ced37f921e7b3c"
+tree_hash = "0d1c65c2e471e2952cb1b62a9ddde73e896253039dca912c3c58d942201bf2d0"
+status = "fresh"
+
+[[benign]]
+name = "mongodb-connection"
+source = "mongodb/agent-skills"
+ref = "18b014ee53f5e8a824942cc6b0ced37f921e7b3c"
+tree_hash = "23e3c6a8942b2ef1801b416582461c78a03104d2e74c03a7ed7035d239e15fe8"
+status = "fresh"
+
+[[benign]]
+name = "neon"
+source = "neondatabase/agent-skills"
+ref = "9e4a5705922fddb540c396111a7979e0dca79cc2"
+tree_hash = "cd2ebce98344f58ed28047a4b3a0311883bd6580ee789ca609d3d521512b9fe3"
+status = "fresh"
+
+[[benign]]
+name = "neon-ai-gateway"
+source = "neondatabase/agent-skills"
+ref = "9e4a5705922fddb540c396111a7979e0dca79cc2"
+tree_hash = "096bd8891f17108b85e0b1b3407e009ab4f0b095666bd200f819fa7987a7befd"
+status = "fresh"
+
+[[benign]]
+name = "notion-research-documentation"
+source = "openai/skills"
+ref = "49f948faa9258a0c61caceaf225e179651397431"
+tree_hash = "b9b191be7f0f3ca62fa296a9bb1ca7deee68c3ff7b7c9631dd9739e392ee9cd8"
+status = "fresh"
+
+[[benign]]
+name = "openai-docs"
+source = "openai/skills"
+ref = "49f948faa9258a0c61caceaf225e179651397431"
+tree_hash = "6be315d4a57da16df26cc44f6467155ed9bb28179b932bec94ceaea7c09f1fdb"
+status = "fresh"
+
+[[benign]]
+name = "stripe-directory"
+source = "stripe/ai"
+ref = "c40002aa6047acaa72e290cdbb22d9b77739d798"
+tree_hash = "4a4d286dd4731addeee7895e8bfc928d44f7c0dfa9b707b6f250df0918c43fa0"
+status = "fresh"
+
+[[benign]]
+name = "stripe-best-practices"
+source = "stripe/ai"
+ref = "c40002aa6047acaa72e290cdbb22d9b77739d798"
+tree_hash = "cc2fe0f1bc773b6a9f5b07e1942538ce3e34713ab4a2d20f4a10d9ca598bc455"
+status = "fresh"
+
+[[benign]]
+name = "supabase-postgres-best-practices"
+source = "supabase/agent-skills"
+ref = "c9be0e931b7930f7d02126d04774d904c381e7d7"
+tree_hash = "109123f9cb7166c318f756bbbfbbdc2ee488bc1a945d22b53d9f0744b1c8d15f"
+status = "fresh"
+
+[[benign]]
+name = "supabase"
+source = "supabase/agent-skills"
+ref = "c9be0e931b7930f7d02126d04774d904c381e7d7"
+tree_hash = "cce95e9d7fdb86824b48011bdc0fee181b45d08bbd075bb7f016e714c173d9b1"
+status = "fresh"
+
+[[benign]]
+name = "vercel-react-best-practices"
+source = "vercel-labs/agent-skills"
+ref = "063bee94c3f4df8453406c830b0a7df0f2860278"
+tree_hash = "a299a051cd38fb640d07c70a188ffbf2102da014c02b86160fc6708e75b13c48"
+status = "fresh"
+
+[[benign]]
+name = "vercel-composition-patterns"
+source = "vercel-labs/agent-skills"
+ref = "063bee94c3f4df8453406c830b0a7df0f2860278"
+tree_hash = "ccc516f10f4f4849a2272a3edc2cb3265bb92f5fe38535ef988e9a62997dcd14"
+status = "fresh"
