@@ -300,6 +300,62 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertIn("src/lib.rs: static_parse_limit", out.getvalue())
         self.assertNotIn("SKILL.md: reference_missing", out.getvalue())
 
+    PARSE_LIMIT = {"outcome": "partial", "phase": "static", "reason_code": "static_parse_limit",
+                   "path": "src/main.swift", "start_line": None, "end_line": None,
+                   "fatal": False, "analyzers": ["static_patterns_tool_misuse"]}
+
+    def _parse_limit_report(self, d, *exceptions, limitations=None, uninspected=0):
+        report = Path(d) / "report.json"
+        self._write_report(report, analysis_completeness={
+            "is_complete": False, "status": "partial", "coverage_percent": 80.0,
+            "entirely_uninspected_files": uninspected, "partially_inspected_files": 1,
+            "ledger_exceptions": list(exceptions),
+            "limitations": (["Analyzer static_patterns_tool_misuse status: degraded."]
+                            if limitations is None else limitations)})
+        return report
+
+    def test_parse_limit_only_gap_goes_to_triage_as_block(self):
+        """The shell parser gave up on a passage of a file it read: the triage
+        locates and checks those lines, so this is a BLOCK, not a no-verdict."""
+        module = importlib.import_module("_skillspector")
+        with tempfile.TemporaryDirectory() as d:
+            report = self._parse_limit_report(d, self.PARSE_LIMIT, self.UNRESOLVED_REFERENCE)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(module.verdict_skillspector(report, 0), 1)
+        self.assertIn("src/main.swift: static_parse_limit", out.getvalue())
+        self.assertIn("[BLOCK] partial inspection", out.getvalue())
+
+    def test_parse_limit_with_other_gap_still_no_verdict(self):
+        module = importlib.import_module("_skillspector")
+        other = dict(self.PARSE_LIMIT, reason_code="analyzer_error")
+        foreign = dict(self.PARSE_LIMIT, analyzers=["static_yara"])
+        cases = [((self.PARSE_LIMIT, other), None, 0),
+                 ((foreign,), ["Analyzer static_yara status: degraded."], 0),
+                 ((self.PARSE_LIMIT,), ["Analyzer static_yara status: degraded."], 0),
+                 ((self.PARSE_LIMIT,), None, 1),
+                 ((dict(self.PARSE_LIMIT, fatal=True),), None, 0)]
+        for exceptions, limitations, uninspected in cases:
+            with self.subTest(exceptions=exceptions, limitations=limitations,
+                              uninspected=uninspected):
+                with tempfile.TemporaryDirectory() as d:
+                    report = self._parse_limit_report(d, *exceptions, limitations=limitations,
+                                                      uninspected=uninspected)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(module.verdict_skillspector(report, 0), 2)
+
+    def test_parse_limit_gap_respects_fail_on_incomplete(self):
+        module = importlib.import_module("_skillspector")
+        original = module.FAIL_ON_INCOMPLETE
+        module.FAIL_ON_INCOMPLETE = True
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                report = self._parse_limit_report(d, self.PARSE_LIMIT)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(module.verdict_skillspector(report, 0), 2)
+        finally:
+            module.FAIL_ON_INCOMPLETE = original
+
     def test_scan_env_carries_workflow_budget_and_boot_command(self):
         module = importlib.import_module("_skillspector")
         env = module.skillspector_env()

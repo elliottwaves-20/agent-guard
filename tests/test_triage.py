@@ -344,6 +344,47 @@ class ParserLimitTests(unittest.TestCase):
         self.assertEqual(result.verdict, t.DANGEROUS)
 
 
+def gap_report(path="ref/crawl.md", *issues, version=VERSION):
+    rep = report(*issues, version=version)
+    rep["analysis_completeness"] = {"ledger_exceptions": [
+        {"phase": "static", "reason_code": "static_parse_limit", "path": path,
+         "fatal": False, "analyzers": ["static_patterns_tool_misuse"]},
+        {"phase": "reference_resolution", "reason_code": "reference_missing",
+         "path": "SKILL.md", "fatal": False}]}
+    return rep
+
+
+class ParserGapTests(unittest.TestCase):
+    """static_parse_limit in the ledger without an AE1 finding (file not referenced)."""
+
+    def judge(self, guide=GUIDE, spans=((5, 5),), rep=None):
+        skill = Skill(self, {"SKILL.md": "# Acme\n", "ref/crawl.md": guide})
+        return skill.judge(rep or gap_report(), spans=lambda d, rels: {r: spans for r in rels})
+
+    def test_harmless_gap_is_cleared(self):
+        result = self.judge()
+        self.assertEqual(result.verdict, t.SAFE)
+        self.assertEqual(result.dispositions[0].check, "parser-limit-span")
+        self.assertTrue(result.dispositions[0].finding.raw.get("synthetic"))
+
+    def test_gap_without_located_spans_is_unclear(self):
+        self.assertEqual(self.judge(spans=None).verdict, t.UNCLEAR)
+        skill = Skill(self, {"SKILL.md": "# Acme\n", "ref/crawl.md": GUIDE})
+        self.assertEqual(skill.judge(gap_report()).verdict, t.UNCLEAR)
+
+    def test_risky_gap_stays_open(self):
+        self.assertEqual(self.judge(guide=GUIDE + "sudo acme fix\n", spans=((5, 6),)).verdict,
+                         t.UNCLEAR)
+
+    def test_gap_already_reported_as_ae1_is_not_doubled(self):
+        rep = gap_report("ref/crawl.md", coverage_issue("ref/crawl.md"))
+        self.assertEqual(len(self.judge(rep=rep).dispositions), 1)
+
+    def test_gap_outside_the_skill_stays_open(self):
+        result = self.judge(rep=gap_report("../elsewhere.md"))
+        self.assertEqual(result.verdict, t.UNCLEAR)
+
+
 def yara_issue(rule_name="info_stealer", file="SKILL.md", line=3):
     item = issue("YR1", file=file, line=line)
     item["pattern"] = f"YARA rule '{rule_name}': Information stealer patterns [malware]"

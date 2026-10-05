@@ -320,6 +320,33 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def coverage_gaps(report: dict, findings: list) -> list:
+    """A parser-limit gap in a file no AE1 finding names (for example a file the
+    skill does not reference) becomes an AE1 finding, so it is checked like one
+    and can never pass unseen."""
+    completeness = report.get("analysis_completeness") or {}
+    exceptions = completeness.get("ledger_exceptions")
+    if not isinstance(exceptions, list):
+        return []
+    known = {norm_path(f.coverage_target) for f in findings
+             if f.rule in COVERAGE_RULES and f.coverage_target}
+    out = []
+    for item in exceptions:
+        if not (isinstance(item, dict) and item.get("phase") == "static"
+                and item.get("reason_code") == PARSE_LIMIT and item.get("path")):
+            continue
+        path = str(item["path"])
+        if norm_path(path) in known:
+            continue
+        known.add(norm_path(path))
+        out.append(Finding.from_issue({
+            "id": "AE1", "severity": "HIGH", "synthetic": True,
+            "location": {"file": path, "start_line": None},
+            "evidence": {"target_path": path, "target_disposition": "partial",
+                         "reasons": [{"reason_code": PARSE_LIMIT}]}}))
+    return out
+
+
 def recheck_yara(findings: list, skill_dir: Path, yara, version: str) -> set:
     """ids of YARA findings that only an imprecise built-in pattern produced:
     the built-in rule matches the file, its corrected version does not."""
@@ -353,6 +380,7 @@ def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | Non
     version = str((report.get("metadata") or {}).get("skillspector_version") or "")
     entries = catalog.get("entry", []) if version == catalog.get("skillspector") else []
     findings = [Finding.from_issue(i) for i in report.get("issues") or []]
+    findings += coverage_gaps(report, findings)
     corrected = recheck_yara(findings, skill_dir, yara, version)
     exfil_files = set()
     for f in findings:

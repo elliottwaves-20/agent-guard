@@ -650,6 +650,37 @@ def run_skillspector(src: Path, runtime_hint: bool = False, *,
                                     reviewed_baseline=reviewed is not None)
 
 
+# The analyzers whose bounded parser _parse_spans_boot.py replays to find the lines.
+PARSE_SPAN_ANALYZERS = frozenset({"static_patterns_tool_misuse"})
+
+
+def parse_limit_only(completeness: dict) -> bool:
+    """Every file was read; the only gap besides unresolved references is a bounded
+    shell parser giving up on a passage (static_parse_limit). The triage locates
+    those lines with the same parser and checks them, so this can be judged."""
+    exceptions = completeness.get("ledger_exceptions")
+    if completeness.get("entirely_uninspected_files") or not isinstance(exceptions, list):
+        return False
+    analyzers = set()
+    for item in exceptions:
+        if not isinstance(item, dict) or item.get("fatal") is not False:
+            return False
+        if (item.get("phase") == "reference_resolution"
+                and item.get("reason_code") == "reference_missing"):
+            continue
+        names = item.get("analyzers")
+        if (item.get("phase") != "static" or item.get("reason_code") != "static_parse_limit"
+                or not item.get("path") or not isinstance(names, list) or not names
+                or not set(map(str, names)) <= PARSE_SPAN_ANALYZERS):
+            return False
+        analyzers.update(str(n) for n in names)
+    if not analyzers:
+        return False
+    allowed = {f"Analyzer {name} status: degraded." for name in analyzers}
+    return (set(completeness.get("limitations") or []) <= allowed
+            and not completeness.get("scope_exclusions"))
+
+
 def verdict_skillspector(report_path: Path, code: int, runtime_hint: bool = False, *,
                         reviewed_baseline: bool = False) -> int:
     """Turn a SkillSpector JSON report into a clear verdict. Fail closed."""
@@ -801,6 +832,11 @@ def verdict_skillspector(report_path: Path, code: int, runtime_hint: bool = Fals
             for item in gaps:
                 print(f"    - not fully inspected: {_console_text(str(item.get('path')))}: "
                       f"{_console_text(str(item.get('reason_code')))}")
+            if parse_limit_only(completeness) and not FAIL_ON_INCOMPLETE:
+                print("[BLOCK] partial inspection -- the scanner's shell parser gave up on "
+                      "passages of the files listed above. agent-guard checks exactly those "
+                      "lines; without that check, do not install.")
+                return 1
             print("[BLOCK] NO VERDICT -- incomplete inspection requires review; no clean verdict."
                   + (" Review the files listed above by hand." if gaps else ""))
             return 2
