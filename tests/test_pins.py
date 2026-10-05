@@ -22,9 +22,9 @@ class PinTests(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get("AGENT_GUARD_INTEGRATION") == "1",
-                     "set AGENT_GUARD_INTEGRATION=1 to verify the fork pin on GitHub")
-class ForkPinTests(unittest.TestCase):
-    """A fork pin is trusted only as 'upstream release + upstream merged fix'."""
+                     "set AGENT_GUARD_INTEGRATION=1 to verify the pin on GitHub")
+class UpstreamPinTests(unittest.TestCase):
+    """The pin is a commit that NVIDIA/SkillSpector main already contains."""
 
     def api(self, path: str):
         import urllib.request
@@ -34,19 +34,10 @@ class ForkPinTests(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r)
 
-    def test_fork_pin_is_the_release_plus_the_upstream_fix_only(self):
-        if "github.com/NVIDIA/" in _pins.SKILLSPECTOR_REPO:
-            self.skipTest("pin points to NVIDIA")
-        fork = _pins.SKILLSPECTOR_REPO.removeprefix("https://github.com/")
-        diff = self.api(f"repos/{fork}/compare/{_pins.FORK_BASE_SHA}...{_pins.SKILLSPECTOR_SHA}")
-        self.assertEqual(diff["merge_base_commit"]["sha"], _pins.FORK_BASE_SHA)
-        changed = {f["filename"]: f["sha"] for f in diff["files"]}
-        self.assertEqual(sorted(changed), sorted(_pins.FORK_FILES))
-        for name, blob in changed.items():
-            with self.subTest(name):
-                upstream = self.api(f"repos/NVIDIA/SkillSpector/contents/{name}"
-                                    f"?ref={_pins.FORK_UPSTREAM_MERGE}")
-                self.assertEqual(blob, upstream["sha"])
+    def test_pin_is_on_nvidia_main(self):
+        self.assertEqual(_pins.SKILLSPECTOR_REPO, "https://github.com/NVIDIA/SkillSpector")
+        diff = self.api(f"repos/NVIDIA/SkillSpector/compare/{_pins.SKILLSPECTOR_SHA}...main")
+        self.assertIn(diff["status"], ("ahead", "identical"))
 
 
 if __name__ == "__main__":

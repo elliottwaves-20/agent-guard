@@ -5,20 +5,12 @@ the budget adapter and the installed-scanner tests compare against it. Bump
 deliberately: the adapter patches SkillSpector internals and must be
 re-verified against every new release.
 
-Until SkillSpector 2.13.0 ships, the pin is v2.12.0 plus the merged upstream
-fix NVIDIA/SkillSpector#697 (cherry-picked unchanged, files identical to the
-merge 9ee7fbf), published on a branch of the agent-guard maintainer's fork.
-It stops a CLI flag such as `--remove` in documentation from being read as
-an obfuscated text-removal directive. Return to NVIDIA with the next release.
+Until SkillSpector 2.13.0 ships, the pin is a reviewed commit on NVIDIA's main
+branch (package version 2.12.0). It carries the merged fixes agent-guard relies
+on: concurrent TP4 batches (#731), the --remove flag reading (#697) and fewer
+false parser limits behind AE1 (#627, #634, #661, #686). tests/test_pins.py
+checks on GitHub that main contains it. Move to the release tag with 2.13.0.
 """
 SKILLSPECTOR_VERSION = "2.12.0"
-SKILLSPECTOR_REPO = "https://github.com/elliottwaves-20/SkillSpector"
-SKILLSPECTOR_SHA = "92bb52130513e9482f8e59fb580965ff6f9430cb"
-
-# What the fork pin must be, checked against GitHub by tests/test_pins.py:
-# exactly the files of the upstream merge, on top of the v2.12.0 release commit.
-# Drop this block when the pin returns to NVIDIA.
-FORK_BASE_SHA = "c7958a3268d9498644b22edb75d0f051bbc8cbfc"      # NVIDIA v2.12.0
-FORK_UPSTREAM_MERGE = "9ee7fbf36af68ec46465758e57b322ed0ca8a514"  # NVIDIA #697 merge
-FORK_FILES = ("src/skillspector/security_reconstruction.py",
-              "tests/nodes/analyzers/test_security_reconstruction.py")
+SKILLSPECTOR_REPO = "https://github.com/NVIDIA/SkillSpector"
+SKILLSPECTOR_SHA = "532f67c72f453b55ddff302c8e578e50336cf4f2"
