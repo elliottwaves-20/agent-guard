@@ -228,10 +228,11 @@ class PurposeMismatchTests(unittest.TestCase):
 
 
 def coverage_issue(target, reasons=("static_parse_limit",), disposition="partial",
-                   truncated=False):
+                   truncated=False, analyzers=("static_patterns_tool_misuse",)):
     item = issue("AE1", file="SKILL.md", line=3)
     item["evidence"] = {"target_path": target, "target_disposition": disposition,
-                        "reasons": [{"reason_code": r} for r in reasons],
+                        "reasons": [{"reason_code": r, "analyzers": list(analyzers)}
+                                    for r in reasons],
                         "reasons_truncated": truncated}
     return item
 
@@ -253,6 +254,11 @@ class ParserLimitTests(unittest.TestCase):
             return {rel: spans for rel in rels}
         return skill.judge(report(coverage_issue("ref/crawl.md", **kw), *extra), spans=locate,
                            verifier=verifier, approved=approved)
+
+    def test_parse_limit_of_another_analyzer_stays_open(self):
+        result = self.judge(analyzers=("static_yara",))
+        self.assertEqual(result.verdict, t.UNCLEAR)
+        self.assertEqual(self.asked, [])
 
     def test_harmless_passage_is_cleared(self):
         result = self.judge()
@@ -344,11 +350,12 @@ class ParserLimitTests(unittest.TestCase):
         self.assertEqual(result.verdict, t.DANGEROUS)
 
 
-def gap_report(path="ref/crawl.md", *issues, version=VERSION):
+def gap_report(path="ref/crawl.md", *issues, version=VERSION,
+               analyzers=("static_patterns_tool_misuse",)):
     rep = report(*issues, version=version)
     rep["analysis_completeness"] = {"ledger_exceptions": [
         {"phase": "static", "reason_code": "static_parse_limit", "path": path,
-         "fatal": False, "analyzers": ["static_patterns_tool_misuse"]},
+         "fatal": False, "analyzers": list(analyzers)},
         {"phase": "reference_resolution", "reason_code": "reference_missing",
          "path": "SKILL.md", "fatal": False}]}
     return rep
@@ -380,9 +387,62 @@ class ParserGapTests(unittest.TestCase):
         rep = gap_report("ref/crawl.md", coverage_issue("ref/crawl.md"))
         self.assertEqual(len(self.judge(rep=rep).dispositions), 1)
 
+    def test_gap_of_another_parser_stays_open(self):
+        # The locator replays only the tool-misuse shell parser: no verdict,
+        # as the wrapper gives for the same gap without a finding.
+        result = self.judge(rep=gap_report(analyzers=("static_yara",)))
+        self.assertEqual(result.verdict, t.NO_VERDICT)
+        self.assertEqual(self.judge(rep=gap_report(analyzers=())).verdict, t.NO_VERDICT)
+
     def test_gap_outside_the_skill_stays_open(self):
         result = self.judge(rep=gap_report("../elsewhere.md"))
         self.assertEqual(result.verdict, t.UNCLEAR)
+
+
+class InspectionGapTests(unittest.TestCase):
+    """The wrapper blocks with exit 1 on a HIGH finding before it looks at
+    completeness; the triage must not turn such a partial scan into a verdict."""
+
+    def judge(self, completeness, *extra, raw=1):
+        skill = Skill(self, {"SKILL.md": "# Acme\nexport ACME_API_KEY=...\n"})
+        rep = report(issue("PE3", line=2, snippet="export ACME_API_KEY=..."), *extra)
+        rep["analysis_completeness"] = completeness
+        return skill.judge(rep, raw=raw)
+
+    def test_clearable_findings_with_unread_file_give_no_verdict(self):
+        result = self.judge({"entirely_uninspected_files": 1, "ledger_exceptions": []})
+        self.assertEqual(result.verdict, t.NO_VERDICT)
+
+    def test_other_gap_reasons_give_no_verdict(self):
+        cases = [
+            {"ledger_exceptions": [{"phase": "static", "reason_code": "analyzer_error",
+                                    "path": "x.py", "fatal": False}]},
+            {"ledger_exceptions": [{"phase": "reference_resolution",
+                                    "reason_code": "reference_missing", "path": "SKILL.md",
+                                    "fatal": True}]},
+            {"ledger_exceptions": [], "limitations": ["Analyzer static_yara status: degraded."]},
+            {"ledger_exceptions": [], "scope_exclusions": ["big.bin"]},
+        ]
+        for completeness in cases:
+            with self.subTest(completeness=completeness):
+                self.assertEqual(self.judge(completeness).verdict, t.NO_VERDICT)
+
+    def test_known_gaps_are_judged(self):
+        completeness = {"ledger_exceptions": [
+            {"phase": "reference_resolution", "reason_code": "reference_missing",
+             "path": "SKILL.md", "fatal": False}]}
+        self.assertEqual(self.judge(completeness).verdict, t.SAFE)
+
+    def test_dangerous_stays_dangerous(self):
+        result = self.judge({"entirely_uninspected_files": 1}, issue("YR1"))
+        self.assertEqual(result.verdict, t.DANGEROUS)
+
+    def test_clean_wrapper_exit_is_not_second_guessed(self):
+        # Exit 0 means the wrapper already accepted the completeness.
+        completeness = {"ledger_exceptions": [{"phase": "reference_resolution",
+                                               "reason_code": "reference_unresolved",
+                                               "path": "SKILL.md", "fatal": False}]}
+        self.assertEqual(self.judge(completeness, raw=0).verdict, t.SAFE)
 
 
 def yara_issue(rule_name="info_stealer", file="SKILL.md", line=3):

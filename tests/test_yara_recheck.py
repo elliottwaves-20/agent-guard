@@ -4,6 +4,7 @@ Unit tests use a fake runner. The integration test runs the boot script in
 SkillSpector's environment against stealer paths that are assembled at run time,
 so this file never carries a signature the self-scan would match.
 """
+import base64
 import importlib
 import os
 import sys
@@ -34,6 +35,14 @@ HARMLESS = [s.format(c=c) for s, c in (
     ("{c} set by the Edge middleware are httpOnly.", "Cookies"),
     ("Forward {c} to Chrome headless through the Playwright context.", "cookies"),
 )]
+STEALER_CODE = [
+    "Y29va2llc19kYiA9IHNxbGl0ZTMuY29ubmVjdChjaHJvbWVfcHJvZmlsZSArICIvQ29va2llcyIp",
+    "c2h1dGlsLmNvcHkocHJvZmlsZSAvICJDb29raWVzIiwgY2hyb21lX291dCk=",
+    "ZGIgPSBvcy5wYXRoLmpvaW4oQ0hST01FX0RJUiwgIkRlZmF1bHQiLCAiQ29va2llcyIp",
+    "c3RlYWwoIkNvb2tpZXMiLCAiZmlyZWZveCIp",
+    "Z3JhYl9jb29raWVzKGJyb3dzZXI9ImVkZ2UiKQ==",
+    "Y29va2llcyA9IHJlYWQob3BlcmEucHJvZmlsZSk=",
+]
 # The built-in rule does not match this one at all: nothing to correct.
 UNMATCHED = "Open Chrome DevTools > Application > Cookies to inspect the session."
 
@@ -133,6 +142,14 @@ class BootTests(unittest.TestCase):
             with self.subTest(parts=parts):
                 text = f"{HARMLESS[1]}\np = '{stealer(sep, parts)}'\n"
                 self.assertIs(self.run_on(text), False)
+
+    def test_stealer_code_naming_the_store_first_stays(self):
+        # Code that names the store before the browser, which the built-in
+        # string also matches (base64: the source must not match it itself).
+        for encoded in STEALER_CODE:
+            code = base64.b64decode(encoded).decode()
+            with self.subTest(code=code):
+                self.assertIs(self.run_on(f"{HARMLESS[1]}\n{code}\n"), False)
 
     def test_prose_and_stealer_in_one_file_stays(self):
         sep, parts = STEALER_PATHS[0]

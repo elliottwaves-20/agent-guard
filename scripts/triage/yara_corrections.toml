@@ -18,5 +18,7 @@ upstream = "https://github.com/NVIDIA/SkillSpector/issues/751"
 why = """The string $browser_cookies spans a whole line: the word for the browser
 store, then anything, then a browser name. One sentence of a skill description
 that names that word and, hundreds of characters later, Edge Functions matches
-(supabase SKILL.md). The correction requires a browser profile path that ends
-in the browser's store file."""
+(supabase SKILL.md). The correction keeps both orders but needs code around
+them: a browser profile path that ends in the store file, or the store word
+followed on the line by a browser name that is part of an identifier, path or
+string (chrome_profile, "edge", opera.x)."""

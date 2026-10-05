@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
+from _parse_spans import PARSE_SPAN_ANALYZERS
+
 CATALOG = Path(__file__).resolve().parent / "triage" / "known_noise.toml"
 
 SAFE, DANGEROUS, UNCLEAR, NO_VERDICT = "safe", "dangerous", "unclear", "no_verdict"
@@ -138,7 +140,7 @@ class Finding:
                 and ev.get("reasons_truncated") is not True
                 and isinstance(reasons, list) and bool(reasons)
                 and all(isinstance(r, dict) and r.get("reason_code") == PARSE_LIMIT
-                        for r in reasons))
+                        and replayable(r.get("analyzers")) for r in reasons))
 
     @classmethod
     def from_issue(cls, issue: dict) -> "Finding":
@@ -171,6 +173,12 @@ class Result:
 
     def by_status(self, status: str) -> list:
         return [d for d in self.dispositions if d.status == status]
+
+
+def replayable(analyzers) -> bool:
+    """A parser limit the span locator can replay: named analyzers, all known to it."""
+    return (isinstance(analyzers, list) and bool(analyzers)
+            and set(map(str, analyzers)) <= PARSE_SPAN_ANALYZERS)
 
 
 # -- catalog ------------------------------------------------------------------
@@ -320,6 +328,32 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def unsettled_gap(report: dict) -> bool:
+    """A gap in the scan the triage cannot settle: a file not read at all, a fatal
+    or unknown exception, a limitation or scope exclusion. Only unresolved
+    references and parser limits the span locator can replay are judged."""
+    completeness = report.get("analysis_completeness") or {}
+    if completeness.get("entirely_uninspected_files") or completeness.get("scope_exclusions"):
+        return True
+    exceptions = completeness.get("ledger_exceptions") or []
+    if not isinstance(exceptions, list):
+        return True
+    analyzers = set()
+    for item in exceptions:
+        if not isinstance(item, dict) or item.get("fatal") is not False:
+            return True
+        if (item.get("phase") == "reference_resolution"
+                and item.get("reason_code") == "reference_missing"):
+            continue
+        if (item.get("phase") == "static" and item.get("reason_code") == PARSE_LIMIT
+                and replayable(item.get("analyzers"))):
+            analyzers.update(map(str, item["analyzers"]))
+            continue
+        return True
+    allowed = {f"Analyzer {name} status: degraded." for name in analyzers}
+    return not set(completeness.get("limitations") or []) <= allowed
+
+
 def coverage_gaps(report: dict, findings: list) -> list:
     """A parser-limit gap in a file no AE1 finding names (for example a file the
     skill does not reference) becomes an AE1 finding, so it is checked like one
@@ -343,7 +377,8 @@ def coverage_gaps(report: dict, findings: list) -> list:
             "id": "AE1", "severity": "HIGH", "synthetic": True,
             "location": {"file": path, "start_line": None},
             "evidence": {"target_path": path, "target_disposition": "partial",
-                         "reasons": [{"reason_code": PARSE_LIMIT}]}}))
+                         "reasons": [{"reason_code": PARSE_LIMIT,
+                                      "analyzers": item.get("analyzers")}]}}))
     return out
 
 
@@ -431,6 +466,9 @@ def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | Non
 
     if any(blocks(d) for d in out):
         verdict = DANGEROUS
+    elif raw_code == 1 and unsettled_gap(report):
+        # The wrapper blocked on a finding before judging completeness.
+        verdict = NO_VERDICT
     elif any(d.status == OPEN for d in out):
         verdict = UNCLEAR
     else:

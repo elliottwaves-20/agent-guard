@@ -89,6 +89,7 @@ load_agent_guard_env()
 # every wrapper before anything is scanned -- ignoring it silently would run
 # the scan with settings the user did not choose.
 import _llm_profile
+from _parse_spans import PARSE_SPAN_ANALYZERS
 import _user_config
 try:
     USER_CONFIG = _user_config.load_config()
@@ -648,10 +649,6 @@ def run_skillspector(src: Path, runtime_hint: bool = False, *,
                 return 2
         return verdict_skillspector(report, r.returncode, runtime_hint,
                                     reviewed_baseline=reviewed is not None)
-
-
-# The analyzers whose bounded parser _parse_spans_boot.py replays to find the lines.
-PARSE_SPAN_ANALYZERS = frozenset({"static_patterns_tool_misuse"})
 
 
 def parse_limit_only(completeness: dict) -> bool:

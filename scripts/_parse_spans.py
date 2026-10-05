@@ -18,6 +18,8 @@ import subprocess
 from pathlib import Path
 
 BOOT = Path(__file__).resolve().parent / "_parse_spans_boot.py"
+# The analyzers whose bounded shell parser the boot script replays.
+PARSE_SPAN_ANALYZERS = frozenset({"static_patterns_tool_misuse"})
 MAX_SPANS = 8
 SECONDS_PER_FILE = 60
 
