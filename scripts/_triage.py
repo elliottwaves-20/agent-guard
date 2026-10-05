@@ -330,10 +330,17 @@ def sha256_file(path: Path) -> str:
 
 def unsettled_gap(report: dict) -> bool:
     """A gap in the scan the triage cannot settle: a file not read at all, a fatal
-    or unknown exception, a limitation or scope exclusion. Only unresolved
-    references and parser limits the span locator can replay are judged."""
+    or unknown exception, a limitation, a scope exclusion other than binary
+    content. With every file read, references that match no or several bundled
+    files, images the text analyzers skip, and parser limits the span locator
+    can replay are judged."""
     completeness = report.get("analysis_completeness") or {}
-    if completeness.get("entirely_uninspected_files") or completeness.get("scope_exclusions"):
+    if completeness.get("entirely_uninspected_files"):
+        return True
+    exclusions = completeness.get("scope_exclusions") or []
+    if not isinstance(exclusions, list) or not all(
+            isinstance(e, dict) and e.get("reason_code") == "binary_content"
+            and e.get("fatal") is False for e in exclusions):
         return True
     exceptions = completeness.get("ledger_exceptions") or []
     if not isinstance(exceptions, list):
@@ -343,7 +350,7 @@ def unsettled_gap(report: dict) -> bool:
         if not isinstance(item, dict) or item.get("fatal") is not False:
             return True
         if (item.get("phase") == "reference_resolution"
-                and item.get("reason_code") == "reference_missing"):
+                and item.get("reason_code") in ("reference_missing", "reference_unresolved")):
             continue
         if (item.get("phase") == "static" and item.get("reason_code") == PARSE_LIMIT
                 and replayable(item.get("analyzers"))):

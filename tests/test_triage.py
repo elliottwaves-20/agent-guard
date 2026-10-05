@@ -433,6 +433,28 @@ class InspectionGapTests(unittest.TestCase):
              "path": "SKILL.md", "fatal": False}]}
         self.assertEqual(self.judge(completeness).verdict, t.SAFE)
 
+    def test_settled_gaps_with_every_file_read_are_judged(self):
+        # A reference matching several bundled files, and images the text
+        # analyzers skip: every file was read, so nothing is unseen.
+        completeness = {
+            "entirely_uninspected_files": 0,
+            "ledger_exceptions": [{"phase": "reference_resolution",
+                                   "reason_code": "reference_unresolved",
+                                   "path": "SKILL.md", "fatal": False}],
+            "scope_exclusions": [{"outcome": "out_of_scope", "phase": "static",
+                                  "reason_code": "binary_content", "path": "docs/plot.png",
+                                  "fatal": False}]}
+        self.assertEqual(self.judge(completeness).verdict, t.SAFE)
+
+    def test_other_scope_exclusions_give_no_verdict(self):
+        for exclusion in ({"outcome": "out_of_scope", "reason_code": "size_limit",
+                           "path": "big.txt", "fatal": False},
+                          {"outcome": "out_of_scope", "reason_code": "binary_content",
+                           "path": "x.png", "fatal": True}):
+            with self.subTest(exclusion=exclusion):
+                completeness = {"ledger_exceptions": [], "scope_exclusions": [exclusion]}
+                self.assertEqual(self.judge(completeness).verdict, t.NO_VERDICT)
+
     def test_dangerous_stays_dangerous(self):
         result = self.judge({"entirely_uninspected_files": 1}, issue("YR1"))
         self.assertEqual(result.verdict, t.DANGEROUS)
