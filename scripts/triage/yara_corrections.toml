@@ -14,7 +14,7 @@ corrected = "yara_corrections.yar.b64"
 name = "info_stealer"
 namespace = "malware"
 original_sha256 = "e56bb105795ce34b7c4776e73e84513843947a0170b92772cdb88670e14613f4"
-upstream = ""
+upstream = "https://github.com/NVIDIA/SkillSpector/issues/751"
 why = """The string $browser_cookies spans a whole line: the word for the browser
 store, then anything, then a browser name. One sentence of a skill description
 that names that word and, hundreds of characters later, Edge Functions matches
