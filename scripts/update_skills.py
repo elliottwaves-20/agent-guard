@@ -52,6 +52,7 @@ import _parse_spans
 import _staging
 import _triage
 import _verifier
+import _yara_recheck
 from _skillspector import USER_CONFIG, run_skillspector
 from _staging import StageError, now
 from _user_config import ConfigError
@@ -105,6 +106,8 @@ class Run:
         self._verifier_loaded = False
         self._spans = None
         self._spans_loaded = False
+        self._yara = None
+        self._yara_loaded = False
 
     @property
     def verifier(self):
@@ -119,6 +122,13 @@ class Run:
         if not self._spans_loaded:
             self._spans, self._spans_loaded = _parse_spans.from_skillspector(), True
         return self._spans
+
+    @property
+    def yara(self):
+        """Rechecker for imprecise built-in YARA matches, built once."""
+        if not self._yara_loaded:
+            self._yara, self._yara_loaded = _yara_recheck.from_skillspector(), True
+        return self._yara
 
     def report(self, name, status, **extra):
         self.results[name] = {"status": status, **extra}
@@ -210,7 +220,7 @@ class Run:
         else:
             result = _triage.triage(data, staged.path, raw, origin=_triage.Origin(source, ref),
                                     approved=_dossier.approved(entry), verifier=self.verifier,
-                                    spans=self.spans)
+                                    spans=self.spans, yara=self.yara)
         summary = _dossier.summary(result)
         if result.verdict != _triage.NO_VERDICT:
             print(triage_line(summary))

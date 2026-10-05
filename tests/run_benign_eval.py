@@ -58,10 +58,12 @@ def main() -> None:
     import _skillspector as ss
     import _triage
     import _verifier
+    import _yara_recheck
     ss.need_skillspector()
     if not ss.LLM_READY:
         sys.exit(f"LLM not ready: {ss.LLM_REASON}")
     verifier, spans = _verifier.from_profile(), _parse_spans.from_skillspector()
+    yara = _yara_recheck.from_skillspector()
     if verifier is None:
         sys.exit("no agent-CLI verifier profile")
     samples = [s for s in _eval.load() if not args.only or s.id in args.only]
@@ -93,7 +95,7 @@ def main() -> None:
                                  if "NO VERDICT" in l or "LIMIT" in l][:6])
             else:
                 result = _triage.triage(data, path, raw, origin=_triage.Origin(s.source, s.ref),
-                                        verifier=verifier, spans=spans)
+                                        verifier=verifier, spans=spans, yara=yara)
                 row.update(verdict=result.verdict,
                            open=[{"rule": d.finding.rule, "status": d.status,
                                   "file": d.finding.evidence_file or d.finding.file,

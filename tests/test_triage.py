@@ -344,5 +344,78 @@ class ParserLimitTests(unittest.TestCase):
         self.assertEqual(result.verdict, t.DANGEROUS)
 
 
+def yara_issue(rule_name="info_stealer", file="SKILL.md", line=3):
+    item = issue("YR1", file=file, line=line)
+    item["pattern"] = f"YARA rule '{rule_name}': Information stealer patterns [malware]"
+    return item
+
+
+class FakeRecheck:
+    skillspector = VERSION
+
+    def __init__(self, answer):
+        self.answer, self.asked = answer, []
+
+    def __call__(self, skill_dir, checks):
+        self.asked.append(sorted(checks))
+        return {c: self.answer for c in checks}
+
+
+class YaraCorrectionTests(unittest.TestCase):
+    """YARA stays hard evidence unless the corrected rule no longer matches."""
+
+    def judge(self, answer, *extra, recheck=None, **kw):
+        # Split so this file does not match the imprecise rule it tests.
+        skill = Skill(self, {"SKILL.md": "---\ndescription: cook" "ies and Edge\n---\n"})
+        self.recheck = recheck or FakeRecheck(answer)
+        return skill.judge(report(yara_issue(), *extra, **kw), yara=self.recheck)
+
+    def test_imprecise_match_is_cleared(self):
+        result = self.judge(True)
+        self.assertEqual(result.verdict, t.SAFE)
+        self.assertEqual(result.dispositions[0].check, "yara-correction")
+        self.assertEqual(self.recheck.asked, [[("info_stealer", "SKILL.md")]])
+
+    def test_real_stealer_path_stays_hard(self):
+        result = self.judge(False)
+        self.assertEqual(result.verdict, t.DANGEROUS)
+        self.assertEqual(result.dispositions[0].status, t.HARD)
+
+    def test_unknown_answer_stays_hard(self):
+        self.assertEqual(self.judge(None).dispositions[0].status, t.HARD)
+
+    def test_other_scanner_version_is_not_rechecked(self):
+        result = self.judge(True, version="2.13.0")
+        self.assertEqual(result.dispositions[0].status, t.HARD)
+        self.assertEqual(self.recheck.asked, [])
+
+    def test_recheck_failure_stays_hard(self):
+        class Broken(FakeRecheck):
+            def __call__(self, skill_dir, checks):
+                raise RuntimeError("boom")
+        result = self.judge(None, recheck=Broken(None))
+        self.assertEqual(result.dispositions[0].status, t.HARD)
+
+    def test_without_rechecker_stays_hard(self):
+        skill = Skill(self, {"SKILL.md": "x\n"})
+        self.assertEqual(skill.judge(report(yara_issue())).verdict, t.DANGEROUS)
+
+    def test_cleared_yara_does_not_mark_file_as_exfil(self):
+        # A TP4 in the same file may still be cleared by its catalog check.
+        tp4 = issue("TP4", file="SKILL.md", line=2, evidence=("SKILL.md", 2, 2))
+        self.assertEqual(self.judge(True, tp4).verdict, t.SAFE)
+
+    def test_hard_yara_still_blocks_catalog_checks_in_same_file(self):
+        tp4 = issue("TP4", file="SKILL.md", line=2, evidence=("SKILL.md", 2, 2))
+        result = self.judge(False, tp4)
+        tp4_disp = [d for d in result.dispositions if d.finding.rule == "TP4"][0]
+        self.assertEqual(tp4_disp.status, t.OPEN)
+
+    def test_yara_rule_name_is_parsed(self):
+        f = t.Finding.from_issue(yara_issue("reverse_shell"))
+        self.assertEqual(f.yara_rule, "reverse_shell")
+        self.assertEqual(t.Finding.from_issue(issue("YR1")).yara_rule, "")
+
+
 if __name__ == "__main__":
     unittest.main()
