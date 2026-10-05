@@ -14,8 +14,13 @@ Stages, cheapest first:
 Verdict: dangerous if any hard evidence, any finding the verifier confirmed, or
 any open finding the scanner stands behind; unclear if the only open findings
 are ones SkillSpector's own LLM meta-review did not confirm (tag
-`llm-unconfirmed`); safe otherwise. A static-only scan has no meta-review, so
-every open finding there counts as dangerous.
+`llm-unconfirmed`) or coverage gaps (COVERAGE_RULES); safe otherwise. A
+static-only scan has no meta-review, so every other open finding there counts
+as dangerous.
+
+A coverage gap says that part of a file was not settled, not that anything in
+it is harmful. It never makes a skill dangerous on its own, and never safe
+either: unclear goes to quarantine like dangerous does.
 """
 from __future__ import annotations
 
@@ -39,6 +44,10 @@ HARD_RULES = frozenset({"YR1", "YR2", "YR3", "YR4", "AST8", "SC3", "TT3", "BH2"}
 # a file blocks every catalog check for the other findings in that file.
 EXFIL_RULES = frozenset({"E1", "E2", "E3", "E4", "E5", "P3", "TT1", "TT2", "TT3", "TT4", "BH2"})
 BLOCKING = frozenset({"HIGH", "CRITICAL"})
+# AE1, a referenced artifact that was not completely inspected: a gap in
+# coverage, not evidence of harm (SkillSpector's own documentation agrees).
+COVERAGE_RULES = frozenset({"AE1"})
+PARSE_LIMIT = "static_parse_limit"
 
 CREDENTIAL_STORE = re.compile(
     r"\.ssh\b|\bid_(?:rsa|dsa|ecdsa|ed25519)\b|\.aws/|\.azure/|\.config/gcloud|"
@@ -92,6 +101,24 @@ class Finding:
     evidence_file: str | None = None
     evidence_lines: tuple = ()
     raw: dict = field(default_factory=dict, repr=False)
+    # AE1 only: the lines on which the shell parser gave up in the target file;
+    # None until located (or if they could not be).
+    parse_spans: tuple | None = None
+
+    @property
+    def coverage_target(self) -> str:
+        """AE1: the referenced file that was not completely inspected."""
+        return str((self.raw.get("evidence") or {}).get("target_path") or "")
+
+    def only_parse_limit(self) -> bool:
+        """AE1 whose every reason is the shell parser giving up: the file was read."""
+        ev = self.raw.get("evidence") or {}
+        reasons = ev.get("reasons")
+        return (self.rule in COVERAGE_RULES and ev.get("target_disposition") == "partial"
+                and ev.get("reasons_truncated") is not True
+                and isinstance(reasons, list) and bool(reasons)
+                and all(isinstance(r, dict) and r.get("reason_code") == PARSE_LIMIT
+                        for r in reasons))
 
     @classmethod
     def from_issue(cls, issue: dict) -> "Finding":
@@ -232,9 +259,32 @@ def check_no_risk_signal(f, skill_dir, origin, exfil_files):
     return True, "differs from the declared purpose but carries no risk signal"
 
 
+def check_parse_limit_span(f, skill_dir, origin, exfil_files):
+    if not f.only_parse_limit():
+        return False, "the file was not completely read"
+    target = f.coverage_target
+    lines = file_text(skill_dir, target).splitlines()
+    if not lines:
+        return False, "the referenced file is not part of the skill"
+    if target in exfil_files:
+        return False, "the file also shows data leaving the machine"
+    if f.parse_spans is None:
+        return False, "the lines the scanner could not settle were not located"
+    if not f.parse_spans:
+        return False, "the pinned scanner does not reproduce the gap"
+    text = "\n".join("\n".join(lines[start - 1:end]) for start, end in f.parse_spans)
+    if not all(vendor_url(u, origin) for u in URL.findall(text)):
+        return False, "a URL in the unsettled lines does not belong to the publisher"
+    if SUDO.search(text) or CREDENTIAL_STORE.search(text) or RISK_SIGNAL.search(text):
+        return False, "the unsettled lines carry a risk signal"
+    return True, (f"the scanner's shell parser stumbled over {len(f.parse_spans)} "
+                  f"passage(s) in {target}; they carry no risk signal")
+
+
 CHECKS = {"vendor_installer": check_vendor_installer,
           "service_key_env": check_service_key_env,
-          "no_risk_signal": check_no_risk_signal}
+          "no_risk_signal": check_no_risk_signal,
+          "parse_limit_span": check_parse_limit_span}
 
 
 # -- triage -------------------------------------------------------------------------
@@ -245,10 +295,12 @@ def sha256_file(path: Path) -> str:
 
 def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | None = None,
            catalog: dict | None = None, approved: frozenset = frozenset(),
-           verifier=None) -> Result:
+           verifier=None, spans=None) -> Result:
     """Judge a SkillSpector report. `raw_code` is verdict_skillspector's exit code;
     `approved` holds SHA-256 hashes of files a person already approved;
-    `verifier(open_dispositions, skill_dir) -> answers` is stage d (optional)."""
+    `verifier(open_dispositions, skill_dir) -> answers` is stage d (optional);
+    `spans(skill_dir, [rel, ...]) -> {rel: [(start, end), ...] | None}` locates
+    the lines behind parser-limit AE1 findings (_parse_spans.py, optional)."""
     if raw_code not in (0, 1):
         return Result(NO_VERDICT, [])
     catalog = catalog if catalog is not None else load_catalog()
@@ -259,6 +311,7 @@ def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | Non
     for f in findings:
         if f.rule in EXFIL_RULES or f.rule in HARD_RULES:
             exfil_files.update(p for p in (f.file, f.evidence_file) if p)
+    locate_spans(findings, skill_dir, spans)
 
     out = []
     for f in findings:
@@ -291,12 +344,39 @@ def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | Non
             elif answer.reason:
                 d.reason = f"{d.reason}; verifier unsure: {answer.reason}"
 
-    if any(d.status in (HARD, CONFIRMED) for d in out):
-        verdict = DANGEROUS
-    elif any(d.status == OPEN and not d.finding.unconfirmed for d in out):
+    if any(blocks(d) for d in out):
         verdict = DANGEROUS
     elif any(d.status == OPEN for d in out):
         verdict = UNCLEAR
     else:
         verdict = SAFE
     return Result(verdict, out)
+
+
+def blocks(d: Disposition) -> bool:
+    """Whether this one disposition makes the skill dangerous."""
+    if d.status in (HARD, CONFIRMED):
+        return True
+    return (d.status == OPEN and not d.finding.unconfirmed
+            and d.finding.rule not in COVERAGE_RULES)
+
+
+def locate_spans(findings: list, skill_dir: Path, spans) -> None:
+    """Attach the unsettled lines to every parser-limit AE1 finding. With lines
+    found, the finding's evidence becomes those lines of the target file, so
+    an approval, the verifier and its cache all look at what was not settled."""
+    wanted = [f for f in findings if f.only_parse_limit() and f.coverage_target]
+    if spans is None or not wanted:
+        return
+    try:
+        found = spans(Path(skill_dir), [f.coverage_target for f in wanted])
+    except Exception:  # a failed locator leaves the findings open, nothing more
+        return
+    for f in wanted:
+        located = found.get(f.coverage_target) if isinstance(found, dict) else None
+        if located is None:
+            continue
+        f.parse_spans = tuple(located)
+        if located:
+            f.evidence_file = f.coverage_target
+            f.evidence_lines = (min(s for s, _ in located), max(e for _, e in located))

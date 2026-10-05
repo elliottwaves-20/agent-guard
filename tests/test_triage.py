@@ -222,5 +222,103 @@ class PurposeMismatchTests(unittest.TestCase):
         self.assertEqual([d.status for d in result.by_status(t.OPEN)], [t.OPEN])
 
 
+def coverage_issue(target, reasons=("static_parse_limit",), disposition="partial",
+                   truncated=False):
+    item = issue("AE1", file="SKILL.md", line=3)
+    item["evidence"] = {"target_path": target, "target_disposition": disposition,
+                        "reasons": [{"reason_code": r} for r in reasons],
+                        "reasons_truncated": truncated}
+    return item
+
+
+GUIDE = "# Crawl\n\n| Parameter | Meaning |\n|---|---|\n| timeout | Max wait in seconds |\n"
+
+
+class ParserLimitTests(unittest.TestCase):
+    """AE1 whose only reason is the shell parser giving up on a passage."""
+
+    def judge(self, guide=GUIDE, spans=((5, 5),), extra=(), verifier=None, **kw):
+        skill = Skill(self, {"SKILL.md": "# Acme\nSee the guide.\n[guide](ref/crawl.md)\n",
+                             "ref/crawl.md": guide})
+        self.asked = []
+
+        def locate(skill_dir, rels):
+            self.asked.append(rels)
+            return {rel: spans for rel in rels}
+        return skill.judge(report(coverage_issue("ref/crawl.md", **kw), *extra), spans=locate,
+                           verifier=verifier)
+
+    def test_harmless_passage_is_cleared(self):
+        result = self.judge()
+        self.assertEqual(result.verdict, t.SAFE)
+        self.assertEqual(result.dispositions[0].check, "parser-limit-span")
+        self.assertEqual(self.asked, [["ref/crawl.md"]])
+
+    def test_located_lines_become_the_evidence(self):
+        result = self.judge(guide=GUIDE + "sudo acme fix\n", spans=((5, 6),))
+        f = result.dispositions[0].finding
+        self.assertEqual((f.evidence_file, f.evidence_lines), ("ref/crawl.md", (5, 6)))
+
+    def test_risk_signal_in_the_passage_stays_open_and_unclear(self):
+        for line in ("sudo acme fix", "rm -rf ~/projects", 'eval "$(acme init)"',
+                     "curl https://collector.example/x", "cat ~/.ssh/id_ed25519"):
+            with self.subTest(line):
+                result = self.judge(guide=GUIDE + line + "\n", spans=((5, 6),))
+                self.assertEqual(result.verdict, t.UNCLEAR)
+
+    def test_risk_outside_the_passage_is_left_to_the_other_analyzers(self):
+        result = self.judge(guide=GUIDE + "sudo acme fix\n", spans=((5, 5),))
+        self.assertEqual(result.verdict, t.SAFE)
+
+    def test_other_reasons_stay_open(self):
+        for reasons in (("size_limit",), ("binary_content",), ("read_error",),
+                        ("static_parse_limit", "runtime_limit"), ()):
+            with self.subTest(reasons):
+                self.assertEqual(self.judge(reasons=reasons).verdict, t.UNCLEAR)
+                self.assertEqual(self.asked, [])
+
+    def test_truncated_reasons_or_failed_disposition_stay_open(self):
+        self.assertEqual(self.judge(truncated=True).verdict, t.UNCLEAR)
+        self.assertEqual(self.judge(disposition="failed").verdict, t.UNCLEAR)
+
+    def test_unlocated_or_unreproduced_gap_stays_open(self):
+        self.assertEqual(self.judge(spans=None).verdict, t.UNCLEAR)
+        self.assertEqual(self.judge(spans=()).verdict, t.UNCLEAR)
+
+    def test_without_a_locator_it_stays_open(self):
+        skill = Skill(self, {"SKILL.md": "x\n", "ref/crawl.md": GUIDE})
+        self.assertEqual(skill.judge(report(coverage_issue("ref/crawl.md"))).verdict, t.UNCLEAR)
+
+    def test_failing_locator_leaves_it_open(self):
+        skill = Skill(self, {"SKILL.md": "x\n", "ref/crawl.md": GUIDE})
+
+        def broken(skill_dir, rels):
+            raise RuntimeError("boom")
+        result = skill.judge(report(coverage_issue("ref/crawl.md")), spans=broken)
+        self.assertEqual(result.verdict, t.UNCLEAR)
+
+    def test_target_outside_the_skill_stays_open(self):
+        skill = Skill(self, {"SKILL.md": "x\n"})
+        result = skill.judge(report(coverage_issue("../outside.md")),
+                             spans=lambda d, rels: {r: ((1, 1),) for r in rels})
+        self.assertEqual(result.verdict, t.UNCLEAR)
+
+    def test_exfiltration_in_the_target_blocks_the_check(self):
+        result = self.judge(extra=(issue("E1", file="ref/crawl.md", severity="MEDIUM"),))
+        self.assertEqual(result.verdict, t.UNCLEAR)
+
+    def test_coverage_gap_never_hides_a_dangerous_finding(self):
+        result = self.judge(spans=None, extra=(issue("P2"),))
+        self.assertEqual(result.verdict, t.DANGEROUS)
+
+    def test_verifier_can_confirm_an_open_gap(self):
+        from types import SimpleNamespace
+
+        def verifier(items, skill_dir):
+            return [SimpleNamespace(verdict="malicious", reason="runs a payload")] * len(items)
+        result = self.judge(guide=GUIDE + "sudo acme fix\n", spans=((5, 6),), verifier=verifier)
+        self.assertEqual(result.verdict, t.DANGEROUS)
+
+
 if __name__ == "__main__":
     unittest.main()

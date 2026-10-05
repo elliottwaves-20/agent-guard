@@ -48,6 +48,7 @@ from pathlib import Path
 
 import _distribution
 import _dossier
+import _parse_spans
 import _staging
 import _triage
 import _verifier
@@ -102,6 +103,8 @@ class Run:
         self.changed = []
         self._verifier = None
         self._verifier_loaded = False
+        self._spans = None
+        self._spans_loaded = False
 
     @property
     def verifier(self):
@@ -109,6 +112,13 @@ class Run:
         if not self._verifier_loaded:
             self._verifier, self._verifier_loaded = _verifier.from_profile(), True
         return self._verifier
+
+    @property
+    def spans(self):
+        """Locator for the lines behind parser-limit AE1 findings, built once."""
+        if not self._spans_loaded:
+            self._spans, self._spans_loaded = _parse_spans.from_skillspector(), True
+        return self._spans
 
     def report(self, name, status, **extra):
         self.results[name] = {"status": status, **extra}
@@ -199,7 +209,8 @@ class Run:
             result = _triage.Result(_triage.NO_VERDICT, [])
         else:
             result = _triage.triage(data, staged.path, raw, origin=_triage.Origin(source, ref),
-                                    approved=_dossier.approved(entry), verifier=self.verifier)
+                                    approved=_dossier.approved(entry), verifier=self.verifier,
+                                    spans=self.spans)
         summary = _dossier.summary(result)
         if result.verdict != _triage.NO_VERDICT:
             print(triage_line(summary))

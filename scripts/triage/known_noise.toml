@@ -35,3 +35,17 @@ and flags parts that do less (install the CLI, create a client, read a file).
 Cleared only when the snippet carries no risk signal: every URL belongs to the
 publisher, no sudo, credential store, deletion, persistence or dynamic
 execution, and the file has no exfiltration or hard-evidence finding."""
+
+[[entry]]
+id = "parser-limit-span"
+rules = ["AE1"]
+check = "parse_limit_span"
+why = """A referenced file counts as "not completely inspected" because one
+analyzer's bounded shell parser gave up on a passage of ordinary text (a table
+cell named like a command, an apostrophe in a comment, a template string). The
+file was read; its other analyzers ran. Cleared only when that is the sole
+reason, the file is part of the skill and has no exfiltration or hard-evidence
+finding, every passage the parser gave up on was located with the same parser
+(scripts/_parse_spans_boot.py), and those passages carry no risk signal: every
+URL belongs to the publisher, no sudo, credential store, deletion, persistence
+or dynamic execution."""

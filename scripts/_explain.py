@@ -21,6 +21,7 @@ TEXT = {
         "dangerous": "NOT INSTALLED: {name} -- {why}.",
         "dangerous_advice": "Recommendation: do not use this skill.",
         "unclear": "YOUR DECISION: {name} -- {n} point(s) could not be settled automatically.",
+        "unclear_coverage": "The scanner could not check every part of it completely.",
         "unclear_advice": "Recommendation: install it only if you trust its publisher.",
         "no_verdict": "NOT INSTALLED: {name} could not be checked completely.",
         "no_verdict_advice": "Nothing was decided; run the check again later.",
@@ -45,6 +46,7 @@ TEXT = {
         "dangerous": "NICHT INSTALLIERT: {name} -- {why}.",
         "dangerous_advice": "Empfehlung: diese Skill nicht verwenden.",
         "unclear": "DEINE ENTSCHEIDUNG: {name} -- {n} Punkt(e) ließen sich nicht automatisch klären.",
+        "unclear_coverage": "Der Scanner konnte nicht jeden Teil vollständig prüfen.",
         "unclear_advice": "Empfehlung: nur installieren, wenn du dem Herausgeber vertraust.",
         "no_verdict": "NICHT INSTALLIERT: {name} konnte nicht vollständig geprüft werden.",
         "no_verdict_advice": "Es wurde nichts entschieden; die Prüfung später wiederholen.",
@@ -93,8 +95,7 @@ def why_key(rule: str) -> str:
 
 
 def blocking(result: _triage.Result) -> list:
-    return [d for d in result.dispositions if d.status in (_triage.HARD, _triage.CONFIRMED)
-            or (d.status == _triage.OPEN and not d.finding.unconfirmed)]
+    return [d for d in result.dispositions if _triage.blocks(d)]
 
 
 def explain(result: _triage.Result, name: str, *, lang: str | None = None,
@@ -109,8 +110,10 @@ def explain(result: _triage.Result, name: str, *, lang: str | None = None,
         top = next(k for k in WHY_ORDER if k in keys)
         lines = [t["dangerous"].format(name=name, why=t["why"][top]), t["dangerous_advice"]]
     elif result.verdict == _triage.UNCLEAR:
-        lines = [t["unclear"].format(name=name, n=len(result.by_status(_triage.OPEN))),
-                 t["unclear_advice"]]
+        lines = [t["unclear"].format(name=name, n=len(result.by_status(_triage.OPEN)))]
+        if any(d.finding.rule in _triage.COVERAGE_RULES for d in result.by_status(_triage.OPEN)):
+            lines.append(t["unclear_coverage"])
+        lines.append(t["unclear_advice"])
     else:
         lines = [t["no_verdict"].format(name=name), t["no_verdict_advice"]]
     if details and result.dispositions:
