@@ -328,10 +328,31 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def unsettled_gap(report: dict) -> bool:
+# Image formats a scanner may skip as binary without hiding code: suffix and the
+# bytes the file must start with (WebP: RIFF, then WEBP at offset 8).
+INERT_MEDIA = {".png": (b"\x89PNG\r\n\x1a\n",), ".jpg": (b"\xff\xd8\xff",),
+               ".jpeg": (b"\xff\xd8\xff",), ".gif": (b"GIF87a", b"GIF89a"),
+               ".ico": (b"\x00\x00\x01\x00",), ".webp": (b"RIFF",)}
+
+
+def inert_media(skill_dir: Path, rel: str) -> bool:
+    """A bundled image whose content really is that image format."""
+    base = Path(skill_dir).resolve()
+    path = (base / str(rel)).resolve()
+    magic = INERT_MEDIA.get(path.suffix.lower())
+    if magic is None or not path.is_relative_to(base) or not path.is_file():
+        return False
+    with path.open("rb") as fh:
+        head = fh.read(16)
+    if path.suffix.lower() == ".webp" and head[8:12] != b"WEBP":
+        return False
+    return head.startswith(magic)
+
+
+def unsettled_gap(report: dict, skill_dir: Path) -> bool:
     """A gap in the scan the triage cannot settle: a file not read at all, a fatal
-    or unknown exception, a limitation, a scope exclusion other than binary
-    content. With every file read, references that match no or several bundled
+    or unknown exception, a limitation, a scope exclusion other than a real
+    image. With every file read, references that match no or several bundled
     files, images the text analyzers skip, and parser limits the span locator
     can replay are judged."""
     completeness = report.get("analysis_completeness") or {}
@@ -340,7 +361,8 @@ def unsettled_gap(report: dict) -> bool:
     exclusions = completeness.get("scope_exclusions") or []
     if not isinstance(exclusions, list) or not all(
             isinstance(e, dict) and e.get("reason_code") == "binary_content"
-            and e.get("fatal") is False for e in exclusions):
+            and e.get("fatal") is False and inert_media(skill_dir, e.get("path") or "")
+            for e in exclusions):
         return True
     exceptions = completeness.get("ledger_exceptions") or []
     if not isinstance(exceptions, list):
@@ -473,7 +495,7 @@ def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | Non
 
     if any(blocks(d) for d in out):
         verdict = DANGEROUS
-    elif raw_code == 1 and unsettled_gap(report):
+    elif raw_code == 1 and unsettled_gap(report, skill_dir):
         # The wrapper blocked on a finding before judging completeness.
         verdict = NO_VERDICT
     elif any(d.status == OPEN for d in out):

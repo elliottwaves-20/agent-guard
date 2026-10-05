@@ -403,8 +403,14 @@ class InspectionGapTests(unittest.TestCase):
     """The wrapper blocks with exit 1 on a HIGH finding before it looks at
     completeness; the triage must not turn such a partial scan into a verdict."""
 
-    def judge(self, completeness, *extra, raw=1):
+    PNG = b"\x89PNG\r\n\x1a\n" + bytes(32)
+
+    def judge(self, completeness, *extra, raw=1, binaries=None):
         skill = Skill(self, {"SKILL.md": "# Acme\nexport ACME_API_KEY=...\n"})
+        for rel, data in (binaries if binaries is not None
+                          else {"docs/plot.png": self.PNG}).items():
+            (skill.dir / rel).parent.mkdir(parents=True, exist_ok=True)
+            (skill.dir / rel).write_bytes(data)
         rep = report(issue("PE3", line=2, snippet="export ACME_API_KEY=..."), *extra)
         rep["analysis_completeness"] = completeness
         return skill.judge(rep, raw=raw)
@@ -445,6 +451,25 @@ class InspectionGapTests(unittest.TestCase):
                                   "reason_code": "binary_content", "path": "docs/plot.png",
                                   "fatal": False}]}
         self.assertEqual(self.judge(completeness).verdict, t.SAFE)
+
+    def test_binary_exclusion_must_be_a_real_image(self):
+        # An executable named like an image, a shared library, an archive.
+        cases = {"docs/plot.png": b"MZ\x90\x00" + bytes(32),
+                 "tool.so": b"\x7fELF" + bytes(32),
+                 "data.zip": b"PK\x03\x04" + bytes(32)}
+        for rel, data in cases.items():
+            with self.subTest(rel=rel):
+                completeness = {"ledger_exceptions": [], "scope_exclusions": [
+                    {"outcome": "out_of_scope", "reason_code": "binary_content",
+                     "path": rel, "fatal": False}]}
+                self.assertEqual(self.judge(completeness, binaries={rel: data}).verdict,
+                                 t.NO_VERDICT)
+
+    def test_binary_exclusion_outside_the_skill_gives_no_verdict(self):
+        completeness = {"ledger_exceptions": [], "scope_exclusions": [
+            {"outcome": "out_of_scope", "reason_code": "binary_content",
+             "path": "../plot.png", "fatal": False}]}
+        self.assertEqual(self.judge(completeness).verdict, t.NO_VERDICT)
 
     def test_other_scope_exclusions_give_no_verdict(self):
         for exclusion in ({"outcome": "out_of_scope", "reason_code": "size_limit",
