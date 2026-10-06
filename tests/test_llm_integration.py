@@ -178,7 +178,7 @@ skills = "luna"
 
 [llm.profiles.luna]
 kind = "cli"
-cli = "codex"
+cli = "claude"
 model = "gpt-6-luna"
 
 [llm.profiles.haiku]
@@ -240,7 +240,7 @@ model = "claude-haiku-4-5-20251001"
             with patch.dict(os.environ, overlay):
                 importlib.reload(ss)
                 self.assertEqual(ss.LLM_PROFILE[0], "luna")
-                self.assertEqual(ss.PROVIDER, "codex_cli")
+                self.assertEqual(ss.PROVIDER, "claude_cli")
         finally:
             importlib.reload(ss)
 

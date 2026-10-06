@@ -84,6 +84,12 @@ class UserConfigTests(unittest.TestCase):
         with self.assertRaises(uc.ConfigError):
             self.load({"AGENT_GUARD_CONFIG": str(path)})
 
+    def test_settings_table_cannot_carry_a_key(self):
+        path = self.write(self.root / "c.toml",
+                          '[llm.profiles.x]\nkind = "api"\nsettings = { ANTHROPIC_API_KEY = "x" }\n')
+        with self.assertRaises(uc.ConfigError):
+            self.load({"AGENT_GUARD_CONFIG": str(path)})
+
     def test_key_env_names_a_variable_and_is_allowed(self):
         path = self.write(self.root / "c.toml",
                           '[llm.profiles.x]\nkind = "api"\nkey_env = "CEREBRAS_API_KEY"\n')

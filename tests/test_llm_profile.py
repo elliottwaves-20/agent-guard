@@ -9,7 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")  # never read this machine's personal config
 lp = importlib.import_module("_llm_profile")
 
-LUNA = {"kind": "cli", "cli": "codex", "model": "gpt-6-luna"}
+LUNA = {"kind": "cli", "cli": "codex", "model": "<model-id>"}  # refused: codex_cli is disabled
+CLAUDE = {"kind": "cli", "cli": "claude", "model": "<model-id>"}
 CEREBRAS = {"kind": "api", "protocol": "openai", "base_url": "https://api.cerebras.ai/v1",
             "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY"}
 HAIKU = {"kind": "api", "protocol": "native", "provider": "anthropic",
@@ -34,16 +35,16 @@ class SelectionTests(unittest.TestCase):
         self.assertIsNone(lp.select_profile({"distribution": {}}, "mcp", {}))
 
     def test_use_table_picks_profile_per_scanner(self):
-        cfg = config({"skills": "luna", "mcp": "cerebras"}, luna=LUNA, cerebras=CEREBRAS)
+        cfg = config({"skills": "luna", "mcp": "cerebras"}, luna=CLAUDE, cerebras=CEREBRAS)
         self.assertEqual(lp.select_profile(cfg, "skills", {})[0], "luna")
         self.assertEqual(lp.select_profile(cfg, "mcp", {})[0], "cerebras")
 
     def test_scanner_without_use_entry_keeps_legacy_resolution(self):
-        cfg = config({"skills": "luna"}, luna=LUNA)
+        cfg = config({"skills": "luna"}, luna=CLAUDE)
         self.assertIsNone(lp.select_profile(cfg, "mcp", {}))
 
     def test_run_override_beats_use_and_scanner_override_beats_both(self):
-        cfg = config({"skills": "luna", "mcp": "cerebras"}, luna=LUNA,
+        cfg = config({"skills": "luna", "mcp": "cerebras"}, luna=CLAUDE,
                      cerebras=CEREBRAS, haiku=HAIKU)
         env = {"AGENT_GUARD_LLM": "haiku"}
         self.assertEqual(lp.select_profile(cfg, "skills", env)[0], "haiku")
@@ -52,15 +53,15 @@ class SelectionTests(unittest.TestCase):
 
     def test_unknown_profile_name_is_an_error(self):
         with self.assertRaises(lp.ProfileError):
-            lp.select_profile(config({"skills": "nope"}, luna=LUNA), "skills", {})
+            lp.select_profile(config({"skills": "nope"}, luna=CLAUDE), "skills", {})
 
     def test_cisco_refuses_cli_profile(self):
         with self.assertRaises(lp.ProfileError) as ctx:
-            lp.select_profile(config({"mcp": "luna"}, luna=LUNA), "mcp", {})
+            lp.select_profile(config({"mcp": "luna"}, luna=CLAUDE), "mcp", {})
         self.assertIn("api", str(ctx.exception))
 
     def test_campaign_accepts_only_openai_protocol_api_profiles(self):
-        cfg = config({"campaign": "cerebras"}, cerebras=CEREBRAS, luna=LUNA, haiku=HAIKU)
+        cfg = config({"campaign": "cerebras"}, cerebras=CEREBRAS, luna=CLAUDE, haiku=HAIKU)
         self.assertEqual(lp.select_profile(cfg, "campaign", {})[0], "cerebras")
         for name in ("luna", "haiku"):
             with self.subTest(name=name), self.assertRaises(lp.ProfileError):
@@ -71,6 +72,7 @@ class SelectionTests(unittest.TestCase):
             {"kind": "magic"},
             {"kind": "cli"},
             {"kind": "cli", "cli": "codex; whoami"},
+            {"kind": "cli", "cli": "openai-compatible"},
             {"kind": "api", "protocol": "openai", "model": "m", "key_env": "K"},
             {"kind": "api", "protocol": "openai", "base_url": "ftp://x", "model": "m", "key_env": "K"},
             {"kind": "api", "protocol": "native", "model": "m", "key_env": "K"},
@@ -101,10 +103,10 @@ class SkillSpectorTranslationTests(unittest.TestCase):
     def test_cli_profile_sets_provider_and_model_and_clears_stale_settings(self):
         env = {"SKILLSPECTOR_MODEL": "gpt-5.4-nano", "SKILLSPECTOR_COMPAT_BASE_URL": "https://old",
                "SKILLSPECTOR_MAX_WORKFLOW_SECONDS": "780", "PATH": "x"}
-        out, ready, reason, registry = lp.skillspector_env("luna", LUNA, env, which=on_path)
+        out, ready, reason, registry = lp.skillspector_env("luna", CLAUDE, env, which=on_path)
         self.assertTrue(ready, reason)
-        self.assertEqual(out["SKILLSPECTOR_PROVIDER"], "codex_cli")
-        self.assertEqual(out["SKILLSPECTOR_MODEL"], "gpt-6-luna")
+        self.assertEqual(out["SKILLSPECTOR_PROVIDER"], "claude_cli")
+        self.assertEqual(out["SKILLSPECTOR_MODEL"], "<model-id>")
         self.assertNotIn("SKILLSPECTOR_COMPAT_BASE_URL", out)
         self.assertEqual(out["SKILLSPECTOR_MAX_WORKFLOW_SECONDS"], "780")
         self.assertEqual(out["PATH"], "x")
@@ -119,9 +121,9 @@ class SkillSpectorTranslationTests(unittest.TestCase):
         self.assertNotIn("SKILLSPECTOR_MODEL", out)
 
     def test_cli_profile_needs_binary_on_path(self):
-        _, ready, reason, _ = lp.skillspector_env("luna", LUNA, {}, which=nowhere)
+        _, ready, reason, _ = lp.skillspector_env("luna", CLAUDE, {}, which=nowhere)
         self.assertFalse(ready)
-        self.assertIn("codex", reason)
+        self.assertIn("claude", reason)
 
     def test_openai_protocol_maps_to_openai_compatible(self):
         out, ready, _, _ = lp.skillspector_env("cerebras", CEREBRAS,
@@ -145,13 +147,13 @@ class SkillSpectorTranslationTests(unittest.TestCase):
         self.assertEqual(out["ANTHROPIC_API_KEY"], "k")
 
     def test_token_limits_become_a_single_model_registry(self):
-        profile = dict(LUNA, context=400000, max_output=16000)
+        profile = dict(CLAUDE, context=400000, max_output=16000)
         _, _, _, registry = lp.skillspector_env("luna", profile, {}, which=on_path)
-        self.assertEqual(registry, {"models": {"gpt-6-luna": {
+        self.assertEqual(registry, {"models": {"<model-id>": {
             "context_length": 400000, "max_output_tokens": 16000}}})
 
     def test_concurrency_is_forwarded(self):
-        out, _, _, _ = lp.skillspector_env("luna", dict(LUNA, concurrency=3), {}, which=on_path)
+        out, _, _, _ = lp.skillspector_env("luna", dict(CLAUDE, concurrency=3), {}, which=on_path)
         self.assertEqual(out["SKILLSPECTOR_MAX_LLM_CONCURRENCY"], "3")
 
 
@@ -220,13 +222,13 @@ class WrapperProfileTests(unittest.TestCase):
                 importlib.reload(importlib.import_module("_skillspector"))
 
     LUNA_TOML = ('[llm.use]\nskills = "luna"\n[llm.profiles.luna]\n'
-                 'kind = "cli"\ncli = "codex"\nmodel = "luna-7"\n')
+                 'kind = "cli"\ncli = "claude"\nmodel = "luna-7"\n')
 
     def test_profile_overrides_stale_provider_settings(self):
         provider, ready, reason, env, _ = self._resolve(
             self.LUNA_TOML, {"SKILLSPECTOR_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "k",
-                             "SKILLSPECTOR_MODEL": "claude-old"}, on_path=("codex",))
-        self.assertEqual(provider, "codex_cli")
+                             "SKILLSPECTOR_MODEL": "claude-old"}, on_path=("claude",))
+        self.assertEqual(provider, "claude_cli")
         self.assertTrue(ready, reason)
         # No vendor-marker filter: an unfamiliar model name is the user's choice.
         self.assertEqual(env["SKILLSPECTOR_MODEL"], "luna-7")
@@ -234,13 +236,13 @@ class WrapperProfileTests(unittest.TestCase):
 
     def test_profile_token_limits_are_written_as_registry_file(self):
         toml = self.LUNA_TOML + "context = 400000\nmax_output = 16000\n"
-        *_, data = self._resolve(toml, on_path=("codex",))
+        *_, data = self._resolve(toml, on_path=("claude",))
         self.assertEqual(data, {"models": {"luna-7": {
             "context_length": 400000, "max_output_tokens": 16000}}})
 
     def test_static_only_still_wins_over_profile(self):
         provider, ready, _, env, _ = self._resolve(
-            self.LUNA_TOML, {"AGENT_GUARD_STATIC_ONLY": "1"}, on_path=("codex",))
+            self.LUNA_TOML, {"AGENT_GUARD_STATIC_ONLY": "1"}, on_path=("claude",))
         self.assertFalse(ready)
         self.assertNotIn("SKILLSPECTOR_PROVIDER", env)
 
@@ -312,3 +314,68 @@ class CiscoWrapperProfileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+OPENCODE = {"kind": "cli", "cli": "opencode"}
+GEMINI_ADC = {"kind": "api", "protocol": "native", "provider": "gemini", "model": "<model-id>",
+              "settings": {"GOOGLE_CLOUD_PROJECT": "demo-project"}}
+AZURE = {"kind": "api", "protocol": "native", "provider": "azure_openai", "model": "<model-id>",
+         "key_env": "MY_AZURE", "settings": {"AZURE_OPENAI_ENDPOINT": "https://x.openai.azure.com"}}
+
+
+class OpennessTests(unittest.TestCase):
+    def test_codex_profile_is_refused_with_the_reason(self):
+        with self.assertRaises(lp.ProfileError) as ctx:
+            lp.validate_profile("luna", LUNA)
+        self.assertIn("codex_cli is disabled", str(ctx.exception))
+
+    def test_antigravity_profile_is_refused(self):
+        with self.assertRaises(lp.ProfileError):
+            lp.validate_profile("agy", {"kind": "cli", "cli": "agy"})
+
+    def test_unknown_cli_is_refused(self):
+        with self.assertRaises(lp.ProfileError):
+            lp.validate_profile("x", {"kind": "cli", "cli": "notacli"})
+
+    def test_opencode_profile_maps_to_opencode_cli(self):
+        env, ready, reason, _ = lp.skillspector_env("oc", lp.validate_profile("oc", OPENCODE),
+                                                    {}, which=on_path)
+        self.assertEqual(env["SKILLSPECTOR_PROVIDER"], "opencode_cli")
+        self.assertTrue(ready, reason)
+
+    def test_gemini_adc_needs_no_key_but_its_project(self):
+        env, ready, _r, _ = lp.skillspector_env("g", lp.validate_profile("g", GEMINI_ADC), {})
+        self.assertTrue(ready)
+        self.assertEqual(env["SKILLSPECTOR_PROVIDER"], "gemini")
+        self.assertEqual(env["GOOGLE_CLOUD_PROJECT"], "demo-project")
+        bare = dict(GEMINI_ADC, settings={})
+        _env, ready, reason, _ = lp.skillspector_env("g", lp.validate_profile("g", bare), {})
+        self.assertFalse(ready)
+        self.assertIn("GOOGLE_CLOUD_PROJECT", reason)
+
+    def test_azure_gets_key_and_endpoint(self):
+        env, ready, _r, _ = lp.skillspector_env(
+            "az", lp.validate_profile("az", AZURE), {"MY_AZURE": "k"})
+        self.assertTrue(ready)
+        self.assertEqual(env["AZURE_OPENAI_API_KEY"], "k")
+        self.assertEqual(env["AZURE_OPENAI_ENDPOINT"], "https://x.openai.azure.com")
+
+    def test_settings_outside_the_provider_are_refused(self):
+        bad = dict(GEMINI_ADC, settings={"OPENAI_BASE_URL": "https://evil.example"})
+        with self.assertRaises(lp.ProfileError):
+            lp.validate_profile("g", bad)
+
+    def test_settings_must_be_strings(self):
+        bad = dict(GEMINI_ADC, settings={"GOOGLE_CLOUD_PROJECT": 5})
+        with self.assertRaises(lp.ProfileError):
+            lp.validate_profile("g", bad)
+
+    def test_provider_with_secret_still_needs_key_env(self):
+        no_key = {k: v for k, v in AZURE.items() if k != "key_env"}
+        with self.assertRaises(lp.ProfileError):
+            lp.validate_profile("az", no_key)
+
+    def test_stale_settings_from_env_are_replaced_by_the_profile(self):
+        env, _ready, _r, _ = lp.skillspector_env(
+            "g", lp.validate_profile("g", GEMINI_ADC), {"GOOGLE_CLOUD_PROJECT": "old"})
+        self.assertEqual(env["GOOGLE_CLOUD_PROJECT"], "demo-project")

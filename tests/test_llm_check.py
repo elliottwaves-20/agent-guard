@@ -11,7 +11,7 @@ llm_check = importlib.import_module("llm_check")
 
 CONFIG = {"llm": {"use": {"skills": "luna", "mcp": "cerebras", "campaign": "cerebras"},
                   "profiles": {
-    "luna": {"kind": "cli", "cli": "codex", "model": "gpt-6-luna"},
+    "luna": {"kind": "cli", "cli": "claude", "model": "<model-id>"},
     "cerebras": {"kind": "api", "protocol": "openai", "base_url": "https://api.cerebras.ai/v1",
                  "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY", "max_output": 8192,
                  "price": {"input_usd_per_mtok": 0.35, "output_usd_per_mtok": 0.75},
@@ -28,8 +28,8 @@ class DescribeTests(unittest.TestCase):
         rows = rows_by_scanner(llm_check.describe(
             CONFIG, {"CEREBRAS_API_KEY": "csk-x"}, which=lambda name: f"/bin/{name}"))
         self.assertEqual(rows["skills"]["source"], "profile luna")
-        self.assertEqual(rows["skills"]["connection"], "codex_cli")
-        self.assertEqual(rows["skills"]["model"], "gpt-6-luna")
+        self.assertEqual(rows["skills"]["connection"], "claude_cli")
+        self.assertEqual(rows["skills"]["model"], "<model-id>")
         self.assertTrue(rows["skills"]["ready"])
         self.assertEqual(rows["mcp"]["model"], "openai/gpt-oss-120b")
         self.assertTrue(rows["mcp"]["ready"])
@@ -38,7 +38,7 @@ class DescribeTests(unittest.TestCase):
     def test_missing_key_and_binary_are_reported_not_raised(self):
         rows = rows_by_scanner(llm_check.describe(CONFIG, {}, which=lambda name: None))
         self.assertFalse(rows["skills"]["ready"])
-        self.assertIn("codex", rows["skills"]["problem"])
+        self.assertIn("claude", rows["skills"]["problem"])
         self.assertFalse(rows["mcp"]["ready"])
         self.assertIn("CEREBRAS_API_KEY", rows["mcp"]["problem"])
         self.assertFalse(rows["campaign"]["ready"])

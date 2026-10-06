@@ -21,17 +21,17 @@
 #   AGENT_GUARD_LLM=<profile>            all scanners
 #   AGENT_GUARD_LLM_SKILLS / _MCP / _CAMPAIGN=<profile>
 [llm.use]
-skills = "codex"
+skills = "claude"
 mcp = "openai-compatible"
 # campaign = "openai-compatible"
 
 # -- Profiles -----------------------------------------------------------------
 # A coding-agent CLI login: no API key. `cli` is the binary name; SkillSpector
-# provider "<cli>_cli" must exist (claude, codex, gemini, opencode, ...).
+# provider "<cli>_cli" must exist (claude, gemini, opencode; codex is refused).
 # Omit `model` to use the CLI's own default model.
-[llm.profiles.codex]
+[llm.profiles.claude]
 kind = "cli"
-cli = "codex"
+cli = "claude"
 model = "<model-id>"
 # context = 400000        # optional token limits for models SkillSpector does
 # max_output = 16000      # not know yet (written to SKILLSPECTOR_MODEL_REGISTRY)

@@ -20,6 +20,8 @@ from __future__ import annotations
 import re
 import shutil
 
+import _providers
+
 # Credential (and endpoint) variables per SkillSpector provider. The first
 # entry is where a native profile's key is copied to.
 SKILLSPECTOR_KEY_VARS = {
@@ -81,12 +83,45 @@ def _text(name, profile, field, pattern=None):
     return value
 
 
+def _enabled(name, provider_id):
+    try:
+        _providers.check_enabled(provider_id)
+    except _providers.DisabledProvider as exc:
+        raise ProfileError(f"profile {name}: {exc}") from None
+
+
+def _provider_of(profile):
+    if profile["kind"] == "cli":
+        return _providers.cli_for_binary(profile["cli"])
+    if profile.get("protocol") == "openai":
+        return _providers.get("openai_compatible")
+    return _providers.get(profile["provider"])
+
+
+def _settings(name, profile):
+    settings = profile.get("settings", {})
+    if not isinstance(settings, dict):
+        raise ProfileError(f"profile {name}: settings must be a table")
+    provider = _provider_of(profile)
+    allowed = set(provider.settings)
+    for var, value in settings.items():
+        if var not in allowed:
+            raise ProfileError(f"profile {name}: settings.{var} is not a setting of "
+                               f"{provider.id}; allowed: {', '.join(sorted(allowed)) or 'none'}")
+        if not isinstance(value, str) or not value.strip():
+            raise ProfileError(f"profile {name}: settings.{var} must be a non-empty string")
+
+
 def validate_profile(name: str, profile) -> dict:
     if not isinstance(profile, dict):
         raise ProfileError(f"profile {name} must be a table")
     kind = profile.get("kind")
     if kind == "cli":
-        _text(name, profile, "cli", _NAME)
+        binary = _text(name, profile, "cli", _NAME)
+        provider = _providers.cli_for_binary(binary)
+        if provider is None or provider.kind != "cli":
+            raise ProfileError(f"profile {name}: no SkillSpector CLI provider for {binary!r}")
+        _enabled(name, provider.id)
     elif kind == "api":
         protocol = profile.get("protocol")
         _text(name, profile, "model")
@@ -97,13 +132,18 @@ def validate_profile(name: str, profile) -> dict:
                                    "(plain http only for localhost)")
             _text(name, profile, "key_env", _ENV_NAME)
         elif protocol == "native":
-            provider = _text(name, profile, "provider", _NAME)
-            if provider not in KEYLESS_PROVIDERS or "key_env" in profile:
+            pid = _text(name, profile, "provider", _NAME)
+            provider = _providers.get(pid)
+            if provider is None or provider.kind != "api":
+                raise ProfileError(f"profile {name}: unknown SkillSpector API provider {pid!r}")
+            _enabled(name, pid)
+            if provider.secrets or "key_env" in profile:
                 _text(name, profile, "key_env", _ENV_NAME)
         else:
             raise ProfileError(f"profile {name}: protocol must be 'openai' or 'native'")
     else:
         raise ProfileError(f"profile {name}: kind must be 'cli' or 'api'")
+    _settings(name, profile)
     if "model" in profile:
         _text(name, profile, "model")
     for field in ("context", "max_output", "timeout", "concurrency"):
@@ -148,31 +188,34 @@ def _key(profile, env):
 
 def skillspector_env(name: str, profile: dict, env, which=shutil.which):
     """Return (env, ready, reason, registry) for a SkillSpector run."""
-    out = {k: v for k, v in env.items() if k not in _SKILLSPECTOR_OWNED}
+    provider = _provider_of(profile)
+    out = {k: v for k, v in env.items()
+           if k not in _SKILLSPECTOR_OWNED and k not in provider.settings}
     ready, reason = True, f"profile {name}"
     model = profile.get("model", "").strip()
+    out["SKILLSPECTOR_PROVIDER"] = provider.id
     if profile["kind"] == "cli":
-        cli = profile["cli"]
-        out["SKILLSPECTOR_PROVIDER"] = f"{cli}_cli"
-        if which(cli):
-            reason = f"profile {name}: {cli} CLI (local login)"
+        if which(provider.binary):
+            reason = f"profile {name}: {provider.binary} CLI (local login)"
         else:
-            ready, reason = False, f"profile {name}: '{cli}' is not on PATH"
+            ready, reason = False, f"profile {name}: '{provider.binary}' is not on PATH"
     else:
         var, key = _key(profile, env)
         if profile["protocol"] == "openai":
-            out["SKILLSPECTOR_PROVIDER"] = "openai_compatible"
             out["SKILLSPECTOR_COMPAT_BASE_URL"] = profile["base_url"]
-            target = "SKILLSPECTOR_COMPAT_API_KEY"
-        else:
-            out["SKILLSPECTOR_PROVIDER"] = profile["provider"]
-            target = SKILLSPECTOR_KEY_VARS.get(profile["provider"], (None,))[0]
+        target = provider.secrets[0] if provider.secrets else None
         if var:
             if key and target:
                 out[target] = key
-                reason = f"profile {name}: {out['SKILLSPECTOR_PROVIDER']} (API key)"
+                reason = f"profile {name}: {provider.id} (API key)"
             else:
                 ready, reason = False, f"profile {name}: {var} is not set"
+    out.update(profile.get("settings", {}))
+    if ready:
+        for var in provider.required:
+            if not out.get(var, "").strip():
+                ready, reason = False, f"profile {name}: {var} is not set"
+                break
     if model:
         out["SKILLSPECTOR_MODEL"] = model
     if "concurrency" in profile:
