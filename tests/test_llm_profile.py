@@ -392,6 +392,21 @@ class OpennessTests(unittest.TestCase):
         with self.assertRaises(lp.ProfileError):
             lp.validate_profile("c", profile)
 
+    def test_hosts_are_parsed_not_prefix_matched(self):
+        ollama = {"kind": "api", "protocol": "native", "provider": "ollama", "model": "<model-id>"}
+        for url in ("http://localhost.evil.example", "http://127.0.0.1.attacker.net",
+                    "http://[::1].x", "https://", "http://localhost:bad"):
+            with self.subTest(url=url):
+                with self.assertRaises(lp.ProfileError):
+                    lp.validate_profile("c", dict(CEREBRAS, base_url=url))
+                with self.assertRaises(lp.ProfileError):
+                    lp.validate_profile("o", dict(ollama, settings={"OLLAMA_BASE_URL": url}))
+        for url in ("http://localhost:11434/v1", "http://127.0.0.1:8080", "http://[::1]:11434",
+                    "https://api.example.com/v1"):
+            with self.subTest(url=url):
+                lp.validate_profile("c", dict(CEREBRAS, base_url=url))
+                lp.validate_profile("o", dict(ollama, settings={"OLLAMA_BASE_URL": url}))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 import shutil
+from urllib.parse import urlsplit
 
 import _providers
 
@@ -42,7 +43,20 @@ SCANNERS = {"skills": "AGENT_GUARD_LLM_SKILLS", "mcp": "AGENT_GUARD_LLM_MCP",
 
 _NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_LOCAL_HTTP = ("http://localhost", "http://127.0.0.1", "http://[::1]")
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _safe_url(value: str) -> bool:
+    """https with a host, or plain http only to the local machine (parsed, not prefix-matched)."""
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+        parts.port  # raises ValueError on a malformed port
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return parts.scheme == "https" or (parts.scheme == "http" and host in _LOCAL_HOSTS)
 
 # Settings a profile owns. Stale values (e.g. from an old .env) are removed
 # before the profile is applied, so an explicit profile is never mixed with a
@@ -110,8 +124,7 @@ def _settings(name, profile):
                                f"{provider.id}; allowed: {', '.join(sorted(allowed)) or 'none'}")
         if not isinstance(value, str) or not value.strip():
             raise ProfileError(f"profile {name}: settings.{var} must be a non-empty string")
-        if var.endswith(("_URL", "_ENDPOINT")) and not (
-                value.startswith("https://") or value.startswith(_LOCAL_HTTP)):
+        if var.endswith(("_URL", "_ENDPOINT")) and not _safe_url(value):
             raise ProfileError(f"profile {name}: settings.{var} must be https:// "
                                "(plain http only for localhost)")
         if var == "SKILLSPECTOR_COMPAT_BASE_URL" and profile.get("protocol") == "openai":
@@ -133,7 +146,7 @@ def validate_profile(name: str, profile) -> dict:
         _text(name, profile, "model")
         if protocol == "openai":
             url = _text(name, profile, "base_url")
-            if not (url.startswith("https://") or url.startswith(_LOCAL_HTTP)):
+            if not _safe_url(url):
                 raise ProfileError(f"profile {name}: base_url must be https:// "
                                    "(plain http only for localhost)")
             _text(name, profile, "key_env", _ENV_NAME)
