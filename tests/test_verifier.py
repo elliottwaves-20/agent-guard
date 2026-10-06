@@ -17,6 +17,7 @@ os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")
 t = importlib.import_module("_triage")
 v = importlib.import_module("_verifier")
 
+NL = chr(10)
 ORIGIN = t.Origin("acme-ai/skills", "a" * 40)
 SKILL = "---\nname: acme\ndescription: Query the Acme API.\n---\n# Acme\n"
 
@@ -278,6 +279,54 @@ class SetupTests(unittest.TestCase):
             finally:
                 v.BOOT = saved
         self.assertEqual([r["text"] for r in out], ["ollama", "ollama"])
+
+
+class BootFailureTests(unittest.TestCase):
+    def _run(self, script, python=None, timeout=30):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "boot.py"
+            fake.write_text(script, encoding="utf-8")
+            saved = v.BOOT, v.BOOT_GRACE_SECONDS
+            v.BOOT, v.BOOT_GRACE_SECONDS = fake, 0
+            try:
+                return v.run_boot(python or sys.executable, dict(os.environ), ["a", "b"],
+                                  timeout=timeout)
+            finally:
+                v.BOOT, v.BOOT_GRACE_SECONDS = saved
+
+    def _all_failed(self, out):
+        self.assertEqual(len(out), 2)
+        self.assertTrue(all(r["ok"] is False and r["error"] for r in out))
+
+    def test_hanging_boot_times_out(self):
+        self._all_failed(self._run("import time" + NL + "time.sleep(30)" + NL, timeout=0.2))
+
+    def test_nonzero_exit(self):
+        self._all_failed(self._run("import sys" + NL + "sys.exit(3)" + NL))
+
+    def test_non_json_output(self):
+        self._all_failed(self._run("print('not json')" + NL))
+
+    def test_wrong_length_list(self):
+        self._all_failed(self._run("print('[{}]')".format('{"ok": true, "text": "x"}') + NL))
+
+    def test_missing_python(self):
+        self._all_failed(self._run("", python=str(ROOT / "no-such-python.exe")))
+
+    def test_case_ends_unclear_not_crashed(self):
+        script = "import time" + NL + "time.sleep(30)" + NL
+        case = Case(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "boot.py"
+            fake.write_text(script, encoding="utf-8")
+            saved = v.BOOT, v.BOOT_GRACE_SECONDS
+            v.BOOT, v.BOOT_GRACE_SECONDS = fake, 0
+            try:
+                runner = lambda prompts: v.run_boot(sys.executable, dict(os.environ), prompts,
+                                                    timeout=0.2)
+                self.assertEqual(case.judge(runner).verdict, t.UNCLEAR)
+            finally:
+                v.BOOT, v.BOOT_GRACE_SECONDS = saved
 
 
 if __name__ == "__main__":

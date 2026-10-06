@@ -30,6 +30,7 @@ CONTEXT_LINES = 8
 MAX_EVIDENCE_LINES = 400
 MAX_EVIDENCE_CHARS = 40_000
 VERDICTS = ("malicious", "benign", "unsure")
+BOOT_GRACE_SECONDS = 60
 BOOT = Path(__file__).resolve().parent / "_verifier_boot.py"
 # Prompt injection, system-prompt leakage, anti-refusal and context leaks: an
 # AI judge must not be the one to clear content that addresses AIs.
@@ -157,8 +158,14 @@ def parse_answer(text: str, shown: tuple) -> Answer:
 
 def run_boot(python: str, env: dict, prompts: list, timeout: float = 300) -> list:
     request = json.dumps({"timeout": timeout, "prompts": prompts})
-    done = subprocess.run([python, str(BOOT)], input=request.encode("utf-8"), env=env,
-                          capture_output=True, timeout=timeout * len(prompts) + 60)
+    limit = timeout * len(prompts) + BOOT_GRACE_SECONDS
+    try:
+        done = subprocess.run([python, str(BOOT)], input=request.encode("utf-8"), env=env,
+                              capture_output=True, timeout=limit)
+    except subprocess.TimeoutExpired:
+        return [{"ok": False, "error": f"verifier timed out after {limit:g}s"}] * len(prompts)
+    except OSError as exc:
+        return [{"ok": False, "error": f"verifier could not start: {type(exc).__name__}"}] * len(prompts)
     if done.returncode != 0:
         return [{"ok": False, "error": f"verifier exited {done.returncode}"}] * len(prompts)
     try:
