@@ -49,7 +49,7 @@ agent-guard never writes its own detection — it routes every install target to
 - **Commit-pinned ZIP scanning** — repos are fetched as a ZIP snapshot of one exact commit; `git clone` never touches your machine before a verdict, and the commit that was scanned is the commit that gets installed. No scan/install gap an attacker could slip a push into.
 - **Skills, MCP servers, *and* CLI tools** — an MCP server is code that must run to be fully inspected, so naive scanning would execute it. `scan_mcp.py` scans the package **source** first (fetched from the registry, nothing executed), with an optional **Docker-sandboxed** live scan — untrusted MCP code never runs unconfined on your machine. `scan_cli.py` extends the same scan-first gate to the CLI tools agents install: npm/PyPI/Go packages, cargo crates, release binaries, and `curl | bash` installers, all downloaded but **never executed** before their verdict.
 - **Layered analysis** — static patterns, AST taint tracking, YARA signatures, live OSV.dev CVE lookup, and LLM-powered semantic analysis when configured.
-- **No API key for the main scan** — SkillSpector's LLM layer runs by default through the coding-agent CLI you are already logged into (`claude`, `codex`, or `gemini`) as an isolated, tool-less subprocess, so your subscription covers it. Hosted providers (Anthropic, OpenAI, NVIDIA, Bedrock, Ollama, ...) work with a key if you prefer. Only Cisco's optional runtime MCP scan (LiteLLM) strictly needs an API key.
+- **No API key for the main scan** — SkillSpector's LLM layer runs by default through the coding-agent CLI you are already logged into (`claude` or `opencode`) as an isolated, tool-less subprocess, so your subscription covers it. Hosted providers (Anthropic, OpenAI, Azure OpenAI, NVIDIA, Bedrock, Ollama, any OpenAI-compatible endpoint, ...) work with a key if you prefer; the verifier pass uses the same connection. Only Cisco's optional runtime MCP scan (LiteLLM) strictly needs an API key.
 - **Fail-closed workflow** — scanner errors are never silently treated as "no findings".
 - **Prompt-injection aware** — content of scanned repos is treated as data, never as instructions to the reviewing agent.
 - **Clear verdicts** — ✅ SAFE / ⚠ REVIEW / 🚫 DO NOT INSTALL, with a risk score and file/line for every finding.
@@ -114,7 +114,7 @@ Required for the normal scan/install workflow:
 
 - [uv](https://docs.astral.sh/uv/) — installs SkillSpector and Cisco mcp-scanner in isolated tool environments. uv also fetches the Python 3.12 runtime that SkillSpector needs.
 - Python 3.10+ — runs the agent-guard wrapper scripts: `scripts/install_skill.py`, `scripts/scan_skill.py`, `scripts/scan_mcp.py`, `scripts/scan_cli.py`, and `scripts/scan_url.py`.
-- For full SkillSpector LLM coverage: a logged-in coding-agent CLI on PATH (`claude`, `codex`, or `gemini` — auto-detected, no API key) **or** a hosted-provider key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `NVIDIA_INFERENCE_KEY`, ...). Without either, skill and static MCP source scans still run static-only.
+- For full SkillSpector LLM coverage: a logged-in coding-agent CLI on PATH (`claude` or `opencode` — auto-detected, no API key) **or** a hosted-provider key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `NVIDIA_INFERENCE_KEY`, ...). Without either, skill and static MCP source scans still run static-only.
 - A LiteLLM-compatible runtime provider for Cisco live MCP checks (API key required; Cisco has no CLI-login path): `MCP_SCANNER_LLM_API_KEY` plus `MCP_SCANNER_LLM_MODEL`. This can be OpenAI, Anthropic, Gemini, Bedrock, Azure OpenAI, Ollama, or another LiteLLM-supported provider.
 
 Optional, depending on what you scan or install:
@@ -161,7 +161,7 @@ bash setup.sh                       # Windows PowerShell: .\setup.ps1
 Prefer environment variables for provider settings and API keys. This keeps
 credentials outside the project directory. See the configuration section below.
 
-**No API keys? None needed.** If `claude`, `codex`, or `gemini` is on PATH and
+**No API keys? None needed.** If `claude` or `opencode` is on PATH and
 logged in, the wrapper auto-detects it and runs SkillSpector's LLM layer through
 that CLI — your existing subscription, in a separate tool-less process. Without
 any of those (or with `AGENT_GUARD_STATIC_ONLY=1`), SkillSpector runs its full
@@ -192,7 +192,7 @@ injection. Use these names (see `.env.example` for all optional settings):
 
 | Variable | Purpose |
 | --- | --- |
-| `SKILLSPECTOR_PROVIDER` | Optional explicit CLI/provider choice: `claude_cli`, `codex_cli`, `gemini_cli`, or a hosted provider. |
+| `SKILLSPECTOR_PROVIDER` | Optional explicit CLI/provider choice: `claude_cli`, `opencode_cli`, `gemini_cli` (only when named), or a hosted provider. `codex_cli` and `antigravity_cli` are refused. |
 | `SKILLSPECTOR_MODEL` | Optional model override; unset uses the provider/CLI default. |
 | `MCP_SCANNER_LLM_API_KEY` and `MCP_SCANNER_LLM_MODEL` | Separate credentials/model for optional Cisco runtime scans. |
 | `VIRUSTOTAL_API_KEY` | Hash reputation checks for binary downloads. |
@@ -201,8 +201,8 @@ injection. Use these names (see `.env.example` for all optional settings):
 settings there. For a non-secret provider preference, PowerShell also supports:
 
 ```powershell
-[Environment]::SetEnvironmentVariable('SKILLSPECTOR_PROVIDER', 'codex_cli', 'User')
-$env:SKILLSPECTOR_PROVIDER = 'codex_cli'  # also apply to this PowerShell session
+[Environment]::SetEnvironmentVariable('SKILLSPECTOR_PROVIDER', 'claude_cli', 'User')
+$env:SKILLSPECTOR_PROVIDER = 'claude_cli'  # also apply to this PowerShell session
 ```
 
 Enter API keys through the environment-variable dialog or a masked prompt;
@@ -211,7 +211,7 @@ Restart already-running terminals and agent apps after changing user variables:
 they retain the environment they inherited at startup.
 
 **macOS/Linux:** export the variables in the shell that launches the scanner;
-for example `export SKILLSPECTOR_PROVIDER=codex_cli`. Obtain secrets from your
+for example `export SKILLSPECTOR_PROVIDER=claude_cli`. Obtain secrets from your
 secret manager or a silent prompt instead of putting their values in command
 history or a repository. CI jobs should inject them from their secret store.
 
@@ -719,13 +719,33 @@ optional malware-reputation layer:
 
 | Scanner layer | What it covers | Configuration |
 |---------------|----------------|---------------|
-| **NVIDIA SkillSpector** | skill scans and static MCP source scans | `SKILLSPECTOR_PROVIDER` — default `claude_cli` / `codex_cli` / `gemini_cli` (your CLI login, no key); or `anthropic`, `openai`, `nv_build`, `bedrock`, `ollama`, ... with their credentials |
+| **NVIDIA SkillSpector** | skill scans and static MCP source scans | `SKILLSPECTOR_PROVIDER` — default `claude_cli` / `opencode_cli` (your CLI login, no key); or any hosted provider in the table below with its credentials |
 | **Cisco mcp-scanner LLM** | live MCP runtime scans (`remote` / `--sandbox`) | `MCP_SCANNER_LLM_*`; any LiteLLM-supported provider (API key) |
 | **VirusTotal analyzer** | optional malware reputation for bundled binaries, archives, PDFs, and similar non-source files | `VIRUSTOTAL_API_KEY` |
 
+**Access paths.** Every path below that can reach a model can run the skill scan and the verifier (the verifier runs through SkillSpector's own client with the scan's environment, so it shares the skill-scan connection; `python scripts/llm_check.py` shows both rows).
+
+| Access | Type | Skill scan | Verifier | MCP runtime (Cisco) | Campaign |
+|--------|------|------------|----------|---------------------|----------|
+| Claude Code CLI (`claude`) | CLI login | yes (auto-detected) | yes | no | no |
+| OpenCode CLI (`opencode`) | CLI login | yes (auto-detected) | yes | no | no |
+| Gemini CLI (`gemini`) | CLI login | only when named explicitly | yes | no | no |
+| Anthropic, OpenAI, Azure OpenAI, AWS Bedrock, Google Gemini via ADC (`gemini`), NVIDIA, Ollama, Anthropic proxy | API provider | yes (Anthropic, OpenAI, NVIDIA auto-detected by key) | yes | LiteLLM-supported providers, with a key | OpenAI protocol only |
+| OpenAI-compatible endpoint (OpenRouter, Groq, Together, Mistral, DeepSeek, LM Studio, vLLM, ...) | API provider | yes (`openai_compatible`) | yes | yes (LiteLLM) | yes |
+| Codex CLI (`codex`) | refused | no | no | no | no |
+| Antigravity CLI (`agy`) | refused | no | no | no | no |
+
+Notes on individual paths:
+
+- **OpenCode** is supported at exactly version 1.18.33 (SkillSpector fails closed on any other version) and is run with a deny-all tool policy. It can log in with a ChatGPT Plus/Pro subscription, GitHub Copilot, and many API providers. The free OpenCode Zen models refuse SkillSpector's sandbox, so pick another model.
+- **Gemini CLI**: Google no longer offers the Gemini CLI subscription login to private users, so it is never auto-picked and works only when you name `gemini_cli`. For the Gemini API use a key with the OpenAI-compatible endpoint, or the `gemini` provider through Google Cloud Application Default Credentials.
+- **Codex CLI is refused** because its read-only sandbox still lets model-driven commands read files on the machine, which scanned content could steer ([NVIDIA/SkillSpector#737](https://github.com/NVIDIA/SkillSpector/issues/737)). **Antigravity CLI is refused** because `agy` prints nothing to a pipe, so SkillSpector cannot read its answer.
+- **Campaigns** speak the OpenAI protocol only; most API providers offer a compatible endpoint.
+- Non-secret provider settings (an endpoint, region, or deployment) go into the profile's `settings` table; keys only through `key_env`. URL settings must be `https` (plain `http` only for `localhost`, `127.0.0.1`, or `::1`). See `config.example.toml`.
+
 With a [personal config file](#configuration-prefer-environment-variables), `[llm.use]` names one profile per layer instead (`skills`, `mcp`, plus `campaign` for budgeted scans) and the environment variables in this table are only read for keys; `python scripts/llm_check.py` shows what each scanner will use. Token limits for models SkillSpector does not know yet come from the profile (`context`, `max_output`), and `reasoning = true` lets the Cisco scanner treat a new model as a reasoning model that its pinned LiteLLM does not recognise yet.
 
-**SkillSpector provider resolution** (`scripts/_skillspector.py`): `AGENT_GUARD_STATIC_ONLY=1` disables the LLM layer only; static analyzers can still use configured lookups such as OSV. An active config profile decides next and ignores stale `SKILLSPECTOR_*` settings. Otherwise an explicit `SKILLSPECTOR_PROVIDER` is used and validated (a CLI provider needs its binary on PATH, a hosted one its key). With no provider named, a hosted key in the environment wins, then the first of `claude`, `codex`, `gemini` found on PATH. If nothing is usable the scan runs static-only and says so in the verdict line. With `SKILLSPECTOR_MODEL` you can pin a model (for `claude_cli` e.g. `claude-sonnet-5`; for a cost-conscious Codex CLI scan, `gpt-5.6-luna`); leave it empty to use the CLI's own default. A model from another vendor is ignored with a note. The wrapper also starts SkillSpector inside its own tool environment with the aggregate scan deadline raised from upstream's hard-coded 60 s to `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` (default: `AGENT_GUARD_SCAN_TIMEOUT` minus 60 s), because CLI providers exhaust the 60 s budget on medium-sized skills and would otherwise end in NO VERDICT (upstream: NVIDIA/SkillSpector#460).
+**SkillSpector provider resolution** (`scripts/_skillspector.py`): `AGENT_GUARD_STATIC_ONLY=1` disables the LLM layer only; static analyzers can still use configured lookups such as OSV. An active config profile decides next and ignores stale `SKILLSPECTOR_*` settings. Otherwise an explicit `SKILLSPECTOR_PROVIDER` is used and validated (a CLI provider needs its binary on PATH, a hosted one its key). With no provider named, a hosted key in the environment wins (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `NVIDIA_INFERENCE_KEY`, in that order), then the first of `claude`, `opencode` found on PATH. `SKILLSPECTOR_PROVIDER=gemini` means the Google Cloud ADC API provider, not the Gemini CLI (that one is `gemini_cli`). If nothing is usable the scan runs static-only and says so in the verdict line. With `SKILLSPECTOR_MODEL` you can pin a model (`<model-id>`); leave it empty to use the CLI's own default. A model from another vendor is ignored with a note. The wrapper also starts SkillSpector inside its own tool environment with the aggregate scan deadline raised from upstream's hard-coded 60 s to `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` (default: `AGENT_GUARD_SCAN_TIMEOUT` minus 60 s), because CLI providers exhaust the 60 s budget on medium-sized skills and would otherwise end in NO VERDICT (upstream: NVIDIA/SkillSpector#460).
 
 **Why a separate LLM process instead of letting the installing agent judge the code?** Two reasons. (1) The LLM layer is not just a summary of the static findings — SkillSpector's semantic analyzers read the raw files and look for the residual gap: prompt injection, exfiltration instructions, and obfuscated intent phrased in natural language that regex/YARA cannot encode. (2) To judge semantically, an LLM must ingest the untrusted content — and the agent that installs the skill is exactly the target a poisoned SKILL.md is written for. The scanner therefore runs the model as a separate process with no tools, no MCP servers, no settings (`claude -p --permission-mode dontAsk --strict-mcp-config --setting-sources=`), feeds the content via stdin, and forces a JSON-schema answer. The verdict is an exit code the agent receives *before* it reads anything. The CLI providers give you that isolation on your existing subscription.
 

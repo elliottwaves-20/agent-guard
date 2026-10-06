@@ -8,7 +8,7 @@ description: >
   and backdoors. Skills and the static MCP source scan use NVIDIA SkillSpector
   (static patterns + taint tracking + YARA + live OSV.dev CVE lookup + LLM
   semantic analysis, which runs by default through the user's own claude /
-  codex / gemini CLI login — no API key — or any hosted provider with a key);
+  claude / opencode CLI login — no API key — or any hosted provider with a key; codex and antigravity are refused);
   the optional live MCP runtime check uses cisco-ai-mcp-scanner with separate
   MCP_SCANNER_LLM_* settings and any LiteLLM-supported provider. Skills follow the open SKILL.md standard
   (agentskills.io) and MCP is an open protocol, so one scan covers every agent:
@@ -109,13 +109,14 @@ Install the scanner binaries, isolated via uv:
 
 This installs `skillspector` (pinned to the exact commit of a tagged release)
 and `mcp-scanner`. SkillSpector's LLM layer needs **no configuration** when a
-logged-in `claude`, `codex`, or `gemini` CLI is on PATH — the wrapper
+logged-in `claude` or `opencode` CLI is on PATH — the wrapper
 auto-detects it. Prefer process or user environment variables to pick a provider
 explicitly or configure optional layers; no `.env` file is required:
 
-- `SKILLSPECTOR_PROVIDER` — `claude_cli` / `codex_cli` / `gemini_cli` (CLI
-  login, default) or a hosted provider (`anthropic`, `openai`, `nv_build`,
-  `bedrock`, `ollama`, ...) with its key. `AGENT_GUARD_STATIC_ONLY=1` forces
+- `SKILLSPECTOR_PROVIDER` — `claude_cli` / `opencode_cli` (CLI login,
+  default), `gemini_cli` (only when named) or a hosted provider (`anthropic`,
+  `openai`, `nv_build`, `bedrock`, `ollama`, ...) with its key. `codex_cli`
+  and `antigravity_cli` are refused; `gemini` is the Google ADC API provider. `AGENT_GUARD_STATIC_ONLY=1` forces
   analysis with the LLM disabled; static analyzers can still make their configured
   network lookups.
 - `MCP_SCANNER_LLM_*` with any LiteLLM-supported provider (API key) for Cisco
@@ -242,8 +243,8 @@ python "$SKILL_DIR/scripts/scan_skill.py" "$WORKDIR/src/<skill-dir>"
 echo "scanner exit code: $?"   # 0 = risk<=50, 1 = risk>50, 2 = error
 ```
 
-(Provider and model come from `.env` or auto-detection — a logged-in `claude`,
-`codex`, or `gemini` CLI is enough. Without any usable provider the wrapper runs
+(Provider and model come from `.env` or auto-detection — a logged-in `claude` or
+`opencode` CLI is enough. Without any usable provider the wrapper runs
 SkillSpector static-only and says so.)
 
 If the repo contains multiple skills, scan each one for its own verdict
@@ -651,7 +652,7 @@ uv tool install package-name --link-mode=copy
 | `python "$SKILL_DIR/scripts/scan_skill.py" --all <dir>` | Scan each `SKILL.md` directory under a tree separately |
 | `python "$SKILL_DIR/scripts/scan_skill.py" <path> --report <new.json>` | Preserve the scanner report for review; never overwrite an existing file |
 | `python "$SKILL_DIR/scripts/scan_skill.py" <path> --baseline <reviewed.json>` | Explicit reviewer-owned v2 JSON fingerprints only; accepted findings and reasons remain visible |
-| SkillSpector LLM | Used automatically with a logged-in `claude`/`codex`/`gemini` CLI on PATH, or with a hosted provider key (`SKILLSPECTOR_PROVIDER` + credential) |
+| SkillSpector LLM | Used automatically with a logged-in `claude`/`opencode` CLI on PATH, or with a hosted provider key (`SKILLSPECTOR_PROVIDER` + credential) |
 | Static-only mode | Used automatically when no usable provider exists, or forced with `AGENT_GUARD_STATIC_ONLY=1` |
 
 For baseline review, follow README's "Reviewing self-scan findings" section.

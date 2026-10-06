@@ -65,7 +65,7 @@ def main() -> None:
     verifier, spans = _verifier.from_setup(), _parse_spans.from_skillspector()
     yara = _yara_recheck.from_skillspector()
     if verifier is None:
-        sys.exit("no agent-CLI verifier profile")
+        sys.exit("no verifier (LLM not ready or provider refused)")
     samples = [s for s in _eval.load() if not args.only or s.id in args.only]
     OUT.mkdir(parents=True, exist_ok=True)
     results = OUT / f"benign-holdout{args.tag}.jsonl"

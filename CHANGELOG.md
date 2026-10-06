@@ -14,6 +14,29 @@
   the same path (`--add NAME --source owner/repo`); `--import-lock` adopts the
   GitHub entries of the skills CLI's global lock. A changed project-lock format
   stops with an error instead of being guessed around.
+- **LLM access paths.** SkillSpector's provider catalog now lives in
+  `scripts/_providers.py` (CLI logins `claude`, `opencode`, `gemini`; API
+  providers `anthropic`, `openai`, `openai_compatible`, `azure_openai`,
+  `bedrock`, `gemini` through Google ADC, `nv_build`, `nv_inference`, `ollama`,
+  `anthropic_proxy`) and drives profiles and the legacy environment resolution.
+  Autodetection picks a key (`anthropic`, `openai`, `nv_build`) first, then a CLI
+  (`claude`, `opencode`); `gemini_cli` is used only when named explicitly.
+- Profiles accept an optional `settings = { VAR = "value" }` table, limited to
+  the provider's non-secret settings (endpoint, region, deployment). URL
+  settings must be https (plain http only for localhost, 127.0.0.1, ::1).
+  Keys still come only through `key_env`.
+- The verifier now runs through SkillSpector's own client with the scan's
+  environment, so every enabled provider (CLI login or API key) can verify;
+  `python scripts/llm_check.py` shows a `verifier` row.
+- **Refused providers.** `codex_cli` (its read-only sandbox still lets
+  model-driven commands read files on the machine, NVIDIA/SkillSpector#737)
+  and `antigravity_cli` (prints nothing to a pipe) fail with a clear reason
+  instead of running.
+- **Behaviour change:** `SKILLSPECTOR_PROVIDER=gemini` now selects the Google
+  Cloud ADC API provider. It used to be an alias for the Gemini CLI; use
+  `gemini_cli` for that.
+- SkillSpector pin moved to NVIDIA main `ef0f96d` (adds #704, #709, #737, #738
+  and the gemini ADC provider).
 - `[distribution]` accepts the optional keys `origins`, `backup` and
   `quarantine`; without them nothing changes.
 - SkillSpector is pinned to v2.12.0 plus the merged upstream fix

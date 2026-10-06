@@ -19,6 +19,10 @@ CONFIG = {"llm": {"use": {"skills": "luna", "mcp": "cerebras", "campaign": "cere
 }}}
 
 
+def config(use=None, **profiles):
+    return {"llm": {"use": use or {}, "profiles": profiles}}
+
+
 def rows_by_scanner(rows):
     return {row["scanner"]: row for row in rows}
 
@@ -58,6 +62,20 @@ class DescribeTests(unittest.TestCase):
         self.assertEqual(rows["mcp"]["model"], "openai/gpt-x")
         self.assertFalse(rows["mcp"]["ready"])
         self.assertEqual(rows["campaign"]["source"], "not configured")
+
+    def test_verifier_row_follows_the_skills_row(self):
+        cfg = config({"skills": "claude"}, claude={"kind": "cli", "cli": "claude"})
+        rows = llm_check.describe(cfg, {}, which=lambda n: f"/bin/{n}")
+        scanners = [r["scanner"] for r in rows]
+        self.assertEqual(scanners[:2], ["skills", "verifier"])
+        self.assertEqual(rows[1]["connection"], rows[0]["connection"])
+        self.assertEqual(rows[1]["ready"], rows[0]["ready"])
+
+    def test_disabled_provider_shows_its_reason(self):
+        cfg = config({"skills": "luna"}, luna={"kind": "cli", "cli": "codex"})
+        rows = llm_check.describe(cfg, {}, which=lambda n: f"/bin/{n}")
+        self.assertIn("codex_cli is disabled", rows[0]["problem"])
+        self.assertIn("codex_cli is disabled", rows[1]["problem"])
 
 
 if __name__ == "__main__":

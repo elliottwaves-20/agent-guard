@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Show which LLM each scanner will use, and optionally probe one connection.
 
-  python llm_check.py                 # table for skills / mcp / campaign, no network
+  python llm_check.py                 # table for skills / verifier / mcp / campaign, no network
   python llm_check.py --probe skills  # ONE request through SkillSpector's own client
   python llm_check.py --probe mcp     # ONE request through the Cisco scanner's LiteLLM
 
@@ -77,6 +77,11 @@ def describe(config: dict, env, which=shutil.which, legacy_skills=None) -> list[
             rows.append(build())
         except _llm_profile.ProfileError as exc:
             rows.append(_row(scanner, "invalid profile", problem=str(exc)))
+    # The verifier runs through SkillSpector's own client with the scan's
+    # environment, so it always shares the skills connection.
+    skills = rows[0]
+    rows.insert(1, _row("verifier", f"follows skills ({skills['source']})", skills["connection"],
+                        skills["model"], skills["ready"], skills["problem"]))
     return rows
 
 

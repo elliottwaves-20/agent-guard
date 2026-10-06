@@ -27,7 +27,8 @@ mcp = "openai-compatible"
 
 # -- Profiles -----------------------------------------------------------------
 # A coding-agent CLI login: no API key. `cli` is the binary name; SkillSpector
-# provider "<cli>_cli" must exist (claude, gemini, opencode; codex is refused).
+# provider "<cli>_cli" must exist (claude, opencode, gemini; codex and
+# antigravity are refused).
 # Omit `model` to use the CLI's own default model.
 [llm.profiles.claude]
 kind = "cli"
@@ -69,6 +70,50 @@ protocol = "native"
 provider = "anthropic"
 model = "<model-id>"
 key_env = "ANTHROPIC_API_KEY"
+
+# `settings` sets a scanner-native provider's NON-secret variables (endpoint,
+# region, deployment). Only the variables that provider documents are accepted;
+# URLs must be https (plain http only for localhost). Keys go through key_env.
+
+# OpenCode login (SkillSpector requires exactly OpenCode 1.18.33). Free OpenCode
+# Zen models refuse SkillSpector's sandbox; choose another model.
+# [llm.profiles.opencode]
+# kind = "cli"
+# cli = "opencode"
+# model = "<model-id>"
+
+# A local Ollama server.
+# [llm.profiles.ollama]
+# kind = "api"
+# protocol = "native"
+# provider = "ollama"
+# model = "<model-id>"
+# settings = { OLLAMA_BASE_URL = "http://localhost:11434" }
+
+# Azure OpenAI.
+# [llm.profiles.azure]
+# kind = "api"
+# protocol = "native"
+# provider = "azure_openai"
+# model = "<model-id>"
+# key_env = "AZURE_OPENAI_API_KEY"
+# settings = { AZURE_OPENAI_ENDPOINT = "https://<resource>.openai.azure.com" }
+
+# AWS Bedrock (credentials come from the usual AWS credential chain).
+# [llm.profiles.bedrock]
+# kind = "api"
+# protocol = "native"
+# provider = "bedrock"
+# model = "<model-id>"
+# settings = { AWS_REGION = "<region>" }
+
+# OpenRouter through the OpenAI protocol.
+# [llm.profiles.openrouter]
+# kind = "api"
+# protocol = "openai"
+# base_url = "https://openrouter.ai/api/v1"
+# model = "<model-id>"
+# key_env = "OPENROUTER_API_KEY"
 
 # -- Local skill distribution (optional) ---------------------------------------
 # Only for machines that already run their own skill distribution (one store,
