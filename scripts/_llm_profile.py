@@ -110,6 +110,12 @@ def _settings(name, profile):
                                f"{provider.id}; allowed: {', '.join(sorted(allowed)) or 'none'}")
         if not isinstance(value, str) or not value.strip():
             raise ProfileError(f"profile {name}: settings.{var} must be a non-empty string")
+        if var.endswith(("_URL", "_ENDPOINT")) and not (
+                value.startswith("https://") or value.startswith(_LOCAL_HTTP)):
+            raise ProfileError(f"profile {name}: settings.{var} must be https:// "
+                               "(plain http only for localhost)")
+        if var == "SKILLSPECTOR_COMPAT_BASE_URL" and profile.get("protocol") == "openai":
+            raise ProfileError(f"profile {name}: settings.{var} is set by base_url")
 
 
 def validate_profile(name: str, profile) -> dict:

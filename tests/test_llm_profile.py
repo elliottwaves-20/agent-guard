@@ -312,10 +312,6 @@ class CiscoWrapperProfileTests(unittest.TestCase):
         self.assertIn("MCP_SCANNER_LLM_API_KEY", problem)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 OPENCODE = {"kind": "cli", "cli": "opencode"}
 GEMINI_ADC = {"kind": "api", "protocol": "native", "provider": "gemini", "model": "<model-id>",
               "settings": {"GOOGLE_CLOUD_PROJECT": "demo-project"}}
@@ -379,3 +375,23 @@ class OpennessTests(unittest.TestCase):
         env, _ready, _r, _ = lp.skillspector_env(
             "g", lp.validate_profile("g", GEMINI_ADC), {"GOOGLE_CLOUD_PROJECT": "old"})
         self.assertEqual(env["GOOGLE_CLOUD_PROJECT"], "demo-project")
+
+    def test_settings_urls_follow_the_https_rule_of_base_url(self):
+        ollama = {"kind": "api", "protocol": "native", "provider": "ollama", "model": "<model-id>"}
+        azure_ep = "AZURE_OPENAI_ENDPOINT"
+        for profile, bad in ((ollama, {"OLLAMA_BASE_URL": "http://10.0.0.5:11434"}),
+                             (AZURE, {azure_ep: "http://x"})):
+            with self.subTest(settings=bad), self.assertRaises(lp.ProfileError) as ctx:
+                lp.validate_profile("p", dict(profile, settings=bad))
+            self.assertIn(next(iter(bad)), str(ctx.exception))
+        for url in ("http://localhost:11434", "https://gpu.example:11434"):
+            lp.validate_profile("p", dict(ollama, settings={"OLLAMA_BASE_URL": url}))
+
+    def test_openai_protocol_base_url_cannot_be_overridden_by_settings(self):
+        profile = dict(CEREBRAS, settings={"SKILLSPECTOR_COMPAT_BASE_URL": "https://other.example"})
+        with self.assertRaises(lp.ProfileError):
+            lp.validate_profile("c", profile)
+
+
+if __name__ == "__main__":
+    unittest.main()
