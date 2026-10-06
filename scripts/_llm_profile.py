@@ -199,7 +199,18 @@ def skillspector_env(name: str, profile: dict, env, which=shutil.which):
     ready, reason = True, f"profile {name}"
     model = profile.get("model", "").strip()
     out["SKILLSPECTOR_PROVIDER"] = provider.id
-    if profile["kind"] == "cli":
+    # A provider setting in the environment that the profile does not set would
+    # be dropped silently (SkillSpector then falls back to its own region or
+    # endpoint, possibly another account). Fail closed and say where to move it.
+    profile_sets = set(profile.get("settings", {}))
+    if profile.get("protocol") == "openai":
+        profile_sets.add("SKILLSPECTOR_COMPAT_BASE_URL")
+    stray = next((v for v in provider.settings
+                  if env.get(v, "").strip() and v not in profile_sets), None)
+    if stray:
+        ready, reason = False, (f"profile {name}: {stray} is set in the environment "
+                                "but not in the profile's settings; move it into settings")
+    elif profile["kind"] == "cli":
         if which(provider.binary):
             reason = f"profile {name}: {provider.binary} CLI (local login)"
         else:

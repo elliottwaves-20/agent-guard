@@ -376,6 +376,30 @@ class OpennessTests(unittest.TestCase):
             "g", lp.validate_profile("g", GEMINI_ADC), {"GOOGLE_CLOUD_PROJECT": "old"})
         self.assertEqual(env["GOOGLE_CLOUD_PROJECT"], "demo-project")
 
+    def test_provider_setting_in_env_but_not_in_profile_is_not_ready(self):
+        bedrock = {"kind": "api", "protocol": "native", "provider": "bedrock",
+                   "model": "<model-id>"}
+        _env, ready, reason, _ = lp.skillspector_env(
+            "b", lp.validate_profile("b", bedrock), {"AWS_REGION": "eu-central-1"})
+        self.assertFalse(ready)
+        self.assertIn("AWS_REGION is set in the environment but not in the profile's "
+                      "settings; move it into settings", reason)
+        with_settings = dict(bedrock, settings={"AWS_REGION": "eu-west-1"})
+        env, ready, reason, _ = lp.skillspector_env(
+            "b", lp.validate_profile("b", with_settings), {"AWS_REGION": "eu-central-1"})
+        self.assertTrue(ready, reason)
+        self.assertEqual(env["AWS_REGION"], "eu-west-1")
+        _env, ready, reason, _ = lp.skillspector_env(
+            "b", lp.validate_profile("b", bedrock), {})
+        self.assertTrue(ready, reason)
+
+    def test_anthropic_proxy_url_in_env_is_not_dropped_silently(self):
+        _env, ready, reason, _ = lp.skillspector_env(
+            "h", lp.validate_profile("h", HAIKU),
+            {"ANTHROPIC_BASE_URL": "https://proxy.example", "ANTHROPIC_API_KEY": "k"})
+        self.assertFalse(ready)
+        self.assertIn("ANTHROPIC_BASE_URL", reason)
+
     def test_settings_urls_follow_the_https_rule_of_base_url(self):
         ollama = {"kind": "api", "protocol": "native", "provider": "ollama", "model": "<model-id>"}
         azure_ep = "AZURE_OPENAI_ENDPOINT"
