@@ -13,7 +13,7 @@ truth for how a scan is run and judged.
 
 LLM providers: SkillSpector's semantic analyzers run against whatever
 SKILLSPECTOR_PROVIDER names. The recommended default is a coding-agent CLI
-(claude_cli / codex_cli / gemini_cli): the scanner starts the CLI as a separate
+(claude_cli / opencode_cli / gemini_cli): the scanner starts the CLI as a separate
 tool-less process, feeds the untrusted content via stdin, and validates the
 answer against a JSON schema -- so the scanning LLM stays isolated from the
 agent that later installs the skill, and no API key is needed. Hosted API
@@ -89,6 +89,7 @@ load_agent_guard_env()
 # every wrapper before anything is scanned -- ignoring it silently would run
 # the scan with settings the user did not choose.
 import _llm_profile
+import _providers
 from _parse_spans import PARSE_SPAN_ANALYZERS
 import _user_config
 try:
@@ -286,41 +287,22 @@ def skillspector_command() -> list:
 # This provider config is for SkillSpector only. scan_mcp.py has a separate
 # Cisco runtime LLM config based on MCP_SCANNER_LLM_* (LiteLLM; no CLI path).
 
-# Coding-agent CLIs SkillSpector can drive with the user's existing login.
-# Order = auto-detection preference.
-CLI_PROVIDERS = {
-    "claude_cli": "claude",
-    "codex_cli": "codex",
-    "gemini_cli": "gemini",
-}
-
+# Coding-agent CLIs SkillSpector can drive with the user's existing login, in
+# auto-detection order. Refused providers (Codex, Antigravity) are not listed.
+CLI_PROVIDERS = {pid: _providers.CATALOG[pid].binary for pid in _providers.AUTODETECT_CLIS}
 # Hosted providers and the env vars they need (shared with the profile layer).
-KEY_PROVIDERS = _llm_profile.SKILLSPECTOR_KEY_VARS
+KEY_PROVIDERS = {p.id: p.required for p in _providers.CATALOG.values()
+                 if p.kind == "api" and not p.disabled}
 # Auto-detection only considers the unambiguous key providers, in this order.
-KEY_AUTODETECT_ORDER = ("anthropic", "openai", "nv_build")
-
-# Providers that resolve credentials on their own (boto3 chain / local service).
-IMPLICIT_PROVIDERS = {"bedrock", "ollama"}
-
-PROVIDER_ALIASES = {
-    "claude": "claude_cli",
-    "codex": "codex_cli",
-    "gemini": "gemini_cli",
-    "openai-compatible": "openai_compatible",
-    "custom-openai": "openai_compatible",
-}
+KEY_AUTODETECT_ORDER = _providers.AUTODETECT_KEYS
+PROVIDER_ALIASES = _providers.ALIASES
 
 # A SKILLSPECTOR_MODEL is forwarded verbatim to the provider. For the vendor
 # CLIs and the native Anthropic provider a model from a different vendor can
-# only fail (e.g. a leftover `gpt-*` from an old OpenAI setup makes `claude
-# --model gpt-...` exit 1 on every call). If the model does not carry the
+# only fail (e.g. a leftover model id from an old OpenAI setup makes `claude
+# --model ...` exit 1 on every call). If the model does not carry the
 # vendor's marker it is dropped and the provider default is used instead.
-PROVIDER_MODEL_MARKERS = {
-    "claude_cli": ("claude",),
-    "anthropic": ("claude",),
-    "codex_cli": ("gpt", "codex", "o1", "o3", "o4"),
-    "gemini_cli": ("gemini",),
-}
+PROVIDER_MODEL_MARKERS = {p.id: p.markers for p in _providers.CATALOG.values() if p.markers}
 
 
 def model_matches_provider(provider: str, model: str) -> bool:
@@ -361,7 +343,8 @@ def resolve_llm() -> tuple[str, bool, str]:
       3. An explicit SKILLSPECTOR_PROVIDER is honoured and validated: a CLI
          provider needs its binary on PATH, a hosted one its credential(s).
       4. Otherwise auto-detect: a hosted credential in the environment wins
-         (explicit intent), then the first coding-agent CLI on PATH.
+         (explicit intent), then the first of claude, opencode found on PATH;
+         Codex and Antigravity are never used, gemini only when named.
     """
     if _static_only_forced():
         return "", False, "AGENT_GUARD_STATIC_ONLY is set"
@@ -372,25 +355,27 @@ def resolve_llm() -> tuple[str, bool, str]:
         return env["SKILLSPECTOR_PROVIDER"], ready, reason
 
     explicit = os.environ.get("SKILLSPECTOR_PROVIDER", "").strip().lower()
-    explicit = PROVIDER_ALIASES.get(explicit, explicit)
+    # A catalog id wins over a binary alias, so "gemini" stays the Google ADC provider.
+    if explicit and explicit not in _providers.CATALOG:
+        explicit = _providers.ALIASES.get(explicit, explicit)
 
     if explicit:
-        if explicit in CLI_PROVIDERS:
-            binary = CLI_PROVIDERS[explicit]
-            if shutil.which(binary):
-                return explicit, True, f"{binary} CLI (local login)"
+        provider = _providers.get(explicit)
+        if provider is None:
+            return explicit, False, f"unknown SKILLSPECTOR_PROVIDER={explicit}"
+        if provider.disabled:
+            return explicit, False, provider.disabled
+        if provider.kind == "cli":
+            if shutil.which(provider.binary):
+                return explicit, True, f"{provider.binary} CLI (local login)"
             return explicit, False, (f"SKILLSPECTOR_PROVIDER={explicit} but "
-                                     f"'{binary}' is not on PATH")
-        if explicit in KEY_PROVIDERS:
-            missing = [v for v in KEY_PROVIDERS[explicit]
-                       if not os.environ.get(v, "").strip()]
-            if not missing:
-                return explicit, True, f"{explicit} (API key)"
+                                     f"'{provider.binary}' is not on PATH")
+        missing = [v for v in provider.required if not os.environ.get(v, "").strip()]
+        if missing:
             return explicit, False, (f"SKILLSPECTOR_PROVIDER={explicit} but "
                                      f"{', '.join(missing)} is not set")
-        if explicit in IMPLICIT_PROVIDERS:
-            return explicit, True, f"{explicit} (provider-managed credentials)"
-        return explicit, False, f"unknown SKILLSPECTOR_PROVIDER={explicit}"
+        how = "API key" if provider.secrets else "provider-managed credentials"
+        return explicit, True, f"{explicit} ({how})"
 
     for provider in KEY_AUTODETECT_ORDER:
         if all(os.environ.get(v, "").strip() for v in KEY_PROVIDERS[provider]):
@@ -447,7 +432,7 @@ def skillspector_env() -> dict:
     e["SKILLSPECTOR_MAX_WORKFLOW_SECONDS"] = str(WORKFLOW_BUDGET)
     if LLM_READY:
         e["SKILLSPECTOR_PROVIDER"] = PROVIDER
-        is_cli = PROVIDER.endswith("_cli") if profile_active else PROVIDER in CLI_PROVIDERS
+        is_cli = getattr(_providers.get(PROVIDER), "kind", "") == "cli"
         # SkillSpector's own default fan-out is 10 parallel LLM calls, which suits a
         # normal API quota -- we leave it alone for key providers. A CLI provider is
         # different, and the difference is ours: every call becomes a separate CLI

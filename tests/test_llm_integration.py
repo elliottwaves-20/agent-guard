@@ -179,7 +179,7 @@ skills = "luna"
 [llm.profiles.luna]
 kind = "cli"
 cli = "claude"
-model = "gpt-6-luna"
+model = "<model-id>"
 
 [llm.profiles.haiku]
 kind = "cli"
@@ -220,13 +220,13 @@ model = "claude-haiku-4-5-20251001"
 
     def test_explicit_provider_bypasses_the_config(self):
         env = {"AGENT_GUARD_CONFIG": str(self.config),
-               "AGENT_GUARD_LLM_INTEGRATION_PROVIDER": "codex_cli",
-               "AGENT_GUARD_LLM_INTEGRATION_MODEL": "gpt-6-luna"}
+               "AGENT_GUARD_LLM_INTEGRATION_PROVIDER": "claude_cli",
+               "AGENT_GUARD_LLM_INTEGRATION_MODEL": "claude-test-model"}
         overlay, _ = live_selection(env)
         self.assertEqual(overlay["AGENT_GUARD_NO_USER_CONFIG"], "1")
         self.assertEqual(overlay["AGENT_GUARD_CONFIG"], "")
-        self.assertEqual(overlay["SKILLSPECTOR_PROVIDER"], "codex_cli")
-        self.assertEqual(overlay["SKILLSPECTOR_MODEL"], "gpt-6-luna")
+        self.assertEqual(overlay["SKILLSPECTOR_PROVIDER"], "claude_cli")
+        self.assertEqual(overlay["SKILLSPECTOR_MODEL"], "claude-test-model")
 
     def test_without_config_the_legacy_fallback_applies(self):
         with patch.object(_user_config, "find_config", return_value=None):

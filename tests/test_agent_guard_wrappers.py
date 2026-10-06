@@ -67,11 +67,32 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertIn("claude CLI", reason)
         self.assertEqual(env["SKILLSPECTOR_PROVIDER"], "claude_cli")
 
-    def test_provider_aliases_map_to_skillspector_ids(self):
-        provider, ready, _reason, _env = self._resolve(
+    def test_codex_alias_is_refused_with_the_reason(self):
+        provider, ready, reason, env = self._resolve(
             {"SKILLSPECTOR_PROVIDER": "codex"}, on_path=("codex",))
         self.assertEqual(provider, "codex_cli")
+        self.assertFalse(ready)
+        self.assertIn("codex_cli is disabled", reason)
+        self.assertNotIn("SKILLSPECTOR_PROVIDER", env)
+
+    def test_opencode_and_gemini_aliases(self):
+        provider, ready, _r, _e = self._resolve(
+            {"SKILLSPECTOR_PROVIDER": "opencode"}, on_path=("opencode",))
+        self.assertEqual((provider, ready), ("opencode_cli", True))
+
+    def test_gemini_adc_provider_needs_its_project(self):
+        provider, ready, reason, _e = self._resolve({"SKILLSPECTOR_PROVIDER": "gemini"})
+        self.assertEqual(provider, "gemini")
+        self.assertFalse(ready)
+        self.assertIn("GOOGLE_CLOUD_PROJECT", reason)
+        provider, ready, _r, _e = self._resolve(
+            {"SKILLSPECTOR_PROVIDER": "gemini", "GOOGLE_CLOUD_PROJECT": "p"})
         self.assertTrue(ready)
+
+    def test_bedrock_and_ollama_resolve_their_own_credentials(self):
+        for pid in ("bedrock", "ollama"):
+            provider, ready, _r, _e = self._resolve({"SKILLSPECTOR_PROVIDER": pid})
+            self.assertEqual((provider, ready), (pid, True))
 
     def test_explicit_key_provider_requires_its_credential(self):
         provider, ready, reason, _env = self._resolve(
@@ -96,6 +117,18 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertEqual((provider, ready), ("claude_cli", True))
         self.assertIn("auto-detected", reason)
         self.assertEqual(env["SKILLSPECTOR_PROVIDER"], "claude_cli")
+
+        provider, ready, _r, _e = self._resolve({}, on_path=("codex",))
+        self.assertEqual((provider, ready), ("", False))  # Codex is never auto-picked
+
+        provider, ready, _r, _e = self._resolve({}, on_path=("codex", "opencode"))
+        self.assertEqual((provider, ready), ("opencode_cli", True))
+
+        provider, ready, _r, _e = self._resolve({}, on_path=("gemini",))
+        self.assertEqual((provider, ready), ("", False))  # gemini_cli only when named
+
+        provider, ready, _r, _e = self._resolve({}, on_path=("opencode", "claude"))
+        self.assertEqual(provider, "claude_cli")
 
         provider, ready, reason, env = self._resolve({}, on_path=())
         self.assertEqual((provider, ready), ("", False))

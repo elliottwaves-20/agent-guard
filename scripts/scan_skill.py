@@ -7,7 +7,7 @@ cross-platform handling as the MCP wrapper:
   - UTF-8 is forced (SkillSpector's terminal report crashes on a legacy Windows
     cp1252 console otherwise),
   - the LLM layer runs through the configured SKILLSPECTOR_PROVIDER -- by
-    default a coding-agent CLI (claude_cli / codex_cli / gemini_cli) using the
+    default a coding-agent CLI (claude_cli / opencode_cli / gemini_cli) using the
     user's existing login, or any hosted provider with an API key; without a
     usable provider it runs static-only (patterns, taint, YARA, OSV.dev),
   - a fail-closed [SAFE] / [BLOCK] verdict is parsed from JSON, including

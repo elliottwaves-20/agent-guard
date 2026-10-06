@@ -23,20 +23,6 @@ from urllib.parse import urlsplit
 
 import _providers
 
-# Credential (and endpoint) variables per SkillSpector provider. The first
-# entry is where a native profile's key is copied to.
-SKILLSPECTOR_KEY_VARS = {
-    "anthropic": ("ANTHROPIC_API_KEY",),
-    "openai": ("OPENAI_API_KEY",),
-    "nv_build": ("NVIDIA_INFERENCE_KEY",),
-    "nv_inference": ("NVIDIA_INFERENCE_KEY",),
-    "anthropic_proxy": ("ANTHROPIC_PROXY_API_KEY", "ANTHROPIC_PROXY_ENDPOINT_URL"),
-    "azure_openai": ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"),
-    "openai_compatible": ("SKILLSPECTOR_COMPAT_API_KEY", "SKILLSPECTOR_COMPAT_BASE_URL"),
-}
-# Providers that resolve credentials themselves (boto3 chain / local service).
-KEYLESS_PROVIDERS = {"bedrock", "ollama"}
-
 # "campaign" = budgeted scans via llm_scan.py (dollar ledger over HTTP).
 SCANNERS = {"skills": "AGENT_GUARD_LLM_SKILLS", "mcp": "AGENT_GUARD_LLM_MCP",
             "campaign": "AGENT_GUARD_LLM_CAMPAIGN"}
