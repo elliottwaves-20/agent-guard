@@ -167,7 +167,10 @@ def run_boot(python: str, env: dict, prompts: list, timeout: float = 300) -> lis
     except OSError as exc:
         return [{"ok": False, "error": f"verifier could not start: {type(exc).__name__}"}] * len(prompts)
     if done.returncode != 0:
-        return [{"ok": False, "error": f"verifier exited {done.returncode}"}] * len(prompts)
+        tail = (done.stderr or b"")[-300:].decode("utf-8", errors="replace").strip()
+        detail = f": {tail}" if tail else ""
+        return [{"ok": False,
+                 "error": f"verifier exited {done.returncode}{detail}"}] * len(prompts)
     try:
         out = json.loads(done.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):

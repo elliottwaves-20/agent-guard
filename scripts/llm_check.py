@@ -65,7 +65,8 @@ def _campaign_row(config, env):
                 ready, "" if ready else f"profile {name}: {policy['key_env']} is not set")
 
 
-def describe(config: dict, env, which=shutil.which, legacy_skills=None) -> list[dict]:
+def describe(config: dict, env, which=shutil.which, legacy_skills=None,
+             skillspector_python=None) -> list[dict]:
     """One row per scanner. Configuration problems become row problems."""
     legacy = legacy_skills or ("", False, "legacy env resolution; see the scan banner")
     builders = (("skills", lambda: _skills_row(config, env, which, legacy)),
@@ -79,9 +80,16 @@ def describe(config: dict, env, which=shutil.which, legacy_skills=None) -> list[
             rows.append(_row(scanner, "invalid profile", problem=str(exc)))
     # The verifier runs through SkillSpector's own client with the scan's
     # environment, so it always shares the skills connection.
+    # It also needs SkillSpector's own Python environment to start.
+    if skillspector_python is None:
+        import _skillspector
+        skillspector_python = _skillspector.skillspector_python
     skills = rows[0]
+    ready, problem = skills["ready"], skills["problem"]
+    if not skillspector_python():
+        ready, problem = False, "SkillSpector tool Python not found"
     rows.insert(1, _row("verifier", f"follows skills ({skills['source']})", skills["connection"],
-                        skills["model"], skills["ready"], skills["problem"]))
+                        skills["model"], ready, problem))
     return rows
 
 
@@ -147,6 +155,7 @@ def main() -> int:
     args = parser.parse_args()
     import _skillspector as ss
     rows = describe(ss.USER_CONFIG, os.environ, which=shutil.which,
+                    skillspector_python=ss.skillspector_python,
                     legacy_skills=(ss.PROVIDER, ss.LLM_READY, ss.LLM_REASON))
     for row in rows:
         state = "ready" if row["ready"] else "NOT READY"

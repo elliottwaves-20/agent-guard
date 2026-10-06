@@ -730,7 +730,7 @@ optional malware-reputation layer:
 | Claude Code CLI (`claude`) | CLI login | yes (auto-detected) | yes | no | no |
 | OpenCode CLI (`opencode`) | CLI login | yes (auto-detected) | yes | no | no |
 | Gemini CLI (`gemini`) | CLI login | only when named explicitly | yes | no | no |
-| Anthropic, OpenAI, Azure OpenAI, AWS Bedrock, Google Gemini via ADC (`gemini`), NVIDIA, Ollama, Anthropic proxy | API provider | yes (Anthropic, OpenAI, NVIDIA auto-detected by key) | yes | LiteLLM-supported providers, with a key | OpenAI protocol only |
+| Anthropic, OpenAI, Azure OpenAI, AWS Bedrock, Google Gemini via ADC (`gemini`), NVIDIA, Ollama, Anthropic proxy | API provider | yes (Anthropic, OpenAI, NVIDIA auto-detected by key) | yes | where LiteLLM supports the provider (Cisco needs `MCP_SCANNER_LLM_*` settings) | OpenAI protocol only |
 | OpenAI-compatible endpoint (OpenRouter, Groq, Together, Mistral, DeepSeek, LM Studio, vLLM, ...) | API provider | yes (`openai_compatible`) | yes | yes (LiteLLM) | yes |
 | Codex CLI (`codex`) | refused | no | no | no | no |
 | Antigravity CLI (`agy`) | refused | no | no | no | no |

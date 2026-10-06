@@ -34,7 +34,18 @@
   instead of running.
 - **Behaviour change:** `SKILLSPECTOR_PROVIDER=gemini` now selects the Google
   Cloud ADC API provider. It used to be an alias for the Gemini CLI; use
-  `gemini_cli` for that.
+  `gemini_cli` for that. Anyone who sets `GOOGLE_CLOUD_PROJECT` together with
+  `SKILLSPECTOR_PROVIDER=gemini` now uses the Vertex/Gemini API billed per
+  token instead of the Gemini CLI login.
+- **Behaviour change:** an explicitly chosen provider (`SKILLSPECTOR_PROVIDER`
+  or an active LLM profile) that is refused, unknown or not ready now ends in
+  NO VERDICT (exit 2) instead of a static-only SAFE. For an intentional
+  static-only policy set `AGENT_GUARD_STATIC_ONLY=1`.
+- **Behaviour change:** with an active LLM profile, a provider setting that is
+  set in the environment but not in the profile's `settings` (for example
+  `AWS_REGION`, `AWS_PROFILE`, `ANTHROPIC_BASE_URL`) makes the profile not
+  ready instead of being dropped silently. Move such variables into the
+  profile's `settings`.
 - SkillSpector is pinned to a reviewed commit of NVIDIA main, `ef0f96d`
   (includes #697, #704, #709, #737, #738 and the gemini ADC provider). The pin
   moves to the release tag with SkillSpector 2.13.0.

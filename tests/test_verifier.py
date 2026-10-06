@@ -304,6 +304,15 @@ class BootFailureTests(unittest.TestCase):
     def test_nonzero_exit(self):
         self._all_failed(self._run("import sys" + NL + "sys.exit(3)" + NL))
 
+    def test_nonzero_exit_carries_the_stderr_tail(self):
+        script = ("import sys" + NL + "sys.stderr.write('x' * 500 + 'ImportError: boom')" + NL
+                  + "sys.exit(3)" + NL)
+        out = self._run(script)
+        self._all_failed(out)
+        self.assertTrue(out[0]["error"].startswith("verifier exited 3: "))
+        self.assertTrue(out[0]["error"].endswith("ImportError: boom"))
+        self.assertLess(len(out[0]["error"]), 340)
+
     def test_non_json_output(self):
         self._all_failed(self._run("print('not json')" + NL))
 
