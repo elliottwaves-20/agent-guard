@@ -779,9 +779,11 @@ class SkillSpectorWrapperTests(unittest.TestCase):
 
         original_state = (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
                           module.SKILLSPECTOR, module.run_bounded)
+        saved_explicit = module.LLM_EXPLICIT
         try:
             module.PROVIDER = ""
             module.LLM_READY = False
+            module.LLM_EXPLICIT = False   # nothing named, nothing found
             module.LLM_REASON = "no LLM provider configured"
             module.SKILLSPECTOR = "skillspector"
             module.SKILLSPECTOR_CMD = ["skillspector"]
@@ -802,9 +804,59 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         finally:
             (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
              module.SKILLSPECTOR, module.run_bounded) = original_state
+            module.LLM_EXPLICIT = saved_explicit
 
         self.assertEqual(len(calls), 1)
         self.assertIn("--no-llm", calls[0])
+
+    def _clean_verdict(self, env, on_path=()):
+        """Exit code of verdict_skillspector for a clean report, with the
+        provider resolution run under a controlled environment."""
+        import shutil
+        old_env = os.environ.copy()
+        old_which = shutil.which
+        out = io.StringIO()
+        try:
+            os.environ.clear()
+            os.environ.update({"AGENT_GUARD_NO_DOTENV": "1",
+                               "AGENT_GUARD_NO_USER_CONFIG": "1", **env})
+            shutil.which = lambda name, *a, **k: (f"/fake/bin/{name}"
+                                                  if name in on_path else None)
+            module = importlib.reload(importlib.import_module("_skillspector"))
+            with tempfile.TemporaryDirectory() as d:
+                report = Path(d) / "report.json"
+                self._write_report(report, metadata={"llm_available": False})
+                with contextlib.redirect_stdout(out):
+                    code = module.verdict_skillspector(report, 0)
+            return code, out.getvalue()
+        finally:
+            shutil.which = old_which
+            os.environ.clear()
+            os.environ.update(old_env)
+            importlib.reload(importlib.import_module("_skillspector"))
+
+    def test_explicit_refused_provider_gives_no_verdict(self):
+        code, text = self._clean_verdict({"SKILLSPECTOR_PROVIDER": "codex"},
+                                         on_path=("codex",))
+        self.assertEqual(code, 2)
+        self.assertIn("codex_cli is disabled", text)
+        self.assertIn("AGENT_GUARD_STATIC_ONLY=1", text)
+
+    def test_explicit_provider_without_key_gives_no_verdict(self):
+        code, text = self._clean_verdict({"SKILLSPECTOR_PROVIDER": "anthropic"})
+        self.assertEqual(code, 2)
+        self.assertIn("NO VERDICT", text)
+
+    def test_nothing_named_and_nothing_found_stays_static_safe(self):
+        code, text = self._clean_verdict({})
+        self.assertEqual(code, 0)
+        self.assertIn("static only", text)
+
+    def test_static_only_policy_allows_static_verdict_despite_named_provider(self):
+        code, _text = self._clean_verdict({"SKILLSPECTOR_PROVIDER": "codex",
+                                           "AGENT_GUARD_STATIC_ONLY": "1"},
+                                          on_path=("codex",))
+        self.assertEqual(code, 0)
 
     def test_virustotal_verdict_fails_closed_on_throttled_or_failed_lookups(self):
         scan_mcp = importlib.import_module("scan_mcp")

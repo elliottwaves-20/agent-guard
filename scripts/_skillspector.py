@@ -389,6 +389,32 @@ def resolve_llm() -> tuple[str, bool, str]:
 PROVIDER, LLM_READY, LLM_REASON = resolve_llm()
 
 
+def _llm_explicit() -> bool:
+    """True when the user named a provider (SKILLSPECTOR_PROVIDER or an active
+    LLM profile) and did not opt out with AGENT_GUARD_STATIC_ONLY."""
+    if _static_only_forced():
+        return False
+    return bool(LLM_PROFILE) or bool(
+        os.environ.get("SKILLSPECTOR_PROVIDER", "").strip())
+
+
+# One rule for every path: a named provider that is refused, unknown or not
+# ready never degrades silently to a static-only SAFE.
+LLM_EXPLICIT = _llm_explicit()
+
+
+def explicit_llm_gap() -> str | None:
+    """The NO VERDICT message when the user chose a provider that cannot run,
+    else None. Static-only SAFE stays for nothing named plus nothing found, and
+    for AGENT_GUARD_STATIC_ONLY=1."""
+    if LLM_EXPLICIT and not LLM_READY:
+        return ("[BLOCK] NO VERDICT -- the chosen LLM provider cannot run: "
+                f"{LLM_REASON}. A static-only scan is not a substitute for the "
+                "analysis you configured. Fix the provider (see .env.example) or "
+                "set AGENT_GUARD_STATIC_ONLY=1 for an explicit static-only policy.")
+    return None
+
+
 def skillspector_llm_usable() -> bool:
     """Whether SkillSpector's LLM layer will run for this scan."""
     return LLM_READY
@@ -554,6 +580,10 @@ def run_skillspector(src: Path, runtime_hint: bool = False, *,
         except (OSError, ValueError) as exc:
             print(f"[BLOCK] NO VERDICT -- invalid reviewed baseline: {_console_text(exc)}")
             return 2
+    gap = explicit_llm_gap()
+    if gap:
+        print(_console_text(gap))
+        return 2
     env = skillspector_env()
     use_llm = skillspector_llm_usable()
     with tempfile.TemporaryDirectory() as d:
@@ -831,6 +861,11 @@ def verdict_skillspector(report_path: Path, code: int, runtime_hint: bool = Fals
                   "resolved, so whatever they point at was not inspected. Every file present was. "
                   "Check that referenced files ship with the skill; set "
                   "AGENT_GUARD_FAIL_ON_INCOMPLETE=1 to require a complete inspection instead.")
+
+    gap = explicit_llm_gap()
+    if gap:
+        print(_console_text(gap))
+        return 2
 
     extra = f" with {len(issues)} low/medium note(s)" if issues else ""
     review_note = (f"  ({suppressed_count} finding(s) accepted by explicit review; "
