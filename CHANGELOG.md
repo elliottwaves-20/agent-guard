@@ -35,16 +35,15 @@
 - **Behaviour change:** `SKILLSPECTOR_PROVIDER=gemini` now selects the Google
   Cloud ADC API provider. It used to be an alias for the Gemini CLI; use
   `gemini_cli` for that.
-- SkillSpector pin moved to NVIDIA main `ef0f96d` (adds #704, #709, #737, #738
-  and the gemini ADC provider).
+- SkillSpector is pinned to a reviewed commit of NVIDIA main, `ef0f96d`
+  (includes #697, #704, #709, #737, #738 and the gemini ADC provider). The pin
+  moves to the release tag with SkillSpector 2.13.0.
 - `[distribution]` accepts the optional keys `origins`, `backup` and
   `quarantine`; without them nothing changes.
-- SkillSpector is pinned to v2.12.0 plus the merged upstream fix
-  NVIDIA/SkillSpector#697 (commit `92bb521` on a branch of the maintainer's
-  fork; both changed files are identical to the upstream merge `9ee7fbf`).
-  A command-line flag such as `--remove` in documentation is no longer read as
+- SkillSpector now includes the upstream fix NVIDIA/SkillSpector#697: a
+  command-line flag such as `--remove` in documentation is no longer read as
   an obfuscated text-removal directive, so agent-guard's own tree is fully
-  inspected again. The pin returns to NVIDIA with SkillSpector 2.13.0.
+  inspected again.
 - Calibration corpus for finding triage: `tests/corpus/manifest.toml` pins five
   public false-positive skills and five inert attack samples from
   `elliottwaves-20/agent-guard-corpus` by commit and content hash.

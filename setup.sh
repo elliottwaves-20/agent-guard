@@ -93,7 +93,7 @@ fi
 echo ""
 echo "[OK] Setup complete."
 echo "     Next: configure user/process environment variables (README). .env is optional."
-echo "           SkillSpector LLM: defaults to your coding-agent CLI (claude/codex/gemini login, no API key);"
+echo "           SkillSpector LLM: defaults to your coding-agent CLI (claude/opencode login, no API key);"
 echo "           hosted providers (anthropic/openai/nv_build/...) work with a key. MCP_SCANNER_LLM_* for Cisco runtime scans."
 echo "           Optional: set VIRUSTOTAL_API_KEY for binary/archive malware reputation checks"
 echo "           CLI-tool scans (scan_cli.py npm/pypi/go) use Datadog GuardDog:"

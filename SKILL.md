@@ -8,9 +8,10 @@ description: >
   and backdoors. Skills and the static MCP source scan use NVIDIA SkillSpector
   (static patterns + taint tracking + YARA + live OSV.dev CVE lookup + LLM
   semantic analysis, which runs by default through the user's own claude /
-  claude / opencode CLI login — no API key — or any hosted provider with a key; codex and antigravity are refused);
-  the optional live MCP runtime check uses cisco-ai-mcp-scanner with separate
-  MCP_SCANNER_LLM_* settings and any LiteLLM-supported provider. Skills follow the open SKILL.md standard
+  opencode CLI login — no API key — or any hosted provider with a key; codex
+  and antigravity are refused); the optional live MCP runtime check uses
+  cisco-ai-mcp-scanner with separate MCP_SCANNER_LLM_* settings and any
+  LiteLLM-supported provider. Skills follow the open SKILL.md standard
   (agentskills.io) and MCP is an open protocol, so one scan covers every agent:
   repos are downloaded as commit-pinned ZIP snapshots (never git clone before a
   verdict), and the exact scanned commit is installed via the bundled universal
@@ -116,8 +117,8 @@ explicitly or configure optional layers; no `.env` file is required:
 - `SKILLSPECTOR_PROVIDER` — `claude_cli` / `opencode_cli` (CLI login,
   default), `gemini_cli` (only when named) or a hosted provider (`anthropic`,
   `openai`, `nv_build`, `bedrock`, `ollama`, ...) with its key. `codex_cli`
-  and `antigravity_cli` are refused; `gemini` is the Google ADC API provider. `AGENT_GUARD_STATIC_ONLY=1` forces
-  analysis with the LLM disabled; static analyzers can still make their configured
+  and `antigravity_cli` are refused; `gemini` is the Google ADC API provider.
+  `AGENT_GUARD_STATIC_ONLY=1` forces analysis with the LLM disabled; static analyzers can still make their configured
   network lookups.
 - `MCP_SCANNER_LLM_*` with any LiteLLM-supported provider (API key) for Cisco
   LLM / behavioral runtime MCP scans.

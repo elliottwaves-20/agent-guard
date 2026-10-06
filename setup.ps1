@@ -80,7 +80,7 @@ if (Get-Command mcp-scanner -ErrorAction SilentlyContinue) {
 
 Write-Host "`n[OK] Setup complete." -ForegroundColor Green
 Write-Host "     Next: configure user/process environment variables (README). .env is optional."
-Write-Host "           SkillSpector LLM: defaults to your coding-agent CLI (claude/codex/gemini login, no API key);"
+Write-Host "           SkillSpector LLM: defaults to your coding-agent CLI (claude/opencode login, no API key);"
 Write-Host "           hosted providers (anthropic/openai/nv_build/...) work with a key. MCP_SCANNER_LLM_* for Cisco runtime scans."
 Write-Host "           Optional: set VIRUSTOTAL_API_KEY for binary/archive malware reputation checks"
 Write-Host "           CLI-tool scans (scan_cli.py npm/pypi/go) use Datadog GuardDog via the"
