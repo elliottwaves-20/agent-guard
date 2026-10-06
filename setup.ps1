@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 # commit behind a release tag (tags can move, commits cannot) so "scan = install"
 # applies to the scanner itself. Bump deliberately; keep the tag comment in sync.
 $SkillSpectorRepo = "https://github.com/NVIDIA/SkillSpector"   # main until 2.13.0
-$SkillSpectorSha  = "532f67c72f453b55ddff302c8e578e50336cf4f2"   # v2.12.0 + main 2026-10-05
+$SkillSpectorSha  = "ef0f96d76f197b80a8e25c32dac39cc85b104e4d"   # v2.12.0 + main 2026-10-06
 
 Write-Host "Checking prerequisites..." -ForegroundColor Cyan
 
