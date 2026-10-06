@@ -138,7 +138,7 @@ class LiveCorpusAcceptanceTests(unittest.TestCase):
             importlib.reload(ss)
             try:
                 self.assertTrue(ss.LLM_READY, f"{label}: {ss.LLM_REASON}")
-                verifier = _verifier.from_profile()
+                verifier = _verifier.from_setup()
                 self.assertIsNotNone(verifier, f"{label}: no agent-CLI verifier profile")
                 samples = {s.id: s for s in corpus.load_manifest()}
                 fetched = corpus.fetch_all(Path(tmp) / "src", tuple(samples.values()))

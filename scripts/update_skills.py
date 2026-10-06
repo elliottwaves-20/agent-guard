@@ -113,7 +113,7 @@ class Run:
     def verifier(self):
         """Stage d of the triage, built once and only when a scan needs it."""
         if not self._verifier_loaded:
-            self._verifier, self._verifier_loaded = _verifier.from_profile(), True
+            self._verifier, self._verifier_loaded = _verifier.from_setup(), True
         return self._verifier
 
     @property

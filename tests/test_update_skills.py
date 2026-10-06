@@ -97,7 +97,7 @@ class Env:
                           side_effect=lambda source, branch, head: (self.settled, None)), \
              patch.object(staging, "stage", side_effect=self.fake_stage), \
              patch.object(updater, "run_skillspector", side_effect=self.fake_scan), \
-             patch.object(updater._verifier, "from_profile", return_value=self.verifier), \
+             patch.object(updater._verifier, "from_setup", return_value=self.verifier), \
              patch.object(distribution, "run_sync", return_value=True):
             try:
                 return updater.main(list(argv))

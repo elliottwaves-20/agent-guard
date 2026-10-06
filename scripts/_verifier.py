@@ -8,6 +8,9 @@ else -- errors, invalid or contradictory answers, evidence that cannot be shown
 completely -- is `unsure` and leaves the finding open. It never sees hard
 evidence, and it never clears findings that are themselves attempts to steer
 an AI: the content under review would be talking to its own judge.
+
+The prompts go through SkillSpector's own LLM client (see _verifier_boot.py) with
+the skill scan's environment, so every enabled provider can verify.
 """
 from __future__ import annotations
 
@@ -32,7 +35,6 @@ BOOT = Path(__file__).resolve().parent / "_verifier_boot.py"
 # AI judge must not be the one to clear content that addresses AIs.
 NEVER_CLEARED = frozenset({"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9",
                            "AR1", "AR2", "AR3", "E4"})
-SUPPORTED_CLIS = frozenset({"codex", "claude", "gemini"})
 
 
 @dataclass(frozen=True)
@@ -153,9 +155,9 @@ def parse_answer(text: str, shown: tuple) -> Answer:
 
 # -- running ------------------------------------------------------------------------
 
-def run_boot(python: str, cli: str, model: str, prompts: list, timeout: float = 300) -> list:
-    request = json.dumps({"cli": cli, "model": model, "timeout": timeout, "prompts": prompts})
-    done = subprocess.run([python, str(BOOT)], input=request.encode("utf-8"),
+def run_boot(python: str, env: dict, prompts: list, timeout: float = 300) -> list:
+    request = json.dumps({"timeout": timeout, "prompts": prompts})
+    done = subprocess.run([python, str(BOOT)], input=request.encode("utf-8"), env=env,
                           capture_output=True, timeout=timeout * len(prompts) + 60)
     if done.returncode != 0:
         return [{"ok": False, "error": f"verifier exited {done.returncode}"}] * len(prompts)
@@ -168,11 +170,11 @@ def run_boot(python: str, cli: str, model: str, prompts: list, timeout: float = 
     return out
 
 
-def cache_key(f: _triage.Finding, skill_dir: Path, model: str) -> str | None:
+def cache_key(f: _triage.Finding, skill_dir: Path, model_tag: str) -> str | None:
     path = Path(skill_dir) / (f.evidence_file or f.file)
     if not path.is_file():
         return None
-    parts = [str(PROMPT_VERSION), model, f.rule, _triage.sha256_file(path),
+    parts = [str(PROMPT_VERSION), model_tag, f.rule, _triage.sha256_file(path),
              f.evidence_file or f.file, repr(f.evidence_lines or f.line),
              hashlib.sha256(skill_summary(skill_dir).encode("utf-8")).hexdigest()]
     return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
@@ -235,11 +237,15 @@ class Verifier:
     """Callable for _triage.triage(verifier=...). `runner(prompts) -> results`.
     With `cache_path`, new settled answers are written there after each call."""
 
-    def __init__(self, cli: str, model: str, runner, cache: dict | None = None,
+    def __init__(self, provider: str, model: str, runner, cache: dict | None = None,
                  cache_path: Path | None = None):
-        if cli not in SUPPORTED_CLIS:
-            raise ValueError(f"verifier needs an agent CLI profile, got {cli!r}")
-        self.cli, self.model, self.runner = cli, model, runner
+        import _providers
+        try:
+            _providers.check_enabled(provider)
+        except (KeyError, _providers.DisabledProvider) as exc:
+            raise ValueError(f"verifier cannot use provider {provider!r}: {exc}") from None
+        self.provider, self.model, self.runner = provider, model, runner
+        self.tag = f"{provider}:{model or 'default'}"
         self.cache = cache if cache is not None else {}
         self.cache_path = cache_path
 
@@ -250,7 +256,7 @@ class Verifier:
             f = d.finding
             if f.rule in NEVER_CLEARED or f.rule in _triage.HARD_RULES:
                 continue
-            key = cache_key(f, skill_dir, self.model)
+            key = cache_key(f, skill_dir, self.tag)
             if key and key in self.cache:
                 answers[i] = Answer(*self.cache[key][:2], tuple(self.cache[key][2]))
                 continue
@@ -280,30 +286,25 @@ class Verifier:
         return answers
 
 
-def from_profile(env=None, cache_path=None):
-    """The verifier for this machine's `[llm.use] skills` profile, or None.
+def from_setup(env=None, cache_path=None):
+    """The verifier for the provider this machine's skill scans use, or None.
 
-    Only agent-CLI profiles are supported (subscription login, no key); any
-    other setup simply leaves stage d out, so open findings stay open.
-    Settled answers persist in `cache_path` (default: default_cache_path())."""
-    import shutil
-    import _llm_profile
+    Any enabled SkillSpector provider works -- an agent-CLI login or an API key --
+    because the prompts go through SkillSpector's own client with the scan's
+    environment. Without a usable LLM, stage d is left out and open findings
+    stay open. Settled answers persist in `cache_path` (default: default_cache_path())."""
     import _skillspector
-    import _user_config
-    env = dict(os.environ if env is None else env)
-    try:
-        selected = _llm_profile.select_profile(_user_config.load_config(env=env), "skills", env)
-    except (_llm_profile.ProfileError, ValueError):
-        return None
-    if not selected:
-        return None
-    _name, profile = selected
-    cli, model = profile.get("cli"), profile.get("model")
-    if profile.get("kind") != "cli" or cli not in SUPPORTED_CLIS or not model:
+    if not _skillspector.LLM_READY:
         return None
     python = _skillspector.skillspector_python()
-    if python is None or shutil.which(cli) is None:
+    if python is None:
         return None
+    scan_env = _skillspector.skillspector_env()
+    provider = scan_env.get("SKILLSPECTOR_PROVIDER", "")
+    model = scan_env.get("SKILLSPECTOR_MODEL", "").strip()
     path = cache_path if cache_path is not None else default_cache_path(env)
-    return Verifier(cli, model, lambda prompts: run_boot(python, cli, model, prompts),
-                    cache=load_cache(path) if path is not None else None, cache_path=path)
+    try:
+        return Verifier(provider, model, lambda prompts: run_boot(python, scan_env, prompts),
+                        cache=load_cache(path) if path is not None else None, cache_path=path)
+    except ValueError:
+        return None

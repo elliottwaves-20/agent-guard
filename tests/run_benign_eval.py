@@ -62,7 +62,7 @@ def main() -> None:
     ss.need_skillspector()
     if not ss.LLM_READY:
         sys.exit(f"LLM not ready: {ss.LLM_REASON}")
-    verifier, spans = _verifier.from_profile(), _parse_spans.from_skillspector()
+    verifier, spans = _verifier.from_setup(), _parse_spans.from_skillspector()
     yara = _yara_recheck.from_skillspector()
     if verifier is None:
         sys.exit("no agent-CLI verifier profile")

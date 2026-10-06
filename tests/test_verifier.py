@@ -55,7 +55,7 @@ class Case:
         self.report = {"issues": [item], "metadata": {"skillspector_version": "2.12.0"}}
 
     def judge(self, runner, cache=None):
-        verifier = v.Verifier("codex", "m", runner, cache)
+        verifier = v.Verifier("claude_cli", "m", runner, cache)
         return t.triage(self.report, self.dir, 1, origin=ORIGIN, verifier=verifier)
 
 
@@ -130,9 +130,23 @@ class FailClosedTests(unittest.TestCase):
         self.assertEqual(case.judge(runner).verdict, t.DANGEROUS)
         self.assertEqual(runner.prompts, [])
 
-    def test_only_agent_cli_profiles(self):
-        with self.assertRaises(ValueError):
-            v.Verifier("openai", "m", Runner())
+    def test_any_enabled_provider_can_verify(self):
+        for pid in ("anthropic", "openai_compatible", "ollama", "opencode_cli", "gemini"):
+            v.Verifier(pid, "", Runner())  # no error
+
+    def test_disabled_or_unknown_provider_is_refused(self):
+        for pid in ("codex_cli", "antigravity_cli", "nope"):
+            with self.subTest(pid), self.assertRaises(ValueError):
+                v.Verifier(pid, "m", Runner())
+
+    def test_cache_is_kept_apart_per_provider(self):
+        cache = {}
+        Case(self).judge(Runner(reply("benign")), cache)          # judged by claude_cli:m
+        case = Case(self)
+        runner = Runner(reply("unsure"))
+        other = v.Verifier("anthropic", "", runner, cache)          # anthropic:default
+        t.triage(case.report, case.dir, 1, origin=ORIGIN, verifier=other)
+        self.assertEqual(len(runner.prompts), 1)                    # not served from the claude_cli answer
 
 
 class PromptTests(unittest.TestCase):
@@ -178,7 +192,7 @@ class PersistentCacheTests(unittest.TestCase):
 
     def judge(self, path, runner):
         case = Case(self)
-        verifier = v.Verifier("codex", "m", runner, v.load_cache(path), cache_path=path)
+        verifier = v.Verifier("claude_cli", "m", runner, v.load_cache(path), cache_path=path)
         return t.triage(case.report, case.dir, 1, origin=ORIGIN, verifier=verifier)
 
     def test_answers_survive_a_restart(self):
@@ -220,6 +234,50 @@ class PersistentCacheTests(unittest.TestCase):
         self.assertEqual(v.default_cache_path({}, platform="linux", home=Path("/h")),
                          Path("/h/.local/state/agent-guard/verifier-cache.json"))
         self.assertIsNone(v.default_cache_path({}, platform="win32", home=None))
+
+
+class SetupTests(unittest.TestCase):
+    def _from_setup(self, ready, provider="anthropic", python="py"):
+        import _skillspector as ss
+        saved = (ss.LLM_READY, ss.PROVIDER, ss.skillspector_python, ss.skillspector_env)
+        try:
+            ss.LLM_READY, ss.PROVIDER = ready, provider
+            ss.skillspector_python = lambda: python
+            ss.skillspector_env = lambda: {"SKILLSPECTOR_PROVIDER": provider}
+            with tempfile.TemporaryDirectory() as tmp:
+                return v.from_setup(cache_path=Path(tmp) / "cache.json")
+        finally:
+            ss.LLM_READY, ss.PROVIDER, ss.skillspector_python, ss.skillspector_env = saved
+
+    def test_api_provider_gets_a_verifier(self):
+        verifier = self._from_setup(True, "anthropic")
+        self.assertIsNotNone(verifier)
+        self.assertEqual(verifier.provider, "anthropic")
+
+    def test_no_ready_llm_means_no_verifier(self):
+        self.assertIsNone(self._from_setup(False))
+
+    def test_missing_tool_python_means_no_verifier(self):
+        self.assertIsNone(self._from_setup(True, python=None))
+
+    def test_refused_provider_means_no_verifier(self):
+        self.assertIsNone(self._from_setup(True, "codex_cli"))
+
+    def test_run_boot_passes_the_scan_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "boot.py"
+            fake.write_text(
+                "import json, os, sys\n"
+                "req = json.loads(sys.stdin.read())\n"
+                "print(json.dumps([{'ok': True, 'text': os.environ['SKILLSPECTOR_PROVIDER']}"
+                " for _ in req['prompts']]))\n", encoding="utf-8")
+            saved, v.BOOT = v.BOOT, fake
+            try:
+                out = v.run_boot(sys.executable, {**os.environ, "SKILLSPECTOR_PROVIDER": "ollama"},
+                                 ["a", "b"], timeout=30)
+            finally:
+                v.BOOT = saved
+        self.assertEqual([r["text"] for r in out], ["ollama", "ollama"])
 
 
 if __name__ == "__main__":
