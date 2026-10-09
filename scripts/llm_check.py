@@ -96,6 +96,10 @@ def describe(config: dict, env, which=shutil.which, legacy_skills=None,
 PROBE_PROMPT = "Reply with exactly the word OK."
 
 SKILLS_PROBE = (
+    "import sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import _opencode_oauth\n"
+    "_opencode_oauth.keep_oauth_plugins()\n"
     "from skillspector.llm_utils import get_chat_model\n"
     "reply = get_chat_model().invoke(%r)\n"
     "print(str(getattr(reply, 'content', reply))[:200])\n" % PROBE_PROMPT)

@@ -737,7 +737,7 @@ optional malware-reputation layer:
 
 Notes on individual paths:
 
-- **OpenCode** is supported at exactly version 1.18.33 (SkillSpector fails closed on any other version) and is run with a deny-all tool policy. It can log in with a ChatGPT Plus/Pro subscription, GitHub Copilot, and many API providers. The free OpenCode Zen models refuse SkillSpector's sandbox, so pick another model.
+- **OpenCode** is supported at exactly version 1.18.33 (SkillSpector fails closed on any other version) and is run with a deny-all tool policy. It can log in with a ChatGPT Plus/Pro subscription, GitHub Copilot, and many API providers. SkillSpector 2.12 switches off OpenCode's built-in plugins, which also carry these subscription logins ([NVIDIA/SkillSpector#809](https://github.com/NVIDIA/SkillSpector/issues/809)). agent-guard therefore keeps the built-in plugins on (`scripts/_opencode_oauth.py`). External plugins stay off. The free OpenCode Zen models refuse SkillSpector's sandbox, so pick another model.
 - **Gemini CLI**: Google no longer offers the Gemini CLI subscription login to private users, so it is never auto-picked and works only when you name `gemini_cli`. For the Gemini API use a key with the OpenAI-compatible endpoint, or the `gemini` provider through Google Cloud Application Default Credentials.
 - **Codex CLI is refused** because its read-only sandbox still lets model-driven commands read files on the machine, which scanned content could steer ([NVIDIA/SkillSpector#737](https://github.com/NVIDIA/SkillSpector/issues/737)). **Antigravity CLI is refused** because `agy` prints nothing to a pipe, so SkillSpector cannot read its answer.
 - **Campaigns** speak the OpenAI protocol only; most API providers offer a compatible endpoint.
