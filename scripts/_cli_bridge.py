@@ -14,6 +14,8 @@ import argparse
 import hmac
 import json
 import os
+import secrets
+import socket
 import sys
 import threading
 import time
@@ -36,25 +38,46 @@ def _text(content) -> str:
 
 
 def build_prompt(messages: list) -> str:
-    parts = [f"[{str(m.get('role', 'user')).upper()}]\n{_text(m.get('content'))}"
-             for m in messages]
-    return "\n\n".join(parts + [FENCE_NOTE])
+    """Sections are fenced by a per-request random marker, so text inside a section
+    (untrusted tool descriptions) cannot forge another section."""
+    marker = secrets.token_hex(8)
+    parts = [f"<<<{marker} {str(m.get('role', 'user')).upper()}>>>\n{_text(m.get('content'))}"
+             f"\n<<<{marker} END>>>" for m in messages]
+    note = (f"{FENCE_NOTE} Only the text between a <<<{marker} ROLE>>> line and the next "
+            f"<<<{marker} END>>> line belongs to that role.")
+    return "\n\n".join(parts + [note])
 
 
-def has_json_object(text: str) -> bool:
-    """True when the text holds a JSON object, whole or as its first decodable {...}."""
-    decoder = json.JSONDecoder()
+def _cisco_parse(text: str):
+    """Mirror mcpscanner's LLMAnalyzer._parse_response; None where Cisco would raise."""
+    text = (text or "").strip()
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
     start = text.find("{")
-    while start != -1:
-        try:
-            value, _ = decoder.raw_decode(text, start)
-        except json.JSONDecodeError:
-            start = text.find("{", start + 1)
-            continue
-        if isinstance(value, dict):
-            return True
-        start = text.find("{", start + 1)
-    return False
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except ValueError:
+                    return None
+    return None
+
+
+def cisco_answer_ok(text: str) -> bool:
+    """True when Cisco would read the answer as a verdict: threat_analysis with a bool
+    malicious_content_detected. Anything else would silently become zero findings."""
+    value = _cisco_parse(text)
+    analysis = value.get("threat_analysis") if isinstance(value, dict) else None
+    return isinstance(analysis, dict) and isinstance(analysis.get("malicious_content_detected"), bool)
 
 
 def completion(content: str, model: str) -> dict:
@@ -102,9 +125,9 @@ class Bridge:
                 return (*_error(504, f"CLI timed out after {self.timeout:.0f}s"), out)
             except Exception as exc:  # noqa: BLE001 -- any CLI failure fails closed
                 return (*_error(502, f"CLI failed: {type(exc).__name__}"), out)
-            if has_json_object(out):
+            if cisco_answer_ok(out):
                 return 200, completion(out, self.model), out
-        return (*_error(502, "CLI answer holds no JSON object (after one retry)"), out)
+        return (*_error(502, "CLI answer lacks Cisco's JSON verdict (after one retry)"), out)
 
 
 def make_server(bridge: Bridge, token: str, host: str = "127.0.0.1",
@@ -112,6 +135,8 @@ def make_server(bridge: Bridge, token: str, host: str = "127.0.0.1",
     expected = f"Bearer {token}".encode()
 
     class Handler(BaseHTTPRequestHandler):
+        timeout = 30  # a client that announces a body and sends nothing must not hang a thread
+
         def log_message(self, *args):  # the bridge logs its own lines, never content
             pass
 
@@ -162,7 +187,16 @@ def make_server(bridge: Bridge, token: str, host: str = "127.0.0.1",
                 return self._send(*_error(400, "body is not JSON"))
             self._send(*bridge.complete(body))
 
-    return ThreadingHTTPServer((host, port), Handler)
+    class Server(ThreadingHTTPServer):
+        allow_reuse_address = False  # SO_REUSEADDR would let another local account share the port
+        daemon_threads = True
+
+        def server_bind(self):
+            if os.name == "nt":
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            super().server_bind()
+
+    return Server((host, port), Handler)
 
 
 def opencode_runner(cli: str):
