@@ -2,9 +2,12 @@
 import io
 import json
 import sys
+import tempfile
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -120,6 +123,99 @@ class CompleteTests(unittest.TestCase):
         self.assertNotIn("tool text", log.getvalue())
         self.assertNotIn("secret", log.getvalue())
         self.assertIn("status=200", log.getvalue())
+
+
+class HttpTests(unittest.TestCase):
+    def setUp(self):
+        self.bridge = cb.Bridge(runner_returning('{"ok": true}'), model="m", log=io.StringIO())
+        self.server = cb.make_server(self.bridge, "tok")
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def post(self, path="/v1/chat/completions", body=BODY, token="tok", raw=None):
+        data = raw if raw is not None else json.dumps(body).encode()
+        req = urllib.request.Request(self.url + path, data=data, method="POST",
+                                     headers={"Content-Type": "application/json"})
+        if token is not None:
+            req.add_header("Authorization", f"Bearer {token}")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def test_binds_loopback_only(self):
+        self.assertEqual(self.server.server_address[0], "127.0.0.1")
+
+    def test_valid_request_is_answered(self):
+        status, payload = self.post()
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["choices"][0]["message"]["content"], '{"ok": true}')
+
+    def test_missing_or_wrong_token_is_401(self):
+        self.assertEqual(self.post(token=None)[0], 401)
+        self.assertEqual(self.post(token="nope")[0], 401)
+
+    def test_other_path_is_404(self):
+        self.assertEqual(self.post(path="/v1/embeddings")[0], 404)
+
+    def test_oversized_body_is_413(self):
+        self.assertEqual(self.post(raw=b"{" + b" " * cb.MAX_BODY + b"}")[0], 413)
+
+    def test_invalid_json_is_400(self):
+        self.assertEqual(self.post(raw=b"not json")[0], 400)
+
+    def test_get_is_rejected(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(self.url + "/v1/chat/completions", timeout=10)
+        self.assertIn(ctx.exception.code, (404, 405, 501))
+
+
+class MainTests(unittest.TestCase):
+    def test_main_reads_and_deletes_profile_then_reports_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "profile.json"
+            path.write_text(json.dumps({"token": "tok", "model": "m", "cli": "opencode",
+                                        "concurrency": 2, "timeout": 30}), encoding="utf-8")
+            out = io.StringIO()
+            seen = {}
+
+            def factory(cli):
+                seen["cli"] = cli
+                return runner_returning("{}")
+            servers = []
+            original = cb.make_server
+
+            def capture(*a, **kw):
+                servers.append(original(*a, **kw))
+                return servers[-1]
+            cb.make_server = capture
+            try:
+                t = threading.Thread(target=cb.main,
+                                     args=(["--profile-json", str(path)], factory, out),
+                                     daemon=True)
+                t.start()
+                for _ in range(100):
+                    if out.getvalue():
+                        break
+                    time.sleep(0.02)
+            finally:
+                cb.make_server = original
+            self.assertRegex(out.getvalue(), r"^READY \d+\n$")
+            self.assertFalse(path.exists())
+            self.assertEqual(seen["cli"], "opencode")
+            self.assertEqual(servers[0].server_address[1], int(out.getvalue().split()[1]))
+            servers[0].shutdown()
+            servers[0].server_close()
+
+    def test_unreadable_profile_exits_nonzero_without_ready(self):
+        out = io.StringIO()
+        self.assertNotEqual(cb.main(["--profile-json", "missing.json"], lambda c: None, out), 0)
+        self.assertEqual(out.getvalue(), "")
 
 
 if __name__ == "__main__":
