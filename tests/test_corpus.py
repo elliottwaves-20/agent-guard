@@ -16,6 +16,17 @@ import _corpus as corpus
 HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
+def assert_meets_expectation(case, sample, result, _triage):
+    """Open rules the manifest names stay open on purpose: dangerous, only those."""
+    still_open = [(d.finding.rule, d.reason) for d in result.by_status(_triage.OPEN)]
+    if sample.open:
+        case.assertEqual(result.verdict, "dangerous", still_open)
+        case.assertEqual({r for r, _ in still_open}, set(sample.open),
+                         (still_open, sample.open_until))
+    else:
+        case.assertEqual(result.verdict, sample.expect, still_open)
+
+
 class ManifestTests(unittest.TestCase):
     def setUp(self):
         self.samples = corpus.load_manifest()
@@ -46,6 +57,14 @@ class ManifestTests(unittest.TestCase):
             if s.kind == "benign":
                 with self.subTest(s.id):
                     self.assertTrue(s.noise)
+
+    def test_open_rules_are_noise_and_name_the_issue_that_closes_them(self):
+        for s in self.samples:
+            with self.subTest(s.id):
+                self.assertEqual(bool(s.open), bool(s.open_until))
+                if s.open:
+                    self.assertRegex(s.open_until, r"agent-guard#\d+")
+                    self.assertLessEqual(set(s.open), set(s.noise))
 
 
 class VerifyTests(unittest.TestCase):
@@ -112,8 +131,7 @@ class CorpusAcceptanceTests(unittest.TestCase):
                                         origin=_triage.Origin(sample.source, sample.ref),
                                         spans=_parse_spans.from_skillspector(),
                                         yara=_yara_recheck.from_skillspector())
-                still_open = [(d.finding.rule, d.reason) for d in result.by_status(_triage.OPEN)]
-                self.assertEqual(result.verdict, sample.expect, still_open)
+                assert_meets_expectation(self, sample, result, _triage)
 
 
 @unittest.skipUnless(os.environ.get("AGENT_GUARD_LLM_INTEGRATION") == "1",
@@ -153,9 +171,7 @@ class LiveCorpusAcceptanceTests(unittest.TestCase):
                                                 origin=_triage.Origin(sample.source, sample.ref),
                                                 spans=_parse_spans.from_skillspector(),
                                                 yara=_yara_recheck.from_skillspector())
-                        still_open = [(d.finding.rule, d.reason)
-                                      for d in result.by_status(_triage.OPEN)]
-                        self.assertEqual(result.verdict, sample.expect, still_open)
+                        assert_meets_expectation(self, sample, result, _triage)
             finally:
                 importlib.reload(ss)
 

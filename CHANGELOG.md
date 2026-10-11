@@ -58,6 +58,14 @@
 - Calibration corpus for finding triage: `tests/corpus/manifest.toml` pins five
   public false-positive skills and five inert attack samples from
   `elliottwaves-20/agent-guard-corpus` by commit and content hash.
+- **Security: `vendor-installer` no longer clears GitHub downloads.** A
+  GitHub account controls its own path, so `github.com/<owner>/...` was never
+  proof of an established publisher: a fake account named like the skill's
+  source could ship a release asset that cleared as the vendor's installer
+  (the pattern behind Island's AgentBaiting research, issue #4). The check now
+  clears only the publisher's own domain over https; `purpose-mismatch-without-risk`
+  and `parser-limit-span` no longer clear release, raw or archive downloads
+  from a GitHub account either. Plain repository links are unaffected.
 
 ## 0.4.0 - 2026-09-30
 

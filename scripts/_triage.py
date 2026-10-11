@@ -87,8 +87,11 @@ RISK_DELETE = re.compile(rf"\brm\s+(?:-\S+\s+)*(?:{_RM_LONG}|-[a-z]*[rf])\b|"
 DESTRUCTIVE = re.compile(rf"\b(?:{_WORDS})\b|\bfind\b[^\n]*\s(?:{_FIND})\b", re.IGNORECASE)
 GITHUB_HOSTS = frozenset({"github.com", "raw.githubusercontent.com",
                           "objects.githubusercontent.com", "codeload.github.com"})
+GITHUB_DOWNLOAD_HOSTS = frozenset({"raw.githubusercontent.com", "objects.githubusercontent.com",
+                                   "codeload.github.com", "gist.githubusercontent.com"})
 GENERIC_OWNER_TOKENS = frozenset({"ai", "hq", "dev", "inc", "io", "app", "labs", "lab", "official",
                                   "team", "org", "oss", "community", "skills", "cli", "sdk"})
+ACCOUNT_HOSTS = GITHUB_HOSTS | GITHUB_DOWNLOAD_HOSTS | {"www.github.com"}
 
 
 class CatalogError(ValueError):
@@ -240,6 +243,20 @@ def vendor_url(url: str, origin: Origin | None) -> bool:
     return len(labels) >= 2 and labels[-2] in owner_tokens(origin)
 
 
+def account_download(url: str) -> bool:
+    """A release, raw or archive file on GitHub. An account controls its own path, so
+    owning it is not an established publisher."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if host in GITHUB_DOWNLOAD_HOSTS:
+        return True
+    if host not in ("github.com", "www.github.com"):
+        return False
+    path = "/" + parts.path.strip("/") + "/"
+    return (any(m in path for m in ("/releases/", "/raw/", "/archive/"))
+            or "raw=true" in parts.query.lower().split("&"))
+
+
 def norm_path(p: str) -> str:
     """One spelling per report path: ./a.md, a.md and a backslash-separated path compare equal."""
     return PurePosixPath(str(p).replace("\\", "/")).as_posix()
@@ -258,6 +275,8 @@ def check_vendor_installer(f, skill_dir, origin, exfil_files):
         return False, "source is not a pinned repository"
     if not urls:
         return False, "no URL on the flagged line"
+    if any((urlsplit(u).hostname or "").lower() in ACCOUNT_HOSTS for u in urls):
+        return False, "downloads from a GitHub account, not an established publisher"
     if not all(vendor_url(u, origin) for u in urls):
         return False, "a URL does not belong to the publisher"
     if SUDO.search(f.snippet or text) or CREDENTIAL_STORE.search(f.snippet or text):
@@ -283,6 +302,8 @@ def check_no_risk_signal(f, skill_dir, origin, exfil_files):
     text = flagged_text(f, skill_dir)
     if not text.strip():
         return False, "evidence lines not found"
+    if any(account_download(u) for u in URL.findall(text)):
+        return False, "fetches a release or raw file from a GitHub account"
     if not all(vendor_url(u, origin) for u in URL.findall(text)):
         return False, "a URL does not belong to the publisher"
     if (SUDO.search(text) or CREDENTIAL_STORE.search(text) or RISK_SIGNAL.search(text)
@@ -307,6 +328,8 @@ def check_parse_limit_span(f, skill_dir, origin, exfil_files):
     if not f.parse_spans:
         return False, "the pinned scanner does not reproduce the gap"
     text = "\n".join("\n".join(lines[start - 1:end]) for start, end in f.parse_spans)
+    if any(account_download(u) for u in URL.findall(text)):
+        return False, "fetches a release or raw file from a GitHub account"
     if not all(vendor_url(u, origin) for u in URL.findall(text)):
         return False, "a URL in the unsettled lines does not belong to the publisher"
     if (SUDO.search(text) or CREDENTIAL_STORE.search(text) or RISK_SIGNAL.search(text)

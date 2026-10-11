@@ -34,6 +34,8 @@ class Sample:
     hard: bool = False
     noise: tuple = ()
     needs_llm: bool = False
+    open: tuple = ()    # rules left open on purpose until `open_until` lands
+    open_until: str = ""
 
 
 def load_manifest(path: Path = MANIFEST) -> tuple:
@@ -44,7 +46,9 @@ def load_manifest(path: Path = MANIFEST) -> tuple:
     samples = []
     for e in data.get("benign", []):
         samples.append(Sample(e["name"], "benign", e["expect"], e["tree_hash"],
-                              e["source"], e["ref"], noise=tuple(e.get("noise", ()))))
+                              e["source"], e["ref"], noise=tuple(e.get("noise", ())),
+                              open=tuple(e.get("open", ())),
+                              open_until=e.get("open_until", "")))
     for e in data.get("malicious", []):
         samples.append(Sample(e["id"], "malicious", e["expect"], e["tree_hash"],
                               repo["source"], repo["ref"], hard=bool(e.get("hard")),
