@@ -214,16 +214,17 @@ def cli_bridge(profile: dict, *, python: str | None = None, script: Path | None 
         die("Cisco runtime LLM: the CLI bridge needs SkillSpector's Python (uv tool)")
     token = secrets.token_urlsafe(32)
     fd, path = tempfile.mkstemp(prefix="agent-guard-bridge-", suffix=".json")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump({"token": token, "model": profile["model"], "cli": profile["cli"],
-                   "concurrency": profile.get("concurrency", 3),
-                   "timeout": profile.get("timeout", 120)}, fh)
-    proc = subprocess.Popen([python, str(script), "--profile-json", path],
-                            stdout=subprocess.PIPE, text=True,
-                            start_new_session=(os.name != "nt"))
-    lines = queue.Queue()
-    threading.Thread(target=lambda: lines.put(proc.stdout.readline()), daemon=True).start()
+    proc = None
     try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"token": token, "model": profile["model"], "cli": profile["cli"],
+                       "concurrency": profile.get("concurrency", 3),
+                       "timeout": profile.get("timeout", 120)}, fh)
+        proc = subprocess.Popen([python, str(script), "--profile-json", path],
+                                stdout=subprocess.PIPE, text=True,
+                                start_new_session=(os.name != "nt"))
+        lines = queue.Queue()
+        threading.Thread(target=lambda: lines.put(proc.stdout.readline()), daemon=True).start()
         try:
             first = lines.get(timeout=wait)
         except queue.Empty:
@@ -235,7 +236,8 @@ def cli_bridge(profile: dict, *, python: str | None = None, script: Path | None 
                 f"{wait:.0f}s). NO VERDICT for the runtime check.")
         yield int(parts[1]), token
     finally:
-        _terminate_tree(proc)
+        if proc is not None:
+            _terminate_tree(proc)
         try:
             os.remove(path)
         except OSError:

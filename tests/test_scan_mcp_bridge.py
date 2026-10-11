@@ -100,6 +100,22 @@ class CliBridgeTests(unittest.TestCase):
         self.assertNotIn(token, " ".join(map(str, seen["cmd"])))
 
 
+    def test_token_file_is_removed_when_popen_fails(self):
+        made = []
+        original = tempfile.mkstemp
+
+        def spy(*a, **kw):
+            fd, path = original(*a, **kw)
+            made.append(path)
+            return fd, path
+        with patch.object(scan_mcp.tempfile, "mkstemp", side_effect=spy),              patch.object(scan_mcp.subprocess, "Popen", side_effect=OSError("no exec")):
+            with self.assertRaises(OSError):
+                with scan_mcp.cli_bridge(PROFILE, python=sys.executable):
+                    self.fail("must not yield")
+        self.assertEqual(len(made), 1)
+        self.assertFalse(os.path.exists(made[0]))
+
+
 class ProblemTests(unittest.TestCase):
     def test_problem_without_skillspector_python(self):
         with patch.object(scan_mcp, "CISCO_PROFILE", ("chatgpt", PROFILE)), \
