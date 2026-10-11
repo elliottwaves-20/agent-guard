@@ -1,6 +1,7 @@
 """CLI bridge: OpenAI-compatible localhost endpoint in front of an agent CLI login."""
 import io
 import json
+import socket
 import sys
 import tempfile
 import threading
@@ -168,6 +169,14 @@ class HttpTests(unittest.TestCase):
 
     def test_invalid_json_is_400(self):
         self.assertEqual(self.post(raw=b"not json")[0], 400)
+
+    def test_negative_content_length_is_400(self):
+        port = self.server.server_address[1]
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+                         b"Authorization: Bearer tok\r\nContent-Length: -5\r\n\r\n")
+            status_line = sock.recv(1024).split(b"\r\n")[0]
+        self.assertIn(b"400", status_line)
 
     def test_get_is_rejected(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:

@@ -115,6 +115,23 @@ def make_server(bridge: Bridge, token: str, host: str = "127.0.0.1",
         def log_message(self, *args):  # the bridge logs its own lines, never content
             pass
 
+        def _drain(self):
+            """Read (bounded) what the client sent so an early reply is not lost to a reset."""
+            try:
+                left = min(int(self.headers.get("Content-Length") or 0), 4 * MAX_BODY)
+            except ValueError:
+                return
+            while left > 0:
+                chunk = self.rfile.read(min(65536, left))
+                if not chunk:
+                    break
+                left -= len(chunk)
+
+        def _reject(self, status: int, message: str):
+            self._drain()
+            self.close_connection = True
+            self._send(*_error(status, message))
+
         def _send(self, status: int, payload: dict):
             data = json.dumps(payload).encode()
             self.send_response(status)
@@ -125,26 +142,20 @@ def make_server(bridge: Bridge, token: str, host: str = "127.0.0.1",
 
         def do_POST(self):
             if self.client_address[0] != "127.0.0.1":
-                return self._send(*_error(403, "loopback only"))
+                return self._reject(403, "loopback only")
             given = (self.headers.get("Authorization") or "").encode()
             if not hmac.compare_digest(given, expected):
-                return self._send(*_error(401, "bad token"))
+                return self._reject(401, "bad token")
             if self.path.rstrip("/") != ROUTE:
-                return self._send(*_error(404, "not found"))
+                return self._reject(404, "not found")
             try:
                 length = int(self.headers.get("Content-Length") or "")
+                if length < 0:
+                    raise ValueError(length)
             except ValueError:
                 return self._send(*_error(400, "Content-Length required"))
             if length > MAX_BODY:
-                # drain (bounded) so the reply is not lost to a connection reset
-                left = min(length, 4 * MAX_BODY)
-                while left > 0:
-                    chunk = self.rfile.read(min(65536, left))
-                    if not chunk:
-                        break
-                    left -= len(chunk)
-                self.close_connection = True
-                return self._send(*_error(413, "request too large"))
+                return self._reject(413, "request too large")
             try:
                 body = json.loads(self.rfile.read(length))
             except (ValueError, UnicodeDecodeError):
