@@ -177,9 +177,10 @@ def select_profile(config: dict, scanner: str, env) -> tuple[str, dict] | None:
     if name not in profiles:
         raise ProfileError(f"LLM profile {name!r} is not defined in [llm.profiles]")
     profile = validate_profile(name, profiles[name])
-    if scanner == "mcp" and profile["kind"] != "api":
-        raise ProfileError(f"profile {name}: the Cisco runtime check has no CLI path; "
-                           "use a kind = \"api\" profile for [llm.use] mcp")
+    if scanner == "mcp" and profile["kind"] == "cli" and profile["cli"] != "opencode":
+        raise ProfileError(f"profile {name}: the Cisco runtime check reaches a CLI login "
+                           "only OpenCode (ChatGPT login) through the local bridge; "
+                           "use cli = \"opencode\" or a kind = \"api\" profile")
     if scanner == "campaign" and (profile["kind"], profile.get("protocol")) != ("api", "openai"):
         raise ProfileError(f"profile {name}: budgeted campaigns speak the OpenAI "
                            "protocol directly; use kind = \"api\", protocol = \"openai\"")
@@ -249,6 +250,8 @@ def skillspector_env(name: str, profile: dict, env, which=shutil.which):
 
 def cisco_env(name: str, profile: dict, env):
     """Return (env, problem) for the Cisco runtime scan; problem is None when usable."""
+    if profile.get("kind") == "cli":
+        return dict(env), f"profile {name}: a CLI profile needs the local bridge (scan_mcp.cli_bridge)"
     out = {k: v for k, v in env.items() if not k.startswith(_CISCO_OWNED_PREFIXES)}
     if profile["protocol"] == "openai":
         model = f"openai/{profile['model']}"
@@ -274,3 +277,18 @@ def cisco_env(name: str, profile: dict, env):
     if key:
         out["MCP_SCANNER_LLM_API_KEY"] = key
     return out, None
+
+
+def cisco_bridge_env(name: str, profile: dict, env, port: int, token: str,
+                     scan_timeout: int) -> dict:
+    """Cisco env for a CLI profile: LiteLLM talks to the local bridge (_cli_bridge.py).
+
+    Cisco does not know the bridge queues requests, so its per-request timeout
+    covers the whole scan; the bridge bounds each CLI call itself."""
+    out = {k: v for k, v in env.items() if not k.startswith(_CISCO_OWNED_PREFIXES)}
+    out["MCP_SCANNER_LLM_MODEL"] = f"openai/{profile['model']}"
+    out["MCP_SCANNER_LLM_BASE_URL"] = f"http://127.0.0.1:{port}/v1"
+    out["MCP_SCANNER_LLM_API_KEY"] = token
+    out["MCP_SCANNER_LLM_TIMEOUT"] = str(max(60, scan_timeout - 60))
+    out["MCP_SCANNER_LLM_MAX_RETRIES"] = "1"
+    return out
