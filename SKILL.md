@@ -11,7 +11,7 @@ description: >
   opencode CLI login — no API key — or any hosted provider with a key; codex
   and antigravity are refused); the optional live MCP runtime check uses
   cisco-ai-mcp-scanner with separate MCP_SCANNER_LLM_* settings and any
-  LiteLLM-supported provider. Skills follow the open SKILL.md standard
+  LiteLLM-supported provider or the ChatGPT login through a local bridge. Skills follow the open SKILL.md standard
   (agentskills.io) and MCP is an open protocol, so one scan covers every agent:
   repos are downloaded as commit-pinned ZIP snapshots (never git clone before a
   verdict), and the exact scanned commit is installed via the bundled universal
@@ -209,7 +209,7 @@ a JSON-schema answer — the agent only ever sees the resulting exit code and
 findings. Never replace this by reading the skill yourself and "judging" it.
 
 Cisco runtime scans are configured separately through `MCP_SCANNER_LLM_*` and
-need an API key (LiteLLM has no CLI-login path).
+need an API key, or a CLI profile (ChatGPT login) served through a local bridge.
 
 `scan_skill.py` and `scan_mcp.py` handle Windows UTF-8 mode, provider
 resolution, JSON verdict parsing, and SkillSpector's execution/coverage ledger

@@ -14,7 +14,7 @@
 
 # -- Which profile each scanner uses -----------------------------------------
 # skills   = SkillSpector (skill scans and the static MCP source scan)
-# mcp      = Cisco mcp-scanner runtime check (--sandbox / remote); API only
+# mcp      = Cisco mcp-scanner runtime check (--sandbox / remote); API, or a CLI profile via the local bridge
 # campaign = budgeted scans with a hard dollar cap (scripts/llm_scan.py)
 #
 # One-off switch without editing this file:

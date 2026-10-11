@@ -758,8 +758,8 @@ Cisco's runtime scanner is independent. Set `MCP_SCANNER_LLM_API_KEY`, `MCP_SCAN
 `scripts/_cli_bridge.py` for that one Cisco run: an OpenAI-compatible endpoint on 127.0.0.1 with a
 per-run token, which hands each request to SkillSpector's hardened `opencode run` (deny-all agent,
 scrubbed environment) and stops with the scan, child processes included. Expect about 20 s per tool,
-`concurrency` tools at a time. Answers without a JSON object are retried once, then reported as an
-error, never as safe. It is meant for your own login on your own machine: the bridge is not a
+`concurrency` tools at a time. Answers without the JSON verdict Cisco expects (`threat_analysis` with a boolean
+`malicious_content_detected`) are retried once, then reported as an error, never as safe. It is meant for your own login on your own machine: the bridge is not a
 service and must not be shared. Anthropic subscriptions are not offered for this path.
 
 VirusTotal is optional but useful for private users because it fills a different gap than source scanning: known malware in bundled binary or archive-like files. Cisco's VirusTotal analyzer sends SHA256 hashes by default, not file contents; uploads happen only if `MCP_SCANNER_VIRUSTOTAL_UPLOAD_FILES=true` is explicitly set.
