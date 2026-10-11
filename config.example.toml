@@ -22,7 +22,8 @@
 #   AGENT_GUARD_LLM_SKILLS / _MCP / _CAMPAIGN=<profile>
 [llm.use]
 skills = "claude"
-mcp = "openai-compatible"
+mcp = "chatgpt"            # Cisco runtime LLM through the local CLI bridge (ChatGPT login via
+                           # OpenCode); an API profile such as "openai-compatible" works too
 # campaign = "openai-compatible"
 
 # -- Profiles -----------------------------------------------------------------
@@ -81,6 +82,15 @@ key_env = "ANTHROPIC_API_KEY"
 # kind = "cli"
 # cli = "opencode"
 # model = "<model-id>"
+
+# ChatGPT login through OpenCode, also the Cisco runtime LLM for `[llm.use] mcp`
+# (the local bridge scripts/_cli_bridge.py). Kept active because `mcp` refers to it.
+[llm.profiles.chatgpt]
+kind = "cli"
+cli = "opencode"          # the only CLI the Cisco runtime check accepts (local bridge)
+model = "openai/<model-id>"
+concurrency = 3           # parallel CLI calls; Cisco sends all tools of a server at once
+timeout = 120             # seconds per call; the bridge returns 504 after that
 
 # A local Ollama server.
 # [llm.profiles.ollama]

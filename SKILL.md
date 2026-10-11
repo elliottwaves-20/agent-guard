@@ -348,8 +348,8 @@ Cisco runtime LLMs are configured with `MCP_SCANNER_LLM_*` and can use any
 LiteLLM-supported provider. For local LLM endpoints such as Ollama, Cisco still
 expects `MCP_SCANNER_LLM_API_KEY` to be set; use a harmless dummy value such as
 `ollama` or `test`. The key and model provider must match: use a
-Claude/Anthropic model such as `claude-haiku-4-5` with an Anthropic key, or a
-GPT/OpenAI model with an OpenAI key.
+a current Claude model with an Anthropic key, an OpenAI-compatible endpoint, or
+the ChatGPT login through the local CLI bridge (`cli = "opencode"`).
 
 VirusTotal is optional but useful when scan targets bundle binaries, archives,
 PDFs, images, or other non-source files. Cisco's VirusTotal analyzer sends

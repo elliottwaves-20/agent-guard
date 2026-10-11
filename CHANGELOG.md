@@ -66,6 +66,12 @@
   clears only the publisher's own domain over https; `purpose-mismatch-without-risk`
   and `parser-limit-span` no longer clear release, raw or archive downloads
   from a GitHub account either. Plain repository links are unaffected.
+- **Cisco runtime LLM through the ChatGPT login.** A `cli = "opencode"` profile
+  can now serve `[llm.use] mcp`: `scan_mcp.py` starts `scripts/_cli_bridge.py`,
+  an OpenAI-compatible endpoint on 127.0.0.1 with a per-run token, for each
+  Cisco run and kills its process tree afterwards. Requests queue at the
+  profile's `concurrency`, each CLI call is bounded by `timeout` (504), and an
+  answer without a JSON object is retried once and then fails closed (502).
 
 ## 0.4.0 - 2026-09-30
 

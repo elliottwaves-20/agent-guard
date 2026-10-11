@@ -753,6 +753,15 @@ SkillSpector still runs its static layer without any LLM: patterns, taint tracki
 
 Cisco's runtime scanner is independent. Set `MCP_SCANNER_LLM_API_KEY`, `MCP_SCANNER_LLM_MODEL`, and optionally `MCP_SCANNER_LLM_BASE_URL` / `MCP_SCANNER_LLM_API_VERSION` for OpenAI, Anthropic, Gemini, Bedrock, Azure OpenAI, Ollama, or any LiteLLM-supported model. The key and model provider must match: use a Claude/Anthropic model such as `claude-haiku-4-5` with an Anthropic key, or a GPT/OpenAI model with an OpenAI key. For local LLM endpoints such as Ollama, Cisco still expects `MCP_SCANNER_LLM_API_KEY` to be set; use a harmless dummy value such as `ollama` or `test`.
 
+**Cisco runtime LLM via ChatGPT login.** `mcp-scanner` only speaks LiteLLM with an API key. With a
+`kind = "cli"`, `cli = "opencode"` profile under `[llm.use] mcp`, `scan_mcp.py` starts
+`scripts/_cli_bridge.py` for that one Cisco run: an OpenAI-compatible endpoint on 127.0.0.1 with a
+per-run token, which hands each request to SkillSpector's hardened `opencode run` (deny-all agent,
+scrubbed environment) and stops with the scan, child processes included. Expect about 20 s per tool,
+`concurrency` tools at a time. Answers without a JSON object are retried once, then reported as an
+error, never as safe. It is meant for your own login on your own machine: the bridge is not a
+service and must not be shared. Anthropic subscriptions are not offered for this path.
+
 VirusTotal is optional but useful for private users because it fills a different gap than source scanning: known malware in bundled binary or archive-like files. Cisco's VirusTotal analyzer sends SHA256 hashes by default, not file contents; uploads happen only if `MCP_SCANNER_VIRUSTOTAL_UPLOAD_FILES=true` is explicitly set.
 
 VirusTotal's Public API is available at no cost after creating a VirusTotal Community account. Get the key from [your personal API key page](https://www.virustotal.com/gui/my-apikey) while signed in. Public API limits are **500 requests/day** and **4 requests/minute**, and VirusTotal restricts it to non-commercial/non-business-workflow use. Premium keys are for professional/commercial use: quotas are governed by the licensed plan, and Premium exposes more threat context, advanced hunting/malware-discovery features, sample downloads, richer observable relationships, and SLA-backed data readiness. For agent-guard's default use case, the free key is enough to add lightweight hash reputation checks for bundled binaries; Premium is only relevant if you already have a professional VirusTotal workflow.

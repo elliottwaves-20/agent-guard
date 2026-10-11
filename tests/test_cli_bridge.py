@@ -1,6 +1,7 @@
 """CLI bridge: OpenAI-compatible localhost endpoint in front of an agent CLI login."""
 import io
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -225,6 +226,37 @@ class MainTests(unittest.TestCase):
         out = io.StringIO()
         self.assertNotEqual(cb.main(["--profile-json", "missing.json"], lambda c: None, out), 0)
         self.assertEqual(out.getvalue(), "")
+
+
+@unittest.skipUnless(os.environ.get("AGENT_GUARD_LLM_INTEGRATION") == "1",
+                     "set AGENT_GUARD_LLM_INTEGRATION=1 to call the real OpenCode login")
+class LiveBridgeTests(unittest.TestCase):
+    def test_opencode_answers_with_a_json_object(self):
+        import subprocess as sp
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import _skillspector as ss
+        python = ss.skillspector_python()
+        self.assertIsNotNone(python, "SkillSpector's Python is missing")
+        model = os.environ.get("AGENT_GUARD_BRIDGE_MODEL", "openai/gpt-6-luna")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "p.json"
+            path.write_text(json.dumps({"token": "t" * 32, "model": model, "cli": "opencode",
+                                        "concurrency": 1, "timeout": 120}), encoding="utf-8")
+            script = Path(__file__).resolve().parents[1] / "scripts" / "_cli_bridge.py"
+            proc = sp.Popen([python, str(script), "--profile-json", str(path)],
+                            stdout=sp.PIPE, text=True)
+            try:
+                port = int(proc.stdout.readline().split()[1])
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/v1/chat/completions", method="POST",
+                    data=json.dumps({"messages": [{"role": "user", "content":
+                        'Reply with exactly {"ok": true}'}]}).encode(),
+                    headers={"Authorization": "Bearer " + "t" * 32})
+                with urllib.request.urlopen(req, timeout=180) as r:
+                    content = json.loads(r.read())["choices"][0]["message"]["content"]
+                self.assertTrue(cb.has_json_object(content))
+            finally:
+                ss._terminate_tree(proc)
 
 
 if __name__ == "__main__":
