@@ -168,7 +168,7 @@ def install(budget):
         utils.register_chat_model_provider(model, "openai_compatible")
         return model
     utils.get_chat_model = factory
-    utils.is_llm_available = lambda: (True, None)
+    utils.is_llm_available = lambda *args, **kwargs: (True, None)
     for module in list(sys.modules.values()):
         if module is not None and getattr(module, "__name__", "").startswith("skillspector"):
             for name, value in list(vars(module).items()):
