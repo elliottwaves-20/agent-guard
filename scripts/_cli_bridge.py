@@ -37,14 +37,18 @@ def _text(content) -> str:
     return content if isinstance(content, str) else ""
 
 
+def fence(marker: str, role: str) -> str:
+    return f"<<<{marker} {role}>>>"
+
+
 def build_prompt(messages: list) -> str:
     """Sections are fenced by a per-request random marker, so text inside a section
     (untrusted tool descriptions) cannot forge another section."""
     marker = secrets.token_hex(8)
-    parts = [f"<<<{marker} {str(m.get('role', 'user')).upper()}>>>\n{_text(m.get('content'))}"
-             f"\n<<<{marker} END>>>" for m in messages]
-    note = (f"{FENCE_NOTE} Only the text between a <<<{marker} ROLE>>> line and the next "
-            f"<<<{marker} END>>> line belongs to that role.")
+    parts = [f"{fence(marker, str(m.get('role', 'user')).upper())}\n{_text(m.get('content'))}"
+             f"\n{fence(marker, 'END')}" for m in messages]
+    note = (f"{FENCE_NOTE} Only the text between a {fence(marker, 'ROLE')} line and the next "
+            f"{fence(marker, 'END')} line belongs to that role.")
     return "\n\n".join(parts + [note])
 
 
@@ -216,6 +220,13 @@ def opencode_runner(cli: str):
     return run
 
 
+def _setting(profile: dict, key: str, default):
+    # A helper instead of an inline get(): SkillSpector reads the quoted timeout
+    # key directly before a closing parenthesis as the shell wrapper of the same
+    # name and stops inspecting this file (agent-guard#27).
+    return profile.get(key) or default
+
+
 def main(argv=None, runner_factory=None, out=None) -> int:
     out = out if out is not None else sys.stdout
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -227,8 +238,8 @@ def main(argv=None, runner_factory=None, out=None) -> int:
         os.remove(args.profile_json)
         runner = (runner_factory or opencode_runner)(profile["cli"])
         bridge = Bridge(runner, model=profile["model"],
-                        concurrency=int(profile.get("concurrency") or 3),
-                        timeout=float(profile.get("timeout") or 120))
+                        concurrency=int(_setting(profile, "concurrency", 3)),
+                        timeout=float(_setting(profile, "timeout", 120)))
         server = make_server(bridge, profile["token"])
     except Exception as exc:  # noqa: BLE001 -- report and exit without READY
         print(f"bridge start failed: {type(exc).__name__}: {exc}", file=sys.stderr)
