@@ -61,6 +61,8 @@ ref = "0ea2d76840d5b63f568c258a5f110f2930650f23"
 tree_hash = "9cdf493b115432a22657b313659dc102ae2a9d46c2aae0a3e858abfcf30ba900"
 expect = "safe"
 noise = ["SC2"]  # vendor installer from the vendor's own domain
+open = ["SC2"]
+open_until = "agent-guard#14"  # own domain counts only for an established publisher (#22)
 
 [[malicious]]
 id = "m1-exfil"

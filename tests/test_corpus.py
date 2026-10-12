@@ -16,15 +16,51 @@ import _corpus as corpus
 HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
-def assert_meets_expectation(case, sample, result, _triage):
-    """Open rules the manifest names stay open on purpose: dangerous, only those."""
+def assert_meets_expectation(case, sample, result, _triage, verified=False):
+    """Open rules the manifest names stay open on purpose: dangerous, only those.
+    With the verifier in the chain (`verified`) it may settle them; the verdict is
+    then the expected one. A finding it confirms still fails the expectation."""
     still_open = [(d.finding.rule, d.reason) for d in result.by_status(_triage.OPEN)]
+    if verified and sample.open and result.verdict == sample.expect:
+        return
     if sample.open:
         case.assertEqual(result.verdict, "dangerous", still_open)
         case.assertEqual({r for r, _ in still_open}, set(sample.open),
                          (still_open, sample.open_until))
     else:
         case.assertEqual(result.verdict, sample.expect, still_open)
+
+
+class ExpectationTests(unittest.TestCase):
+    """What counts as meeting an `open` expectation, with and without the verifier."""
+
+    def result(self, verdict, *statuses):
+        import _triage
+        from types import SimpleNamespace
+        ds = [SimpleNamespace(finding=SimpleNamespace(rule="SC2"), status=s, reason="r")
+              for s in statuses]
+        return SimpleNamespace(verdict=verdict,
+                               by_status=lambda st: [d for d in ds if d.status == st]), _triage
+
+    def sample(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(expect="safe", open=("SC2",), open_until="agent-guard#14")
+
+    def test_static_chain_keeps_the_rule_open(self):
+        result, tr = self.result("dangerous", "open")
+        assert_meets_expectation(self, self.sample(), result, tr)
+        result, tr = self.result("safe", "cleared")
+        with self.assertRaises(AssertionError):
+            assert_meets_expectation(self, self.sample(), result, tr)
+
+    def test_verifier_may_settle_the_open_rule(self):
+        result, tr = self.result("safe", "cleared")
+        assert_meets_expectation(self, self.sample(), result, tr, verified=True)
+
+    def test_a_confirmed_finding_still_fails(self):
+        result, tr = self.result("dangerous", "confirmed")
+        with self.assertRaises(AssertionError):
+            assert_meets_expectation(self, self.sample(), result, tr, verified=True)
 
 
 class ManifestTests(unittest.TestCase):
@@ -171,7 +207,7 @@ class LiveCorpusAcceptanceTests(unittest.TestCase):
                                                 origin=_triage.Origin(sample.source, sample.ref),
                                                 spans=_parse_spans.from_skillspector(),
                                                 yara=_yara_recheck.from_skillspector())
-                        assert_meets_expectation(self, sample, result, _triage)
+                        assert_meets_expectation(self, sample, result, _triage, verified=True)
             finally:
                 importlib.reload(ss)
 

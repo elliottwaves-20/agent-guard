@@ -17,7 +17,10 @@ check = "vendor_installer"
 why = """A documented installer for the skill's own tool: every URL on the flagged
 line is on the publisher's own domain over https, and the command neither uses
 sudo nor touches credential stores. GitHub account paths never count: an
-account controls its own path, so owning it proves no established publisher."""
+account controls its own path, so owning it proves no established publisher.
+A domain named like the owner counts only for an established publisher: owner
+name and domain are both the publisher's choice (#22). Until the publisher
+check (#14) exists, no publisher is established and this entry clears nothing."""
 
 [[entry]]
 id = "service-key-env"
@@ -34,7 +37,8 @@ check = "no_risk_signal"
 why = """The LLM compares every snippet with the skill's whole declared purpose
 and flags parts that do less (install the CLI, create a client, read a file).
 Cleared only when the snippet carries no risk signal: every URL belongs to the
-publisher, no sudo, credential store, deletion, persistence or dynamic
+publisher (a plain link into its own GitHub repository; its own domain only once
+the publisher is established, see vendor-installer), no sudo, credential store, deletion, persistence or dynamic
 execution, and the file has no exfiltration or hard-evidence finding. A release
 or raw download from a GitHub account counts as risk."""
 
