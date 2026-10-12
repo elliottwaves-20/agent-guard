@@ -198,6 +198,9 @@ def main():
 
 
 if __name__ == "__main__":
+    import _console
+
+    _console.utf8_stdio()
     try:
         sys.exit(main())
     except (Paused, OSError, ValueError, subprocess.TimeoutExpired) as exc:

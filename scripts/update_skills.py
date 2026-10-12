@@ -439,4 +439,7 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    import _console
+
+    _console.utf8_stdio()
     sys.exit(main())

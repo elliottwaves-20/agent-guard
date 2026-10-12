@@ -820,4 +820,7 @@ def main():
 
 
 if __name__ == "__main__":
+    import _console
+
+    _console.utf8_stdio()
     main()
