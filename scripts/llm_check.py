@@ -40,7 +40,7 @@ def _skills_row(config, env, which, legacy):
                 out.get("SKILLSPECTOR_MODEL", "(CLI default)"), ready, "" if ready else reason)
 
 
-def _mcp_row(config, env, which, skillspector_python):
+def _mcp_row(config, env):
     selected = _llm_profile.select_profile(config, "mcp", env)
     if selected is None:
         model = env.get("MCP_SCANNER_LLM_MODEL", "").strip()
@@ -48,15 +48,6 @@ def _mcp_row(config, env, which, skillspector_python):
         return _row("mcp", "legacy env", "litellm", model or "(Cisco default gpt-4o)", ready,
                     "" if ready else "MCP_SCANNER_LLM_API_KEY is not set")
     name, profile = selected
-    if profile.get("kind") == "cli":
-        # Mirrors scan_mcp.cisco_llm_problem; the scan itself goes through the local bridge.
-        problem = ""
-        if not skillspector_python():
-            problem = f"profile {name}: the CLI bridge needs SkillSpector's Python (uv tool)"
-        elif which(profile["cli"]) is None:
-            problem = f"profile {name}: {profile['cli']} is not on PATH"
-        return _row("mcp", f"profile {name}", f"CLI bridge ({profile['cli']})",
-                    profile.get("model", "(CLI default)"), not problem, problem)
     out, problem = _llm_profile.cisco_env(name, profile, env)
     return _row("mcp", f"profile {name}", "litellm", out["MCP_SCANNER_LLM_MODEL"],
                 problem is None, problem or "")
@@ -78,11 +69,8 @@ def describe(config: dict, env, which=shutil.which, legacy_skills=None,
              skillspector_python=None) -> list[dict]:
     """One row per scanner. Configuration problems become row problems."""
     legacy = legacy_skills or ("", False, "legacy env resolution; see the scan banner")
-    if skillspector_python is None:
-        import _skillspector
-        skillspector_python = _skillspector.skillspector_python
     builders = (("skills", lambda: _skills_row(config, env, which, legacy)),
-                ("mcp", lambda: _mcp_row(config, env, which, skillspector_python)),
+                ("mcp", lambda: _mcp_row(config, env)),
                 ("campaign", lambda: _campaign_row(config, env)))
     rows = []
     for scanner, build in builders:
@@ -93,6 +81,9 @@ def describe(config: dict, env, which=shutil.which, legacy_skills=None,
     # The verifier runs through SkillSpector's own client with the scan's
     # environment, so it always shares the skills connection.
     # It also needs SkillSpector's own Python environment to start.
+    if skillspector_python is None:
+        import _skillspector
+        skillspector_python = _skillspector.skillspector_python
     skills = rows[0]
     ready, problem = skills["ready"], skills["problem"]
     if not skillspector_python():
@@ -103,14 +94,8 @@ def describe(config: dict, env, which=shutil.which, legacy_skills=None,
 
 
 PROBE_PROMPT = "Reply with exactly the word OK."
-# Through the CLI bridge only Cisco-shaped answers count, so the mcp probe asks for one.
-MCP_PROBE_PROMPT = 'Reply with exactly {"threat_analysis": {"malicious_content_detected": false}}'
 
 SKILLS_PROBE = (
-    "import sys\n"
-    "sys.path.insert(0, sys.argv[1])\n"
-    "import _opencode_oauth\n"
-    "_opencode_oauth.keep_oauth_plugins()\n"
     "from skillspector.llm_utils import get_chat_model\n"
     "reply = get_chat_model().invoke(%r)\n"
     "print(str(getattr(reply, 'content', reply))[:200])\n" % PROBE_PROMPT)
@@ -133,7 +118,7 @@ MCP_PROBE = (
     "if os.environ.get('MCP_SCANNER_LLM_API_KEY'): params['api_key'] = os.environ['MCP_SCANNER_LLM_API_KEY']\n"
     "if os.environ.get('MCP_SCANNER_LLM_BASE_URL'): params['api_base'] = os.environ['MCP_SCANNER_LLM_BASE_URL']\n"
     "reply = litellm.completion(**params, drop_params=True)\n"
-    "print(str(reply.choices[0].message.content)[:200])\n" % MCP_PROBE_PROMPT)
+    "print(str(reply.choices[0].message.content)[:200])\n" % PROBE_PROMPT)
 
 
 def probe(scanner: str) -> int:
@@ -147,17 +132,12 @@ def probe(scanner: str) -> int:
         problem = scan_mcp.cisco_llm_problem()
         if problem:
             ss.die(f"mcp LLM not ready: {problem}")
-        python, env, script = scan_mcp.mcpscanner_python(), None, MCP_PROBE
+        python, env, script = scan_mcp.mcpscanner_python(), scan_mcp.cisco_env(), MCP_PROBE
     if not python:
         ss.die(f"{scanner}: scanner Python environment not found; run setup first")
     started = time.monotonic()
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
-    if scanner == "mcp":
-        # A CLI profile must go through a real local bridge, exactly like a scan.
-        with scan_mcp.cisco_llm_env() as env:
-            result = ss.run_bounded([python, "-c", script, scripts_dir], env=env, timeout=180)
-    else:
-        result = ss.run_bounded([python, "-c", script, scripts_dir], env=env, timeout=180)
+    result = ss.run_bounded([python, "-c", script, scripts_dir], env=env, timeout=180)
     elapsed = time.monotonic() - started
     if result.returncode != 0:
         tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]

@@ -87,52 +87,6 @@ class DescribeTests(unittest.TestCase):
         self.assertIn("codex_cli is disabled", rows[0]["problem"])
         self.assertIn("codex_cli is disabled", rows[1]["problem"])
 
-CLI_MCP = config({"mcp": "chatgpt"}, chatgpt={"kind": "cli", "cli": "opencode", "model": "openai/gpt-6-luna"})
-
-
-class CliMcpRowTests(unittest.TestCase):
-    def test_cli_profile_shows_as_bridge_not_litellm(self):
-        rows = rows_by_scanner(llm_check.describe(
-            CLI_MCP, {}, which=lambda n: f"/bin/{n}", skillspector_python=lambda: "/py"))
-        mcp = rows["mcp"]
-        self.assertEqual((mcp["source"], mcp["connection"], mcp["model"]),
-                         ("profile chatgpt", "CLI bridge (opencode)", "openai/gpt-6-luna"))
-        self.assertTrue(mcp["ready"])
-
-    def test_cli_profile_not_ready_without_python_or_cli(self):
-        rows = rows_by_scanner(llm_check.describe(
-            CLI_MCP, {}, which=lambda n: f"/bin/{n}", skillspector_python=lambda: None))
-        self.assertFalse(rows["mcp"]["ready"])
-        self.assertIn("SkillSpector", rows["mcp"]["problem"])
-        rows = rows_by_scanner(llm_check.describe(
-            CLI_MCP, {}, which=lambda n: None, skillspector_python=lambda: "/py"))
-        self.assertFalse(rows["mcp"]["ready"])
-        self.assertIn("opencode", rows["mcp"]["problem"])
-
-
-class ProbeMcpTests(unittest.TestCase):
-    def test_cli_profile_probe_runs_inside_the_bridge_env(self):
-        import contextlib
-        from types import SimpleNamespace
-        from unittest.mock import patch
-        import scan_mcp
-        import _skillspector as ss
-        seen = {}
-
-        @contextlib.contextmanager
-        def fake_env():
-            seen["entered"] = True
-            yield {"MCP_SCANNER_LLM_BASE_URL": "http://127.0.0.1:1/v1"}
-            seen["left"] = True
-
-        def fake_run(cmd, env=None, timeout=None):
-            seen["env"], seen["inside"] = env, "left" not in seen
-            return SimpleNamespace(returncode=0, stdout="OK", stderr="")
-        with patch.object(scan_mcp, "cisco_llm_problem", return_value=None),              patch.object(scan_mcp, "cisco_llm_env", fake_env),              patch.object(scan_mcp, "mcpscanner_python", return_value=sys.executable),              patch.object(scan_mcp, "cisco_env", side_effect=AssertionError("direct env")),              patch.object(ss, "run_bounded", fake_run):
-            self.assertEqual(llm_check.probe("mcp"), 0)
-        self.assertTrue(seen["entered"] and seen["inside"])
-        self.assertEqual(seen["env"]["MCP_SCANNER_LLM_BASE_URL"], "http://127.0.0.1:1/v1")
-
 
 if __name__ == "__main__":
     unittest.main()

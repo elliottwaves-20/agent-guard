@@ -432,33 +432,5 @@ class OpennessTests(unittest.TestCase):
                 lp.validate_profile("o", dict(ollama, settings={"OLLAMA_BASE_URL": url}))
 
 
-OPENCODE_MCP = {"kind": "cli", "cli": "opencode", "model": "openai/m", "concurrency": 2}
-
-
-class CiscoBridgeProfileTests(unittest.TestCase):
-    def test_mcp_accepts_an_opencode_cli_profile(self):
-        cfg = config({"mcp": "chatgpt"}, chatgpt=OPENCODE_MCP)
-        self.assertEqual(lp.select_profile(cfg, "mcp", {})[0], "chatgpt")
-
-    def test_mcp_refuses_other_clis(self):
-        cfg = config({"mcp": "claude"}, claude=CLAUDE)
-        with self.assertRaisesRegex(lp.ProfileError, "only OpenCode"):
-            lp.select_profile(cfg, "mcp", {})
-
-    def test_bridge_env_points_cisco_at_the_bridge(self):
-        env = {"MCP_SCANNER_LLM_API_KEY": "old", "MCP_SCANNER_LLM_BASE_URL": "https://x", "PATH": "p"}
-        out = lp.cisco_bridge_env("chatgpt", OPENCODE_MCP, env, 4321, "tok", 900)
-        self.assertEqual(out["MCP_SCANNER_LLM_MODEL"], "openai/openai/m")
-        self.assertEqual(out["MCP_SCANNER_LLM_BASE_URL"], "http://127.0.0.1:4321/v1")
-        self.assertEqual(out["MCP_SCANNER_LLM_API_KEY"], "tok")
-        self.assertEqual(out["MCP_SCANNER_LLM_TIMEOUT"], "840")
-        self.assertEqual(out["MCP_SCANNER_LLM_MAX_RETRIES"], "1")
-        self.assertEqual(out["PATH"], "p")
-
-    def test_bridge_timeout_has_a_floor(self):
-        out = lp.cisco_bridge_env("chatgpt", OPENCODE_MCP, {}, 1, "t", 90)
-        self.assertEqual(out["MCP_SCANNER_LLM_TIMEOUT"], "60")
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -12,11 +12,8 @@ and writes one list entry per prompt: {"ok": true, "text": ...} or
 import json
 import sys
 
-import _opencode_oauth
-
 
 def main() -> None:
-    _opencode_oauth.keep_oauth_plugins()
     from skillspector.llm_utils import chat_completion
 
     request = json.loads(sys.stdin.buffer.read().decode("utf-8"))

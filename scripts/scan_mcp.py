@@ -48,20 +48,16 @@ After a SAFE verdict, install with:
 """
 
 import argparse
-import contextlib
 import hashlib
 import io
 import json
 import os
-import queue
-import secrets
 import shlex
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
-import threading
 import urllib.request
 import zipfile
 import uuid
@@ -75,10 +71,8 @@ from _skillspector import (
     USER_CONFIG,
     combine_verdicts,
     die,
-    _terminate_tree,
     run_bounded,
     run_skillspector as shared_run_skillspector,
-    skillspector_python,
 )
 
 MCP_SCANNER = shutil.which("mcp-scanner")      # Stage 2 / remote: runtime (Cisco)
@@ -96,8 +90,6 @@ CISCO_LLM_API_VERSION = os.environ.get("MCP_SCANNER_LLM_API_VERSION", "").strip(
 # Named explicitly: Cisco's default adds "api" (the hosted Cisco AI Defense
 # analyzer), which fails the whole scan unless MCP_SCANNER_API_KEY is set.
 CISCO_ANALYZERS = "yara,llm"
-BRIDGE_SCRIPT = Path(__file__).with_name("_cli_bridge.py")
-BRIDGE_READY_WAIT = 30  # seconds for the bridge to print READY <port>
 
 
 def _llm_key_kind(key: str) -> str:
@@ -151,14 +143,7 @@ def cisco_command(env: dict) -> list:
 def cisco_llm_problem() -> str | None:
     """Why the Cisco runtime LLM cannot run, or None when it can."""
     if CISCO_PROFILE:
-        name, profile = CISCO_PROFILE
-        if profile["kind"] == "cli":
-            if skillspector_python() is None:
-                return f"profile {name}: the CLI bridge needs SkillSpector's Python (uv tool)"
-            if shutil.which(profile["cli"]) is None:
-                return f"profile {name}: {profile['cli']} is not on PATH"
-            return None
-        return _llm_profile.cisco_env(name, profile, os.environ)[1]
+        return _llm_profile.cisco_env(*CISCO_PROFILE, os.environ)[1]
     if not CISCO_LLM_KEY:
         return ("no Cisco runtime LLM key -- configure an [llm.use] mcp profile or "
                 "MCP_SCANNER_LLM_API_KEY + MCP_SCANNER_LLM_MODEL")
@@ -199,66 +184,6 @@ def cisco_env() -> dict:
     if CISCO_LLM_API_VERSION:
         e["MCP_SCANNER_LLM_API_VERSION"] = CISCO_LLM_API_VERSION
     return e
-
-
-@contextlib.contextmanager
-def cli_bridge(profile: dict, *, python: str | None = None, script: Path | None = None,
-               wait: float = BRIDGE_READY_WAIT):
-    """Run _cli_bridge.py for one Cisco run; yield (port, token); always kill its tree.
-
-    The token travels in a temporary file the bridge deletes after reading,
-    never in argv. No READY within `wait` seconds is a hard stop (fail-closed)."""
-    python = python or skillspector_python()
-    script = script or BRIDGE_SCRIPT  # looked up per call so tests can swap it
-    if python is None:
-        die("Cisco runtime LLM: the CLI bridge needs SkillSpector's Python (uv tool)")
-    token = secrets.token_urlsafe(32)
-    fd, path = tempfile.mkstemp(prefix="agent-guard-bridge-", suffix=".json")
-    proc = None
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"token": token, "model": profile["model"], "cli": profile["cli"],
-                       "concurrency": profile.get("concurrency", 3),
-                       "timeout": profile.get("timeout", 120)}, fh)
-        proc = subprocess.Popen([python, str(script), "--profile-json", path],
-                                stdout=subprocess.PIPE, text=True,
-                                start_new_session=(os.name != "nt"))
-        lines = queue.Queue()
-        threading.Thread(target=lambda: lines.put(proc.stdout.readline()), daemon=True).start()
-        try:
-            first = lines.get(timeout=wait)
-        except queue.Empty:
-            first = ""
-        parts = first.split()
-        if len(parts) != 2 or parts[0] != "READY" or not parts[1].isdigit():
-            _terminate_tree(proc)
-            die("Cisco runtime LLM: the CLI bridge did not start (no READY within "
-                f"{wait:.0f}s). NO VERDICT for the runtime check.")
-        yield int(parts[1]), token
-    finally:
-        if proc is not None:
-            _terminate_tree(proc)
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-
-
-@contextlib.contextmanager
-def cisco_llm_env():
-    """Cisco env for this run: through the CLI bridge for a CLI profile, else direct."""
-    if CISCO_PROFILE and CISCO_PROFILE[1]["kind"] == "cli":
-        name, profile = CISCO_PROFILE
-        problem = cisco_llm_problem()
-        if problem:
-            die(f"Cisco runtime LLM: {problem}")
-        with cli_bridge(profile) as (port, token):
-            print(f"  Cisco runtime LLM: profile {name} through the local CLI bridge "
-                  f"({profile['cli']}, ~20 s per tool, {profile.get('concurrency', 3)} at a time)")
-            yield _llm_profile.cisco_bridge_env(name, profile, os.environ, port, token,
-                                                SCAN_TIMEOUT)
-    else:
-        yield cisco_env()
 
 
 DOCKER_IMAGE = "agent-guard-mcp-sandbox"
@@ -481,10 +406,10 @@ def run_cisco(cmd: list, label: str, env: dict = None) -> int:
 
 def run_remote(url: str) -> int:
     need_mcp_scanner()
-    with cisco_llm_env() as env:
-        cmd = [*cisco_command(env), "--format", "summary", "--analyzers", CISCO_ANALYZERS,
-               "remote", "--server-url", url]
-        return run_cisco(cmd, f"scanning remote MCP (no local code runs): {url}", env=env)
+    env = cisco_env()
+    cmd = [*cisco_command(env), "--format", "summary", "--analyzers", CISCO_ANALYZERS,
+           "remote", "--server-url", url]
+    return run_cisco(cmd, f"scanning remote MCP (no local code runs): {url}", env=env)
 
 
 def run_virustotal(path: Path, max_files: int = VT_MAX_FILES) -> int:
@@ -578,24 +503,24 @@ def run_sandbox(command: list, *, allow_hosts=(), network: bool = True) -> int:
         "-e", "NPM_CONFIG_UPDATE_NOTIFIER=false", "-e", "NO_UPDATE_NOTIFIER=1",
         image, *command,
     ]
-    with cisco_llm_env() as env:
-        env["MCP_SCANNER_STDIO_TIMEOUT"] = str(STDIO_TIMEOUT)
-        scan = [*cisco_command(env), "--format", "summary", "--analyzers", CISCO_ANALYZERS,
-                "stdio", "--stdio-command", "docker"]
-        scan.extend(f"--stdio-arg={arg}" for arg in docker)
-        finished = False
-        try:
-            rc = run_cisco(scan,
-                "Stage 2: host analyzer with isolated Docker target (no scanner credentials in target)",
-                env=env)
-            finished = True
-        finally:
-            # A timed-out analyzer may leave its child alive. Remove only this
-            # invocation's uniquely named container, including on failed handshakes.
-            subprocess.run(["docker", "rm", "--force", container],
-                           capture_output=True, text=True, timeout=30)
-            if capture is not None and not finished:
-                capture.remove()
+    env = cisco_env()
+    env["MCP_SCANNER_STDIO_TIMEOUT"] = str(STDIO_TIMEOUT)
+    scan = [*cisco_command(env), "--format", "summary", "--analyzers", CISCO_ANALYZERS,
+            "stdio", "--stdio-command", "docker"]
+    scan.extend(f"--stdio-arg={arg}" for arg in docker)
+    finished = False
+    try:
+        rc = run_cisco(scan,
+            "Stage 2: host analyzer with isolated Docker target (no scanner credentials in target)",
+            env=env)
+        finished = True
+    finally:
+        # A timed-out analyzer may leave its child alive. Remove only this
+        # invocation's uniquely named container, including on failed handshakes.
+        subprocess.run(["docker", "rm", "--force", container],
+                       capture_output=True, text=True, timeout=30)
+        if capture is not None and not finished:
+            capture.remove()
     if capture is not None:
         rc = combine_verdicts(rc, _egress.verdict(capture.finish(allow)))
     return rc

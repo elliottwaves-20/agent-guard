@@ -49,7 +49,7 @@ agent-guard never writes its own detection — it routes every install target to
 - **Commit-pinned ZIP scanning** — repos are fetched as a ZIP snapshot of one exact commit; `git clone` never touches your machine before a verdict, and the commit that was scanned is the commit that gets installed. No scan/install gap an attacker could slip a push into.
 - **Skills, MCP servers, *and* CLI tools** — an MCP server is code that must run to be fully inspected, so naive scanning would execute it. `scan_mcp.py` scans the package **source** first (fetched from the registry, nothing executed), with an optional **Docker-sandboxed** live scan — untrusted MCP code never runs unconfined on your machine. `scan_cli.py` extends the same scan-first gate to the CLI tools agents install: npm/PyPI/Go packages, cargo crates, release binaries, and `curl | bash` installers, all downloaded but **never executed** before their verdict.
 - **Layered analysis** — static patterns, AST taint tracking, YARA signatures, live OSV.dev CVE lookup, and LLM-powered semantic analysis when configured.
-- **No API key for the main scan** — SkillSpector's LLM layer runs by default through the coding-agent CLI you are already logged into (`claude` or `opencode`) as an isolated, tool-less subprocess, so your subscription covers it. Hosted providers (Anthropic, OpenAI, Azure OpenAI, NVIDIA, Bedrock, Ollama, any OpenAI-compatible endpoint, ...) work with a key if you prefer; the verifier pass uses the same connection. Cisco's optional runtime MCP scan (LiteLLM) needs an API key, or an OpenCode login through the local CLI bridge (see [LLM provider support](#llm-provider-support)).
+- **No API key for the main scan** — SkillSpector's LLM layer runs by default through the coding-agent CLI you are already logged into (`claude` or `opencode`) as an isolated, tool-less subprocess, so your subscription covers it. Hosted providers (Anthropic, OpenAI, Azure OpenAI, NVIDIA, Bedrock, Ollama, any OpenAI-compatible endpoint, ...) work with a key if you prefer; the verifier pass uses the same connection. Only Cisco's optional runtime MCP scan (LiteLLM) strictly needs an API key.
 - **Fail-closed workflow** — scanner errors are never silently treated as "no findings".
 - **Prompt-injection aware** — content of scanned repos is treated as data, never as instructions to the reviewing agent.
 - **Clear verdicts** — ✅ SAFE / ⚠ REVIEW / 🚫 DO NOT INSTALL, with a risk score and file/line for every finding.
@@ -115,7 +115,7 @@ Required for the normal scan/install workflow:
 - [uv](https://docs.astral.sh/uv/) — installs SkillSpector and Cisco mcp-scanner in isolated tool environments. uv also fetches the Python 3.12 runtime that SkillSpector needs.
 - Python 3.10+ — runs the agent-guard wrapper scripts: `scripts/install_skill.py`, `scripts/scan_skill.py`, `scripts/scan_mcp.py`, `scripts/scan_cli.py`, and `scripts/scan_url.py`.
 - For full SkillSpector LLM coverage: a logged-in coding-agent CLI on PATH (`claude` or `opencode` — auto-detected, no API key) **or** a hosted-provider key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `NVIDIA_INFERENCE_KEY`, ...). Without either, skill and static MCP source scans still run static-only.
-- A LiteLLM-compatible runtime provider for Cisco live MCP checks: `MCP_SCANNER_LLM_API_KEY` plus `MCP_SCANNER_LLM_MODEL`, or an OpenCode login (for example ChatGPT Plus/Pro) through the local CLI bridge `scripts/_cli_bridge.py` (config profile with `kind = "cli"`, `cli = "opencode"`). This can be OpenAI, Anthropic, Gemini, Bedrock, Azure OpenAI, Ollama, or another LiteLLM-supported provider.
+- A LiteLLM-compatible runtime provider for Cisco live MCP checks (API key required; Cisco has no CLI-login path): `MCP_SCANNER_LLM_API_KEY` plus `MCP_SCANNER_LLM_MODEL`. This can be OpenAI, Anthropic, Gemini, Bedrock, Azure OpenAI, Ollama, or another LiteLLM-supported provider.
 
 Optional, depending on what you scan or install:
 
@@ -166,8 +166,7 @@ logged in, the wrapper auto-detects it and runs SkillSpector's LLM layer through
 that CLI — your existing subscription, in a separate tool-less process. Without
 any of those (or with `AGENT_GUARD_STATIC_ONLY=1`), SkillSpector runs its full
 static layer (71 patterns, AST taint tracking, YARA, live OSV.dev CVE lookup);
-only the optional Cisco runtime check needs an API key or an OpenCode login
-through the local CLI bridge.
+only the optional Cisco runtime check strictly needs an API key.
 
 **Option B — clone and install manually:**
 
@@ -721,7 +720,7 @@ optional malware-reputation layer:
 | Scanner layer | What it covers | Configuration |
 |---------------|----------------|---------------|
 | **NVIDIA SkillSpector** | skill scans and static MCP source scans | `SKILLSPECTOR_PROVIDER` — default `claude_cli` / `opencode_cli` (your CLI login, no key); or any hosted provider in the table below with its credentials |
-| **Cisco mcp-scanner LLM** | live MCP runtime scans (`remote` / `--sandbox`) | `MCP_SCANNER_LLM_*`; any LiteLLM-supported provider (API key), or an OpenCode login through the CLI bridge |
+| **Cisco mcp-scanner LLM** | live MCP runtime scans (`remote` / `--sandbox`) | `MCP_SCANNER_LLM_*`; any LiteLLM-supported provider (API key) |
 | **VirusTotal analyzer** | optional malware reputation for bundled binaries, archives, PDFs, and similar non-source files | `VIRUSTOTAL_API_KEY` |
 
 **Access paths.** Every path below that can reach a model can run the skill scan and the verifier (the verifier runs through SkillSpector's own client with the scan's environment, so it shares the skill-scan connection; `python scripts/llm_check.py` shows both rows).
@@ -729,7 +728,7 @@ optional malware-reputation layer:
 | Access | Type | Skill scan | Verifier | MCP runtime (Cisco) | Campaign |
 |--------|------|------------|----------|---------------------|----------|
 | Claude Code CLI (`claude`) | CLI login | yes (auto-detected) | yes | no | no |
-| OpenCode CLI (`opencode`) | CLI login | yes (auto-detected) | yes | yes, through the CLI bridge (config profile) | no |
+| OpenCode CLI (`opencode`) | CLI login | yes (auto-detected) | yes | no | no |
 | Gemini CLI (`gemini`) | CLI login | only when named explicitly | yes | no | no |
 | Anthropic, OpenAI, Azure OpenAI, AWS Bedrock, Google Gemini via ADC (`gemini`), NVIDIA, Ollama, Anthropic proxy | API provider | yes (Anthropic, OpenAI, NVIDIA auto-detected by key) | yes | where LiteLLM supports the provider (Cisco needs `MCP_SCANNER_LLM_*` settings) | OpenAI protocol only |
 | OpenAI-compatible endpoint (OpenRouter, Groq, Together, Mistral, DeepSeek, LM Studio, vLLM, ...) | API provider | yes (`openai_compatible`) | yes | yes (LiteLLM) | yes |
@@ -738,7 +737,7 @@ optional malware-reputation layer:
 
 Notes on individual paths:
 
-- **OpenCode** is supported at exactly version 1.18.33 (SkillSpector fails closed on any other version) and is run with a deny-all tool policy. It can log in with a ChatGPT Plus/Pro subscription, GitHub Copilot, and many API providers. SkillSpector 2.12 switches off OpenCode's built-in plugins, which also carry these subscription logins ([NVIDIA/SkillSpector#809](https://github.com/NVIDIA/SkillSpector/issues/809)). agent-guard therefore keeps the built-in plugins on (`scripts/_opencode_oauth.py`). External plugins stay off. The free OpenCode Zen models refuse SkillSpector's sandbox, so pick another model.
+- **OpenCode** is supported at exactly version 1.18.33 (SkillSpector fails closed on any other version) and is run with a deny-all tool policy. It works with OpenCode's API providers. Logins through OpenCode's built-in auth plugins (ChatGPT Plus/Pro, GitHub Copilot) do not reach their provider under the pinned SkillSpector, which switches those plugins off ([NVIDIA/SkillSpector#809](https://github.com/NVIDIA/SkillSpector/issues/809)). The free OpenCode Zen models refuse SkillSpector's sandbox, so pick another model.
 - **Gemini CLI**: Google no longer offers the Gemini CLI subscription login to private users, so it is never auto-picked and works only when you name `gemini_cli`. For the Gemini API use a key with the OpenAI-compatible endpoint, or the `gemini` provider through Google Cloud Application Default Credentials.
 - **Codex CLI is refused** because its read-only sandbox still lets model-driven commands read files on the machine, which scanned content could steer ([NVIDIA/SkillSpector#737](https://github.com/NVIDIA/SkillSpector/issues/737)). **Antigravity CLI is refused** because `agy` prints nothing to a pipe, so SkillSpector cannot read its answer.
 - **Campaigns** speak the OpenAI protocol only; most API providers offer a compatible endpoint.
@@ -752,16 +751,7 @@ With a [personal config file](#configuration-prefer-environment-variables), `[ll
 
 SkillSpector still runs its static layer without any LLM: patterns, taint tracking, YARA, and OSV.dev CVE lookup remain active. That is useful, but it misses semantic attacks that pattern rules do not encode.
 
-Cisco's runtime scanner is independent. Set `MCP_SCANNER_LLM_API_KEY`, `MCP_SCANNER_LLM_MODEL`, and optionally `MCP_SCANNER_LLM_BASE_URL` / `MCP_SCANNER_LLM_API_VERSION` for OpenAI, Anthropic, Gemini, Bedrock, Azure OpenAI, Ollama, or any LiteLLM-supported model. The key and model provider must match: use a Claude/Anthropic model with an Anthropic key, or a GPT/OpenAI model with an OpenAI key. For local LLM endpoints such as Ollama, Cisco still expects `MCP_SCANNER_LLM_API_KEY` to be set; use a harmless dummy value such as `ollama` or `test`.
-
-**Cisco runtime LLM via ChatGPT login.** `mcp-scanner` only speaks LiteLLM with an API key. With a
-`kind = "cli"`, `cli = "opencode"` profile under `[llm.use] mcp`, `scan_mcp.py` starts
-`scripts/_cli_bridge.py` for that one Cisco run: an OpenAI-compatible endpoint on 127.0.0.1 with a
-per-run token, which hands each request to SkillSpector's hardened `opencode run` (deny-all agent,
-scrubbed environment) and stops with the scan, child processes included. Expect about 20 s per tool,
-`concurrency` tools at a time. Answers without the JSON verdict Cisco expects (`threat_analysis` with a boolean
-`malicious_content_detected`) are retried once, then reported as an error, never as safe. It is meant for your own login on your own machine: the bridge is not a
-service and must not be shared. Anthropic subscriptions are not offered for this path.
+Cisco's runtime scanner is independent. Set `MCP_SCANNER_LLM_API_KEY`, `MCP_SCANNER_LLM_MODEL`, and optionally `MCP_SCANNER_LLM_BASE_URL` / `MCP_SCANNER_LLM_API_VERSION` for OpenAI, Anthropic, Gemini, Bedrock, Azure OpenAI, Ollama, or any LiteLLM-supported model. The key and model provider must match: use a Claude/Anthropic model such as `claude-haiku-4-5` with an Anthropic key, or a GPT/OpenAI model with an OpenAI key. For local LLM endpoints such as Ollama, Cisco still expects `MCP_SCANNER_LLM_API_KEY` to be set; use a harmless dummy value such as `ollama` or `test`.
 
 VirusTotal is optional but useful for private users because it fills a different gap than source scanning: known malware in bundled binary or archive-like files. Cisco's VirusTotal analyzer sends SHA256 hashes by default, not file contents; uploads happen only if `MCP_SCANNER_VIRUSTOTAL_UPLOAD_FILES=true` is explicitly set.
 
