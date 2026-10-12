@@ -17,7 +17,8 @@ CHECK = chr(0x2713)
 NL = chr(10)
 
 ENTRY_POINTS = ["audit_installed", "install_skill", "llm_check", "llm_scan", "scan_cli",
-                "scan_mcp", "scan_skill", "scan_url", "update_skills", "verify_skills_cli"]
+                "scan_mcp", "scan_skill", "scan_url", "update_skills", "verify_skills_cli",
+                "run_all_tests"]
 
 
 class Utf8StdioTests(unittest.TestCase):
