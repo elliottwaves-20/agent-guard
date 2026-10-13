@@ -14,8 +14,38 @@ SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")  # never read this machine's personal config
 
+# The wrapper resolves its provider at import time. Hide the caller's provider
+# settings for this module so a shell with SKILLSPECTOR_PROVIDER=anthropic (and
+# no key) cannot turn clean-report tests into NO VERDICT; restore them after.
+_ISOLATED_PREFIXES = ("SKILLSPECTOR_", "AGENT_GUARD_LLM", "AGENT_GUARD_STATIC_ONLY",
+                      "ANTHROPIC_", "OPENAI_", "NVIDIA_INFERENCE_KEY", "AGENT_GUARD_CONFIG")
+_SAVED_ENV: dict = {}
+
+
+def setUpModule():
+    _SAVED_ENV.update({k: v for k, v in os.environ.items() if k.startswith(_ISOLATED_PREFIXES)})
+    for key in list(_SAVED_ENV):
+        del os.environ[key]
+    _SAVED_ENV["__no_dotenv__"] = os.environ.get("AGENT_GUARD_NO_DOTENV")
+    os.environ["AGENT_GUARD_NO_DOTENV"] = "1"
+    importlib.reload(importlib.import_module("_skillspector"))
+
+
+def tearDownModule():
+    no_dotenv = _SAVED_ENV.pop("__no_dotenv__", None)
+    if no_dotenv is None:
+        os.environ.pop("AGENT_GUARD_NO_DOTENV", None)
+    else:
+        os.environ["AGENT_GUARD_NO_DOTENV"] = no_dotenv
+    os.environ.update(_SAVED_ENV)
+    _SAVED_ENV.clear()
+    importlib.reload(importlib.import_module("_skillspector"))
+
 
 class SkillSpectorWrapperTests(unittest.TestCase):
+    def test_provider_settings_are_hidden_during_the_module(self):
+        self.assertFalse(any(k.startswith(_ISOLATED_PREFIXES) for k in os.environ))
+
     def _resolve(self, env: dict, on_path=()):
         """Reload _skillspector under a controlled environment and PATH.
 
