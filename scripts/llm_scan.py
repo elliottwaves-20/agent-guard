@@ -162,7 +162,8 @@ def scan(session, campaign, preview, policy):
     data = _load_report(report)
     if data is None or llm_run_incomplete(data, expected=True):
         return 2
-    verdict = verdict_skillspector(report, exit_code)
+    # The check above confirmed the requested LLM run, so the skills profile does not gate this verdict.
+    verdict = verdict_skillspector(report, exit_code, llm_confirmed=True)
     summary["complete"] = verdict in (0, 1)
     summary["verdict_exit_code"] = verdict
     atomic_json(session / "progress.json", summary)

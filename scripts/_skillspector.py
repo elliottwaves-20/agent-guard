@@ -694,8 +694,12 @@ def parse_limit_only(completeness: dict) -> bool:
 
 
 def verdict_skillspector(report_path: Path, code: int, runtime_hint: bool = False, *,
-                        reviewed_baseline: bool = False) -> int:
-    """Turn a SkillSpector JSON report into a clear verdict. Fail closed."""
+                        reviewed_baseline: bool = False, llm_confirmed: bool = False) -> int:
+    """Turn a SkillSpector JSON report into a clear verdict. Fail closed.
+
+    llm_confirmed: the caller already verified from the report that the requested
+    LLM analysis ran (campaign scans), so the skills profile's readiness does not apply.
+    """
     print("\n" + "=" * 60)
     data = _load_report(report_path)
     if data is None:
@@ -863,7 +867,7 @@ def verdict_skillspector(report_path: Path, code: int, runtime_hint: bool = Fals
                   "Check that referenced files ship with the skill; set "
                   "AGENT_GUARD_FAIL_ON_INCOMPLETE=1 to require a complete inspection instead.")
 
-    gap = explicit_llm_gap()
+    gap = None if llm_confirmed else explicit_llm_gap()
     if gap:
         print(_console_text(gap))
         return 2

@@ -440,16 +440,19 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 os.environ.update(old_env)
                 importlib.reload(importlib.import_module("_skillspector"))
 
-    def test_parse_limit_with_other_gap_still_no_verdict(self):
-        module = importlib.import_module("_skillspector")
+    def _other_gap_cases(self):
+        """Parser-limit reports with a further gap: each is a NO VERDICT."""
         other = dict(self.PARSE_LIMIT, reason_code="analyzer_error")
         foreign = dict(self.PARSE_LIMIT, analyzers=["static_yara"])
-        cases = [((self.PARSE_LIMIT, other), None, 0),
-                 ((foreign,), ["Analyzer static_yara status: degraded."], 0),
-                 ((self.PARSE_LIMIT,), ["Analyzer static_yara status: degraded."], 0),
-                 ((self.PARSE_LIMIT,), None, 1),
-                 ((dict(self.PARSE_LIMIT, fatal=True),), None, 0)]
-        for exceptions, limitations, uninspected in cases:
+        return [((self.PARSE_LIMIT, other), None, 0),
+                ((foreign,), ["Analyzer static_yara status: degraded."], 0),
+                ((self.PARSE_LIMIT,), ["Analyzer static_yara status: degraded."], 0),
+                ((self.PARSE_LIMIT,), None, 1),
+                ((dict(self.PARSE_LIMIT, fatal=True),), None, 0)]
+
+    def test_parse_limit_with_other_gap_still_no_verdict(self):
+        module = importlib.import_module("_skillspector")
+        for exceptions, limitations, uninspected in self._other_gap_cases():
             with self.subTest(exceptions=exceptions, limitations=limitations,
                               uninspected=uninspected):
                 with tempfile.TemporaryDirectory() as d:
@@ -457,6 +460,34 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                                                       uninspected=uninspected)
                     with contextlib.redirect_stdout(io.StringIO()):
                         self.assertEqual(module.verdict_skillspector(report, 0), 2)
+
+    def _broken_skills_profile(self):
+        """Module state of a named skills provider that cannot run."""
+        from unittest.mock import patch
+        module = importlib.import_module("_skillspector")
+        return module, patch.multiple(module, LLM_EXPLICIT=True, LLM_READY=False,
+                                      LLM_REASON="profile p: 'claude' is not on PATH")
+
+    def test_llm_confirmed_report_is_not_blocked_by_the_skills_profile(self):
+        module, broken = self._broken_skills_profile()
+        with broken, tempfile.TemporaryDirectory() as d:
+            report = Path(d) / "report.json"
+            self._write_report(report)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(module.verdict_skillspector(report, 0), 2)
+                self.assertEqual(module.verdict_skillspector(report, 0, llm_confirmed=True), 0)
+
+    def test_llm_confirmed_keeps_other_no_verdicts(self):
+        module, broken = self._broken_skills_profile()
+        for exceptions, limitations, uninspected in self._other_gap_cases():
+            with self.subTest(exceptions=exceptions, limitations=limitations,
+                              uninspected=uninspected):
+                with broken, tempfile.TemporaryDirectory() as d:
+                    report = self._parse_limit_report(d, *exceptions, limitations=limitations,
+                                                      uninspected=uninspected)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(
+                            module.verdict_skillspector(report, 0, llm_confirmed=True), 2)
 
     def test_parse_limit_gap_respects_fail_on_incomplete(self):
         module = importlib.import_module("_skillspector")
