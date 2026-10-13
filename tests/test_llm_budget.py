@@ -19,11 +19,16 @@ CAMPAIGN = {"kind": "api", "protocol": "openai", "base_url": "https://api.cerebr
             "budget": {"total_usd": 4, "step_usd": 0.5, "probe_usd": 0.1, "step_requests": 10},
             "limits": {"rpm": 3, "tpm": 30000}}
 POLICY = policy_from_profile("test", CAMPAIGN, "2.12.0")
-from _llm_adapter import Model, ProviderError, strict_schema
+from _llm_adapter import Model, ProviderError, llm_available, strict_schema
 from llm_scan import new_session, validate_session
 
 
 class BudgetTests(unittest.TestCase):
+    def test_patched_availability_check_accepts_upstream_arguments(self):
+        # Upstream callers pass e.g. timeout=...; the stand-in must not reject it.
+        self.assertEqual(llm_available(), (True, None))
+        self.assertEqual(llm_available(timeout=5), (True, None))
+
     def test_http_client_identifies_guard(self):
         from _llm_adapter import http_json
         with patch("_llm_adapter.urllib.request.build_opener") as factory:

@@ -137,6 +137,11 @@ class Model:
         return await self.ainvoke_with_usage(prompt)
 
 
+def llm_available(*args, **kwargs):
+    """Stand-in for upstream ``is_llm_available``, which callers pass e.g. ``timeout`` to."""
+    return True, None
+
+
 def install(budget):
     """Install before importing graph/nodes, to cover imported factory aliases."""
     policy = budget.policy
@@ -168,7 +173,7 @@ def install(budget):
         utils.register_chat_model_provider(model, "openai_compatible")
         return model
     utils.get_chat_model = factory
-    utils.is_llm_available = lambda: (True, None)
+    utils.is_llm_available = llm_available
     for module in list(sys.modules.values()):
         if module is not None and getattr(module, "__name__", "").startswith("skillspector"):
             for name, value in list(vars(module).items()):
