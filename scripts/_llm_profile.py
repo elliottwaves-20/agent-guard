@@ -270,10 +270,13 @@ def cisco_env(name: str, profile: dict, env):
         # its reasoning request rule to this profile's model as well.
         out["AGENT_GUARD_CISCO_REASONING"] = "1"
     var, key = _key(profile, env)
-    # A native provider without secrets takes no key, so key_env is ignored.
-    keyless = profile["protocol"] != "openai" and not _provider_of(profile).secrets
+    # Only the requirement is dropped for a native provider without secrets; a
+    # key that is present is still forwarded. A litellm_model override may name
+    # a keyed backend, so it keeps the requirement.
+    keyless = (profile["protocol"] != "openai" and "litellm_model" not in profile
+               and not _provider_of(profile).secrets)
     if var and not key and not keyless:
         return out, f"profile {name}: {var} is not set"
-    if key and not keyless:
+    if key:
         out["MCP_SCANNER_LLM_API_KEY"] = key
     return out, None

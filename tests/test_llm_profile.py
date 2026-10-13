@@ -325,7 +325,7 @@ class KeylessProviderTests(unittest.TestCase):
               "model": "<model-id>", "key_env": "OLLAMA_KEY"}
 
     def test_keyless_provider_ignores_key_env(self):
-        env, ready, reason, _ = lp.skillspector_env("o", dict(self.OLLAMA), {})
+        _, ready, reason, _ = lp.skillspector_env("o", dict(self.OLLAMA), {})
         self.assertTrue(ready, reason)
         self.assertNotIn("is not set", reason)
 
@@ -333,6 +333,16 @@ class KeylessProviderTests(unittest.TestCase):
         out, problem = lp.cisco_env("o", dict(self.OLLAMA), {})
         self.assertIsNone(problem)
         self.assertNotIn("MCP_SCANNER_LLM_API_KEY", out)
+
+    def test_keyless_cisco_profile_forwards_a_present_key(self):
+        out, problem = lp.cisco_env("o", dict(self.OLLAMA), {"OLLAMA_KEY": "k-present"})
+        self.assertIsNone(problem)
+        self.assertEqual(out["MCP_SCANNER_LLM_API_KEY"], "k-present")
+
+    def test_keyless_cisco_profile_with_litellm_model_needs_its_key(self):
+        profile = dict(self.OLLAMA, litellm_model="ollama/custom")
+        _, problem = lp.cisco_env("o", profile, {})
+        self.assertIn("OLLAMA_KEY is not set", problem)
 
     def test_keyed_provider_still_needs_its_key(self):
         profile = {"kind": "api", "protocol": "native", "provider": "anthropic",
@@ -352,7 +362,8 @@ class KeylessProviderTests(unittest.TestCase):
         if not required:
             self.skipTest("no keyless provider with required settings")
         p = required[0]
-        profile = {"kind": "api", "protocol": "native", "provider": p.id, "model": "<model-id>"}
+        profile = {"kind": "api", "protocol": "native", "provider": p.id, "model": "<model-id>",
+                   "key_env": "SOME_KEY"}
         _, ready, _, _ = lp.skillspector_env("r", profile, {})
         self.assertFalse(ready)
 
