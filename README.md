@@ -490,7 +490,7 @@ The Docker daemon must be running (start Docker Desktop on Windows/macOS). The
 first sandbox run builds the scan image and pre-fetches dependencies, which can
 take a few minutes; later runs reuse the image and are much faster.
 
-Stage 1 uses SkillSpector with the same provider resolution as skill scans (your coding-agent CLI by default, or a hosted provider under `SKILLSPECTOR_*`). Stage 2 uses Cisco mcp-scanner with `MCP_SCANNER_LLM_*` for LLM/behavioral analysis. If you set `VIRUSTOTAL_API_KEY`, Cisco mcp-scanner can also check bundled binaries, archives, PDFs, and similar non-source files against VirusTotal by hash. A clean Stage 1 scan does **not** prove runtime safety — reach for `--sandbox` when a server is unfamiliar. Install only after a SAFE verdict.
+Stage 1 uses SkillSpector with the same provider resolution as skill scans (your coding-agent CLI by default, or a hosted provider under `SKILLSPECTOR_*`). Stage 2 uses Cisco mcp-scanner with an `[llm.use] mcp` profile or `MCP_SCANNER_LLM_*` for LLM/behavioral analysis. If you set `VIRUSTOTAL_API_KEY`, Cisco mcp-scanner can also check bundled binaries, archives, PDFs, and similar non-source files against VirusTotal by hash. A clean Stage 1 scan does **not** prove runtime safety — reach for `--sandbox` when a server is unfamiliar. Install only after a SAFE verdict.
 
 ### Scan a CLI tool before installing
 
@@ -720,7 +720,7 @@ optional malware-reputation layer:
 | Scanner layer | What it covers | Configuration |
 |---------------|----------------|---------------|
 | **NVIDIA SkillSpector** | skill scans and static MCP source scans | `SKILLSPECTOR_PROVIDER` — default `claude_cli` / `opencode_cli` (your CLI login, no key); or any hosted provider in the table below with its credentials |
-| **Cisco mcp-scanner LLM** | live MCP runtime scans (`remote` / `--sandbox`) | `MCP_SCANNER_LLM_*`; any LiteLLM-supported provider (API key) |
+| **Cisco mcp-scanner LLM** | live MCP runtime scans (`remote` / `--sandbox`) | an `[llm.use] mcp` profile (`kind = "api"`: an OpenAI-compatible endpoint or any LiteLLM-supported provider, with its key) or `MCP_SCANNER_LLM_*` |
 | **VirusTotal analyzer** | optional malware reputation for bundled binaries, archives, PDFs, and similar non-source files | `VIRUSTOTAL_API_KEY` |
 
 **Access paths.** Every path below that can reach a model can run the skill scan and the verifier (the verifier runs through SkillSpector's own client with the scan's environment, so it shares the skill-scan connection; `python scripts/llm_check.py` shows both rows).
@@ -730,7 +730,7 @@ optional malware-reputation layer:
 | Claude Code CLI (`claude`) | CLI login | yes (auto-detected) | yes | no | no |
 | OpenCode CLI (`opencode`) | CLI login | yes (auto-detected) | yes | no | no |
 | Gemini CLI (`gemini`) | CLI login | only when named explicitly | yes | no | no |
-| Anthropic, OpenAI, Azure OpenAI, AWS Bedrock, Google Gemini via ADC (`gemini`), NVIDIA, Ollama, Anthropic proxy | API provider | yes (Anthropic, OpenAI, NVIDIA auto-detected by key) | yes | where LiteLLM supports the provider (Cisco needs `MCP_SCANNER_LLM_*` settings) | OpenAI protocol only |
+| Anthropic, OpenAI, Azure OpenAI, AWS Bedrock, Google Gemini via ADC (`gemini`), NVIDIA, Ollama, Anthropic proxy | API provider | yes (Anthropic, OpenAI, NVIDIA auto-detected by key) | yes | where LiteLLM supports the provider (Cisco needs an `[llm.use] mcp` API profile or `MCP_SCANNER_LLM_*` settings) | OpenAI protocol only |
 | OpenAI-compatible endpoint (OpenRouter, Groq, Together, Mistral, DeepSeek, LM Studio, vLLM, ...) | API provider | yes (`openai_compatible`) | yes | yes (LiteLLM) | yes |
 | Codex CLI (`codex`) | refused | no | no | no | no |
 | Antigravity CLI (`agy`) | refused | no | no | no | no |
@@ -751,7 +751,7 @@ With a [personal config file](#configuration-prefer-environment-variables), `[ll
 
 SkillSpector still runs its static layer without any LLM: patterns, taint tracking, YARA, and OSV.dev CVE lookup remain active. That is useful, but it misses semantic attacks that pattern rules do not encode.
 
-Cisco's runtime scanner is independent. Set `MCP_SCANNER_LLM_API_KEY`, `MCP_SCANNER_LLM_MODEL`, and optionally `MCP_SCANNER_LLM_BASE_URL` / `MCP_SCANNER_LLM_API_VERSION` for OpenAI, Anthropic, Gemini, Bedrock, Azure OpenAI, Ollama, or any LiteLLM-supported model. The key and model provider must match: use a Claude/Anthropic model such as `claude-haiku-4-5` with an Anthropic key, or a GPT/OpenAI model with an OpenAI key. For local LLM endpoints such as Ollama, Cisco still expects `MCP_SCANNER_LLM_API_KEY` to be set; use a harmless dummy value such as `ollama` or `test`.
+Cisco's runtime scanner is independent. Use an `[llm.use] mcp` profile (`kind = "api"`), or set `MCP_SCANNER_LLM_API_KEY`, `MCP_SCANNER_LLM_MODEL`, and optionally `MCP_SCANNER_LLM_BASE_URL` / `MCP_SCANNER_LLM_API_VERSION` for OpenAI, Anthropic, Gemini, Bedrock, Azure OpenAI, Ollama, or any LiteLLM-supported model. The key and model provider must match: use a Claude/Anthropic model such as `claude-haiku-4-5` with an Anthropic key, or a GPT/OpenAI model with an OpenAI key. For local LLM endpoints such as Ollama, Cisco still expects `MCP_SCANNER_LLM_API_KEY` to be set; use a harmless dummy value such as `ollama` or `test`.
 
 VirusTotal is optional but useful for private users because it fills a different gap than source scanning: known malware in bundled binary or archive-like files. Cisco's VirusTotal analyzer sends SHA256 hashes by default, not file contents; uploads happen only if `MCP_SCANNER_VIRUSTOTAL_UPLOAD_FILES=true` is explicitly set.
 
@@ -817,7 +817,7 @@ The warnings describe what the skill genuinely does:
 - **It runs external binaries.** The skill drives [SkillSpector](https://github.com/NVIDIA/SkillSpector) (skills + static MCP scan) and [cisco-ai-mcp-scanner](https://github.com/cisco-ai-defense/mcp-scanner) (optional live MCP runtime check) — that *is* its job. Both are official, open-source security tools installed isolated via `uv`. SkillSpector is **pinned to the exact commit behind a tagged release** (see `scripts/_pins.py`), so "scan = install" applies to the scanner itself (review and bump deliberately); the Cisco MCP scanner is pulled from PyPI at the latest version.
 - **It starts Docker containers, one of them privileged.** The live MCP check runs the target in a locked-down container next to a packet-capture container (`NET_RAW` only), and the dynamic install analysis runs OpenSSF's image with `--privileged`, which gVisor needs to build its own sandbox inside it. The analysed package runs inside gVisor, not in the privileged container itself.
 - **It installs across multiple agents.** The bundled installer links the audited skill into every agent you have — the "one scan, every agent" feature. Scanners read cross-platform installation as expanded reach; here it is the intended behavior, and you can limit it with `--tools`.
-- **It can route data to an LLM.** SkillSpector sends scanned skill/static-source contents to the provider you configure — by default the coding-agent CLI you are logged into (so the data goes to that vendor under your own account), otherwise the hosted provider whose key you set. `AGENT_GUARD_STATIC_ONLY=1` disables only that LLM layer; static analyzers can still use configured network lookups such as OSV. Cisco's runtime MCP scan sends runtime tool/prompt data to the `MCP_SCANNER_LLM_*` provider you configure.
+- **It can route data to an LLM.** SkillSpector sends scanned skill/static-source contents to the provider you configure — by default the coding-agent CLI you are logged into (so the data goes to that vendor under your own account), otherwise the hosted provider whose key you set. `AGENT_GUARD_STATIC_ONLY=1` disables only that LLM layer; static analyzers can still use configured network lookups such as OSV. Cisco's runtime MCP scan sends runtime tool/prompt data to the provider you configure for it (`[llm.use] mcp` profile or `MCP_SCANNER_LLM_*`).
 
 You cannot drive these flags to green without removing the tool's reason to exist. What keeps it trustworthy is everything in the [Security model](#security-model) above: scanned content is treated as data, the workflow fails closed, repos are pinned and ZIP-scanned before any clone, and the skill ships **no hidden or invisible characters** of its own.
 
