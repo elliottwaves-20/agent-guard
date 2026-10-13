@@ -33,7 +33,7 @@ import _llm_profile
 import _user_config
 
 LEGACY_PROVIDER = "claude_cli"
-LEGACY_MODEL = "claude-haiku-4-5-20251001"
+LEGACY_MODEL = ""
 
 
 def live_selection(env) -> tuple[dict, str]:
@@ -181,10 +181,10 @@ kind = "cli"
 cli = "claude"
 model = "<model-id>"
 
-[llm.profiles.haiku]
+[llm.profiles.second]
 kind = "cli"
 cli = "claude"
-model = "claude-haiku-4-5-20251001"
+model = "<model-id-2>"
 """
 
     def setUp(self):
@@ -206,9 +206,9 @@ model = "claude-haiku-4-5-20251001"
 
     def test_profile_can_be_chosen_for_the_live_run(self):
         env = {"AGENT_GUARD_CONFIG": str(self.config),
-               "AGENT_GUARD_LLM_INTEGRATION_PROFILE": "haiku"}
+               "AGENT_GUARD_LLM_INTEGRATION_PROFILE": "second"}
         overlay, label = live_selection(env)
-        self.assertEqual(overlay["AGENT_GUARD_LLM_SKILLS"], "haiku")
+        self.assertEqual(overlay["AGENT_GUARD_LLM_SKILLS"], "second")
 
     def test_unknown_or_unconfigured_profile_is_an_error(self):
         with self.assertRaises(_llm_profile.ProfileError):
@@ -216,7 +216,7 @@ model = "claude-haiku-4-5-20251001"
                             "AGENT_GUARD_LLM_INTEGRATION_PROFILE": "nope"})
         with patch.object(_user_config, "find_config", return_value=None), \
              self.assertRaises(_llm_profile.ProfileError):
-            live_selection({"AGENT_GUARD_LLM_INTEGRATION_PROFILE": "haiku"})
+            live_selection({"AGENT_GUARD_LLM_INTEGRATION_PROFILE": "second"})
 
     def test_explicit_provider_bypasses_the_config(self):
         env = {"AGENT_GUARD_CONFIG": str(self.config),

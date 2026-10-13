@@ -23,13 +23,27 @@ def config(use=None, **profiles):
     return {"llm": {"use": use or {}, "profiles": profiles}}
 
 
+def describe(config, env, **kw):
+    # Never let a test fall through to importing the real _skillspector wrapper.
+    kw.setdefault("skillspector_python", lambda: "python")
+    return llm_check.describe(config, env, **kw)
+
+
 def rows_by_scanner(rows):
     return {row["scanner"]: row for row in rows}
 
 
 class DescribeTests(unittest.TestCase):
+    def test_describe_does_not_import_the_wrapper(self):
+        saved = sys.modules.pop("_skillspector", None)
+        if saved is not None:
+            self.addCleanup(sys.modules.__setitem__, "_skillspector", saved)
+        self.addCleanup(sys.modules.pop, "_skillspector", None)
+        describe(CONFIG, {}, which=lambda name: None)
+        self.assertNotIn("_skillspector", sys.modules)
+
     def test_profiles_are_reported_per_scanner(self):
-        rows = rows_by_scanner(llm_check.describe(
+        rows = rows_by_scanner(describe(
             CONFIG, {"CEREBRAS_API_KEY": "csk-x"}, which=lambda name: f"/bin/{name}"))
         self.assertEqual(rows["skills"]["source"], "profile luna")
         self.assertEqual(rows["skills"]["connection"], "claude_cli")
@@ -40,7 +54,7 @@ class DescribeTests(unittest.TestCase):
         self.assertTrue(rows["campaign"]["ready"])
 
     def test_missing_key_and_binary_are_reported_not_raised(self):
-        rows = rows_by_scanner(llm_check.describe(CONFIG, {}, which=lambda name: None))
+        rows = rows_by_scanner(describe(CONFIG, {}, which=lambda name: None))
         self.assertFalse(rows["skills"]["ready"])
         self.assertIn("claude", rows["skills"]["problem"])
         self.assertFalse(rows["mcp"]["ready"])
@@ -50,12 +64,12 @@ class DescribeTests(unittest.TestCase):
 
     def test_broken_profile_becomes_a_row_problem(self):
         cfg = {"llm": {"use": {"skills": "missing"}, "profiles": {}}}
-        rows = rows_by_scanner(llm_check.describe(cfg, {}, which=lambda name: None))
+        rows = rows_by_scanner(describe(cfg, {}, which=lambda name: None))
         self.assertFalse(rows["skills"]["ready"])
         self.assertIn("missing", rows["skills"]["problem"])
 
     def test_without_profiles_scanners_report_legacy_sources(self):
-        rows = rows_by_scanner(llm_check.describe(
+        rows = rows_by_scanner(describe(
             {}, {"MCP_SCANNER_LLM_MODEL": "openai/gpt-x"}, which=lambda name: None))
         self.assertEqual(rows["skills"]["source"], "legacy env")
         self.assertEqual(rows["mcp"]["source"], "legacy env")
@@ -65,7 +79,7 @@ class DescribeTests(unittest.TestCase):
 
     def test_verifier_row_follows_the_skills_row(self):
         cfg = config({"skills": "claude"}, claude={"kind": "cli", "cli": "claude"})
-        rows = llm_check.describe(cfg, {}, which=lambda n: f"/bin/{n}",
+        rows = describe(cfg, {}, which=lambda n: f"/bin/{n}",
                                   skillspector_python=lambda: "/py")
         scanners = [r["scanner"] for r in rows]
         self.assertEqual(scanners[:2], ["skills", "verifier"])
@@ -74,7 +88,7 @@ class DescribeTests(unittest.TestCase):
 
     def test_verifier_row_is_not_ready_without_the_tool_python(self):
         cfg = config({"skills": "claude"}, claude={"kind": "cli", "cli": "claude"})
-        rows = llm_check.describe(cfg, {}, which=lambda n: f"/bin/{n}",
+        rows = describe(cfg, {}, which=lambda n: f"/bin/{n}",
                                   skillspector_python=lambda: None)
         self.assertTrue(rows[0]["ready"])
         self.assertFalse(rows[1]["ready"])
@@ -82,7 +96,7 @@ class DescribeTests(unittest.TestCase):
 
     def test_disabled_provider_shows_its_reason(self):
         cfg = config({"skills": "luna"}, luna={"kind": "cli", "cli": "codex"})
-        rows = llm_check.describe(cfg, {}, which=lambda n: f"/bin/{n}",
+        rows = describe(cfg, {}, which=lambda n: f"/bin/{n}",
                                   skillspector_python=lambda: "/py")
         self.assertIn("codex_cli is disabled", rows[0]["problem"])
         self.assertIn("codex_cli is disabled", rows[1]["problem"])
