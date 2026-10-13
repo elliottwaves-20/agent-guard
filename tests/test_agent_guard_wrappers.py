@@ -415,6 +415,31 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                                        spans=lambda _d, rels: {r: ((2, 2),) for r in rels})
                 self.assertEqual(result.verdict, expected)
 
+    def test_unusable_skills_profile_gives_no_verdict(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as d:
+            config = Path(d) / "config.toml"
+            config.write_text('[llm.use]\nskills = "p"\n\n[llm.profiles.p]\n'
+                              'kind = "cli"\ncli = "claude"\n', encoding="utf-8")
+            report = Path(d) / "report.json"
+            self._write_report(report)
+            old_env, old_which = os.environ.copy(), shutil.which
+            try:
+                os.environ.clear()
+                os.environ.update({"AGENT_GUARD_NO_DOTENV": "1", "AGENT_GUARD_CONFIG": str(config)})
+                shutil.which = lambda name, *a, **k: None
+                module = importlib.reload(importlib.import_module("_skillspector"))
+                self.assertEqual(module.LLM_PROFILE[0], "p")
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(module.verdict_skillspector(report, 0), 2)
+                self.assertIn("NO VERDICT -- the chosen LLM provider cannot run", out.getvalue())
+            finally:
+                shutil.which = old_which
+                os.environ.clear()
+                os.environ.update(old_env)
+                importlib.reload(importlib.import_module("_skillspector"))
+
     def test_parse_limit_with_other_gap_still_no_verdict(self):
         module = importlib.import_module("_skillspector")
         other = dict(self.PARSE_LIMIT, reason_code="analyzer_error")
