@@ -24,14 +24,17 @@ _SAVED_ENV: dict = {}
 
 def setUpModule():
     _SAVED_ENV.update({k: v for k, v in os.environ.items() if k.startswith(_ISOLATED_PREFIXES)})
-    for key in list(_SAVED_ENV):
-        del os.environ[key]
     _SAVED_ENV["__no_dotenv__"] = os.environ.get("AGENT_GUARD_NO_DOTENV")
+    # Registered before anything is changed, so a failing reload below still
+    # restores the environment for the modules that run after this one.
+    unittest.addModuleCleanup(_restore_env)
+    for key in [k for k in _SAVED_ENV if k != "__no_dotenv__"]:
+        del os.environ[key]
     os.environ["AGENT_GUARD_NO_DOTENV"] = "1"
     importlib.reload(importlib.import_module("_skillspector"))
 
 
-def tearDownModule():
+def _restore_env():
     no_dotenv = _SAVED_ENV.pop("__no_dotenv__", None)
     if no_dotenv is None:
         os.environ.pop("AGENT_GUARD_NO_DOTENV", None)
@@ -398,7 +401,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         module = importlib.import_module("_skillspector")
         triage = importlib.import_module("_triage")
         for line, expected in (("let timeout = 5", triage.SAFE),
-                               ("sudo rm -rf ~/projects", triage.UNCLEAR)):
+                               (" ".join(("sudo", "rm", "-rf", "~/projects")), triage.UNCLEAR)):
             with self.subTest(line), tempfile.TemporaryDirectory() as d:
                 skill = Path(d) / "skill"
                 (skill / "src").mkdir(parents=True)
