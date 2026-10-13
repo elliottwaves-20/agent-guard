@@ -80,7 +80,7 @@ class DescribeTests(unittest.TestCase):
     def test_verifier_row_follows_the_skills_row(self):
         cfg = config({"skills": "claude"}, claude={"kind": "cli", "cli": "claude"})
         rows = describe(cfg, {}, which=lambda n: f"/bin/{n}",
-                                  skillspector_python=lambda: "/py")
+                        skillspector_python=lambda: "/py")
         scanners = [r["scanner"] for r in rows]
         self.assertEqual(scanners[:2], ["skills", "verifier"])
         self.assertEqual(rows[1]["connection"], rows[0]["connection"])
@@ -89,7 +89,7 @@ class DescribeTests(unittest.TestCase):
     def test_verifier_row_is_not_ready_without_the_tool_python(self):
         cfg = config({"skills": "claude"}, claude={"kind": "cli", "cli": "claude"})
         rows = describe(cfg, {}, which=lambda n: f"/bin/{n}",
-                                  skillspector_python=lambda: None)
+                        skillspector_python=lambda: None)
         self.assertTrue(rows[0]["ready"])
         self.assertFalse(rows[1]["ready"])
         self.assertEqual(rows[1]["problem"], "SkillSpector tool Python not found")
@@ -97,7 +97,7 @@ class DescribeTests(unittest.TestCase):
     def test_disabled_provider_shows_its_reason(self):
         cfg = config({"skills": "luna"}, luna={"kind": "cli", "cli": "codex"})
         rows = describe(cfg, {}, which=lambda n: f"/bin/{n}",
-                                  skillspector_python=lambda: "/py")
+                        skillspector_python=lambda: "/py")
         self.assertIn("codex_cli is disabled", rows[0]["problem"])
         self.assertIn("codex_cli is disabled", rows[1]["problem"])
 

@@ -13,8 +13,8 @@ The live run uses the machine's real setup, because that is what scans use:
 the active `skills` profile of the personal agent-guard config (read even
 though the rest of the suite ignores it), or the profile named by
 AGENT_GUARD_LLM_INTEGRATION_PROFILE. Without a config it follows
-SKILLSPECTOR_PROVIDER / SKILLSPECTOR_MODEL, and claude_cli with Haiku 4.5 is
-only the last fallback. AGENT_GUARD_LLM_INTEGRATION_PROVIDER / _MODEL bypass
+SKILLSPECTOR_PROVIDER / SKILLSPECTOR_MODEL, and claude_cli with the CLI's own
+default model is only the last fallback. AGENT_GUARD_LLM_INTEGRATION_PROVIDER / _MODEL bypass
 the config entirely.
 """
 import importlib
