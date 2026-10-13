@@ -431,7 +431,7 @@ wiring agent-guard into scripts or CI:
 | Exit code | Meaning | Action |
 |-----------|---------|--------|
 | `0` | SAFE verdict | Install is reasonable |
-| `1` | BLOCK/REVIEW verdict — real findings were reported | Read the findings, decide deliberately |
+| `1` | BLOCK/REVIEW verdict — real findings, or a partial inspection limited to passages the shell parser gave up on | Read the findings (or the listed passages), decide deliberately |
 | `2` | **No verdict** — scanner/LLM/config error, fail-closed | Fix the cause and re-run; never install |
 
 The wrapper writes SkillSpector JSON to a temporary report, so Windows console encoding issues, provider resolution, and SkillSpector's execution/coverage ledger are handled automatically.

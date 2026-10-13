@@ -388,6 +388,8 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 self.assertEqual(module.verdict_skillspector(report, 0), 1)
         self.assertIn("src/main.swift: static_parse_limit", out.getvalue())
         self.assertIn("[BLOCK] partial inspection", out.getvalue())
+        self.assertNotIn("agent-guard checks exactly those", out.getvalue())
+        self.assertIn("update_skills.py checks them automatically", out.getvalue())
 
     def test_parse_limit_with_other_gap_still_no_verdict(self):
         module = importlib.import_module("_skillspector")

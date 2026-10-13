@@ -846,8 +846,9 @@ def verdict_skillspector(report_path: Path, code: int, runtime_hint: bool = Fals
                       f"{_console_text(str(item.get('reason_code')))}")
             if parse_limit_only(completeness) and not FAIL_ON_INCOMPLETE:
                 print("[BLOCK] partial inspection -- the scanner's shell parser gave up on "
-                      "passages of the files listed above. agent-guard checks exactly those "
-                      "lines; without that check, do not install.")
+                      "passages of the files listed above. Do not install until those lines "
+                      "are checked: update_skills.py checks them automatically; otherwise "
+                      "review them by hand.")
                 return 1
             print("[BLOCK] NO VERDICT -- incomplete inspection requires review; no clean verdict."
                   + (" Review the files listed above by hand." if gaps else ""))
