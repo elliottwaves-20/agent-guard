@@ -391,6 +391,30 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertNotIn("agent-guard checks exactly those", out.getvalue())
         self.assertIn("update_skills.py checks them automatically", out.getvalue())
 
+    def test_parse_limit_block_is_resolved_by_the_triage(self):
+        """Wrapper exit 1 for a parser-limit-only report is what update_skills
+        hands to the triage; a harmless passage there ends SAFE, a risky one
+        does not."""
+        module = importlib.import_module("_skillspector")
+        triage = importlib.import_module("_triage")
+        for line, expected in (("let timeout = 5", triage.SAFE),
+                               ("sudo rm -rf ~/projects", triage.UNCLEAR)):
+            with self.subTest(line), tempfile.TemporaryDirectory() as d:
+                skill = Path(d) / "skill"
+                (skill / "src").mkdir(parents=True)
+                (skill / "src" / "main.swift").write_text(f"// tool\n{line}\n", encoding="utf-8")
+                report = self._parse_limit_report(d, self.PARSE_LIMIT)
+                data = json.loads(report.read_text(encoding="utf-8"))
+                data.setdefault("metadata", {})["skillspector_version"] = (
+                    triage.load_catalog()["skillspector"])
+                report.write_text(json.dumps(data), encoding="utf-8")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    raw = module.verdict_skillspector(report, 0)
+                self.assertEqual(raw, 1)
+                result = triage.triage(module._load_report(report), skill, raw,
+                                       spans=lambda _d, rels: {r: ((2, 2),) for r in rels})
+                self.assertEqual(result.verdict, expected)
+
     def test_parse_limit_with_other_gap_still_no_verdict(self):
         module = importlib.import_module("_skillspector")
         other = dict(self.PARSE_LIMIT, reason_code="analyzer_error")
