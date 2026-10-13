@@ -44,6 +44,7 @@ HARD, CLEARED, OPEN, CONFIRMED = "hard", "cleared", "open", "confirmed"
 HARD_RULES = frozenset({"YR1", "YR2", "YR3", "YR4", "AST8", "SC3", "TT3", "BH2"})
 YARA_RULES = frozenset({"YR1", "YR2", "YR3", "YR4"})
 YARA_NAME = re.compile(r"YARA rule '([^']+)'")
+YARA_NAMESPACE = re.compile(r"\[([^\[\]]+)\]\s*$")
 # Findings that show data leaving the machine; any of them (or hard evidence) in
 # a file blocks every catalog check for the other findings in that file.
 EXFIL_RULES = frozenset({"E1", "E2", "E3", "E4", "E5", "P3", "TT1", "TT2", "TT3", "TT4", "BH2"})
@@ -134,6 +135,12 @@ class Finding:
         """YR*: name of the built-in YARA rule that matched, from the report's pattern."""
         match = YARA_NAME.match(str(self.raw.get("pattern") or ""))
         return match.group(1) if match else ""
+
+    @property
+    def yara_namespace(self) -> str:
+        """YR*: namespace of the matched rule; SkillSpector appends ' [ns]' unless 'default'."""
+        match = YARA_NAMESPACE.search(str(self.raw.get("pattern") or ""))
+        return match.group(1) if match else "default"
 
     def only_parse_limit(self) -> bool:
         """AE1 whose every reason is the shell parser giving up: the file was read."""
@@ -455,12 +462,13 @@ def recheck_yara(findings: list, skill_dir: Path, yara, version: str) -> set:
     if not wanted:
         return set()
     try:
-        answers = yara(Path(skill_dir), [(f.yara_rule, f.file) for f in wanted])
+        answers = yara(Path(skill_dir), [(f.yara_rule, f.yara_namespace, f.file) for f in wanted])
     except Exception:  # a failed recheck leaves the findings hard
         return set()
     if not isinstance(answers, dict):
         return set()
-    return {id(f) for f in wanted if answers.get((f.yara_rule, f.file)) is True}
+    return {id(f) for f in wanted
+            if answers.get((f.yara_rule, f.yara_namespace, f.file)) is True}
 
 
 def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | None = None,
@@ -471,8 +479,8 @@ def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | Non
     `verifier(open_dispositions, skill_dir) -> answers` is stage d (optional);
     `spans(skill_dir, [rel, ...]) -> {rel: [(start, end), ...] | None}` locates
     the lines behind parser-limit AE1 findings (_parse_spans.py, optional);
-    `yara(skill_dir, [(rule, rel), ...]) -> {(rule, rel): bool|None}` rechecks
-    YARA matches with corrected rules (_yara_recheck.py, optional)."""
+    `yara(skill_dir, [(rule, namespace, rel), ...]) -> {(rule, namespace, rel): bool|None}`
+    rechecks YARA matches with corrected rules (_yara_recheck.py, optional)."""
     if raw_code not in (0, 1):
         return Result(NO_VERDICT, [])
     catalog = catalog if catalog is not None else load_catalog()

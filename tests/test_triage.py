@@ -577,9 +577,10 @@ class InspectionGapTests(unittest.TestCase):
         self.assertEqual(self.judge(completeness, raw=0).verdict, t.SAFE)
 
 
-def yara_issue(rule_name="info_stealer", file="SKILL.md", line=3):
+def yara_issue(rule_name="info_stealer", file="SKILL.md", line=3, namespace="malware"):
     item = issue("YR1", file=file, line=line)
-    item["pattern"] = f"YARA rule '{rule_name}': Information stealer patterns [malware]"
+    suffix = f" [{namespace}]" if namespace != "default" else ""
+    item["pattern"] = f"YARA rule '{rule_name}': Information stealer patterns{suffix}"
     return item
 
 
@@ -591,7 +592,8 @@ class FakeRecheck:
 
     def __call__(self, skill_dir, checks):
         self.asked.append(sorted(checks))
-        return {c: self.answer for c in checks}
+        # Mirrors the real Rechecker: only the corrected rule's namespace is rechecked.
+        return {c: self.answer if c[1] == "malware" else None for c in checks}
 
 
 class YaraCorrectionTests(unittest.TestCase):
@@ -607,7 +609,14 @@ class YaraCorrectionTests(unittest.TestCase):
         result = self.judge(True)
         self.assertEqual(result.verdict, t.SAFE)
         self.assertEqual(result.dispositions[0].check, "yara-correction")
-        self.assertEqual(self.recheck.asked, [[("info_stealer", "SKILL.md")]])
+        self.assertEqual(self.recheck.asked, [[("info_stealer", "malware", "SKILL.md")]])
+
+    def test_same_rule_name_in_another_namespace_stays_hard(self):
+        skill = Skill(self, {"SKILL.md": "---\ndescription: cook" "ies and Edge\n---\n"})
+        recheck = FakeRecheck(True)
+        result = skill.judge(report(yara_issue(namespace="custom")), yara=recheck)
+        self.assertNotEqual(result.verdict, t.SAFE)
+        self.assertEqual(recheck.asked, [[("info_stealer", "custom", "SKILL.md")]])
 
     def test_real_stealer_path_stays_hard(self):
         result = self.judge(False)
@@ -648,6 +657,12 @@ class YaraCorrectionTests(unittest.TestCase):
         f = t.Finding.from_issue(yara_issue("reverse_shell"))
         self.assertEqual(f.yara_rule, "reverse_shell")
         self.assertEqual(t.Finding.from_issue(issue("YR1")).yara_rule, "")
+
+    def test_yara_namespace_is_parsed(self):
+        self.assertEqual(t.Finding.from_issue(yara_issue()).yara_namespace, "malware")
+        self.assertEqual(t.Finding.from_issue(yara_issue(namespace="default")).yara_namespace,
+                         "default")
+        self.assertEqual(t.Finding.from_issue(issue("YR1")).yara_namespace, "default")
 
 
 if __name__ == "__main__":

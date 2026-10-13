@@ -69,7 +69,7 @@ def run_boot(python: str, checks: list, rules: dict) -> list:
 
 class Rechecker:
     """Callable for _triage.triage(yara=...):
-    (skill_dir, [(rule, rel), ...]) -> {(rule, rel): True | False | None}.
+    (skill_dir, [(rule, namespace, rel), ...]) -> {(rule, namespace, rel): True | False | None}.
     `runner(checks, rules) -> [True | False | None, ...]`."""
 
     def __init__(self, runner, corrections: dict):
@@ -80,15 +80,20 @@ class Rechecker:
     def __call__(self, skill_dir: Path, checks: list) -> dict:
         base = Path(skill_dir).resolve()
         wanted, out = [], {}
-        for rule, rel in sorted({c for c in checks if c[0] in self.rules}):
+        for key in sorted(set(checks)):
+            rule, namespace, rel = key
+            correction = self.rules.get(rule)
+            if correction is None:
+                continue
             path = (base / rel).resolve()
-            if path.is_relative_to(base) and path.is_file():
-                wanted.append(((rule, rel), path))
+            if (correction["namespace"] == namespace and path.is_relative_to(base)
+                    and path.is_file()):
+                wanted.append((key, path))
             else:
-                out[(rule, rel)] = None
+                out[key] = None
         if wanted:
             try:
-                answers = self.runner([(rule, path) for (rule, _), path in wanted],
+                answers = self.runner([(key[0], path) for key, path in wanted],
                                       {n: self.rules[n] for n in {k[0] for k, _ in wanted}})
             except Exception:  # a failed recheck leaves the findings hard
                 answers = [None] * len(wanted)

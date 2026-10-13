@@ -95,22 +95,34 @@ class RecheckerTests(unittest.TestCase):
         self.recheck = y.Rechecker(runner, y.load_corrections())
 
     def test_asks_only_for_corrected_rules(self):
-        out = self.recheck(self.dir, [("info_stealer", "SKILL.md"), ("reverse_shell", "SKILL.md")])
-        self.assertEqual(out, {("info_stealer", "SKILL.md"): True})
+        out = self.recheck(self.dir, [("info_stealer", "malware", "SKILL.md"),
+                                      ("reverse_shell", "malware", "SKILL.md")])
+        self.assertEqual(out, {("info_stealer", "malware", "SKILL.md"): True})
         self.assertEqual(self.calls, [[("info_stealer", "SKILL.md")]])
 
     def test_out_of_tree_file_is_not_checked(self):
-        out = self.recheck(self.dir, [("info_stealer", "../outside.md"),
-                                      ("info_stealer", "missing.md")])
-        self.assertEqual(out, {("info_stealer", "../outside.md"): None,
-                               ("info_stealer", "missing.md"): None})
+        out = self.recheck(self.dir, [("info_stealer", "malware", "../outside.md"),
+                                      ("info_stealer", "malware", "missing.md")])
+        self.assertEqual(out, {("info_stealer", "malware", "../outside.md"): None,
+                               ("info_stealer", "malware", "missing.md"): None})
+        self.assertEqual(self.calls, [])
+
+    def test_other_namespace_is_not_rechecked(self):
+        out = self.recheck(self.dir, [("info_stealer", "custom", "SKILL.md")])
+        self.assertEqual(out, {("info_stealer", "custom", "SKILL.md"): None})
+        self.assertEqual(self.calls, [])
+
+    def test_rule_without_namespace_is_not_rechecked(self):
+        out = self.recheck(self.dir, [("info_stealer", "default", "SKILL.md")])
+        self.assertEqual(out, {("info_stealer", "default", "SKILL.md"): None})
         self.assertEqual(self.calls, [])
 
     def test_runner_failure_is_unknown(self):
         def broken(checks, rules):
             raise OSError("no venv")
-        out = y.Rechecker(broken, y.load_corrections())(self.dir, [("info_stealer", "SKILL.md")])
-        self.assertEqual(out, {("info_stealer", "SKILL.md"): None})
+        out = y.Rechecker(broken, y.load_corrections())(self.dir,
+                                                        [("info_stealer", "malware", "SKILL.md")])
+        self.assertEqual(out, {("info_stealer", "malware", "SKILL.md"): None})
 
 
 @unittest.skipUnless(os.environ.get("AGENT_GUARD_INTEGRATION") == "1", "integration")
