@@ -248,14 +248,14 @@ class Verifier:
     With `cache_path`, new settled answers are written there after each call."""
 
     def __init__(self, provider: str, model: str, runner, cache: dict | None = None,
-                 cache_path: Path | None = None):
+                 cache_path: Path | None = None, endpoint: str = ""):
         import _providers
         try:
             _providers.check_enabled(provider)
         except (KeyError, _providers.DisabledProvider) as exc:
             raise ValueError(f"verifier cannot use provider {provider!r}: {exc}") from None
         self.provider, self.model, self.runner = provider, model, runner
-        self.tag = f"{provider}:{model or 'default'}"
+        self.tag = f"{provider}:{model or 'default'}" + (f"@{endpoint}" if endpoint else "")
         self.cache = cache if cache is not None else {}
         self.cache_path = cache_path
 
@@ -312,9 +312,14 @@ def from_setup(env=None, cache_path=None):
     scan_env = _skillspector.skillspector_env()
     provider = scan_env.get("SKILLSPECTOR_PROVIDER", "")
     model = scan_env.get("SKILLSPECTOR_MODEL", "").strip()
+    import _providers
+    spec = _providers.CATALOG.get(provider)
+    endpoint = "|".join(scan_env[var] for var in (spec.settings if spec else ())
+                        if var.endswith(("_URL", "_ENDPOINT")) and scan_env.get(var, "").strip())
     path = cache_path if cache_path is not None else default_cache_path(env)
     try:
         return Verifier(provider, model, lambda prompts: run_boot(python, scan_env, prompts),
-                        cache=load_cache(path) if path is not None else None, cache_path=path)
+                        cache=load_cache(path) if path is not None else None, cache_path=path,
+                        endpoint=endpoint)
     except ValueError:
         return None

@@ -140,6 +140,15 @@ class FailClosedTests(unittest.TestCase):
             with self.subTest(pid), self.assertRaises(ValueError):
                 v.Verifier(pid, "m", Runner())
 
+    def test_endpoint_is_part_of_the_tag(self):
+        a = v.Verifier("openai_compatible", "m", Runner(), endpoint="https://a.example/v1")
+        b = v.Verifier("openai_compatible", "m", Runner(), endpoint="https://b.example/v1")
+        self.assertNotEqual(a.tag, b.tag)
+
+    def test_tag_without_endpoint_is_unchanged(self):
+        self.assertEqual(v.Verifier("claude_cli", "m", Runner()).tag, "claude_cli:m")
+        self.assertEqual(v.Verifier("anthropic", "", Runner()).tag, "anthropic:default")
+
     def test_cache_is_kept_apart_per_provider(self):
         cache = {}
         Case(self).judge(Runner(reply("benign")), cache)          # judged by claude_cli:m
@@ -238,13 +247,13 @@ class PersistentCacheTests(unittest.TestCase):
 
 
 class SetupTests(unittest.TestCase):
-    def _from_setup(self, ready, provider="anthropic", python="py"):
+    def _from_setup(self, ready, provider="anthropic", python="py", env_extra=None):
         import _skillspector as ss
         saved = (ss.LLM_READY, ss.PROVIDER, ss.skillspector_python, ss.skillspector_env)
         try:
             ss.LLM_READY, ss.PROVIDER = ready, provider
             ss.skillspector_python = lambda: python
-            ss.skillspector_env = lambda: {"SKILLSPECTOR_PROVIDER": provider}
+            ss.skillspector_env = lambda: {"SKILLSPECTOR_PROVIDER": provider, **(env_extra or {})}
             with tempfile.TemporaryDirectory() as tmp:
                 return v.from_setup(cache_path=Path(tmp) / "cache.json")
         finally:
@@ -254,6 +263,11 @@ class SetupTests(unittest.TestCase):
         verifier = self._from_setup(True, "anthropic")
         self.assertIsNotNone(verifier)
         self.assertEqual(verifier.provider, "anthropic")
+
+    def test_endpoint_comes_from_the_scan_environment(self):
+        verifier = self._from_setup(True, "openai_compatible",
+                                    env_extra={"SKILLSPECTOR_COMPAT_BASE_URL": "https://a.example/v1"})
+        self.assertTrue(verifier.tag.endswith("@https://a.example/v1"))
 
     def test_no_ready_llm_means_no_verifier(self):
         self.assertIsNone(self._from_setup(False))
