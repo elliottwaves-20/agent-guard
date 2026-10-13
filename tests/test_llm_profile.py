@@ -8,6 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")  # never read this machine's personal config
 lp = importlib.import_module("_llm_profile")
+_providers = importlib.import_module("_providers")
 
 LUNA = {"kind": "cli", "cli": "codex", "model": "<model-id>"}  # refused: codex_cli is disabled
 CLAUDE = {"kind": "cli", "cli": "claude", "model": "<model-id>"}
@@ -317,6 +318,43 @@ GEMINI_ADC = {"kind": "api", "protocol": "native", "provider": "gemini", "model"
               "settings": {"GOOGLE_CLOUD_PROJECT": "demo-project"}}
 AZURE = {"kind": "api", "protocol": "native", "provider": "azure_openai", "model": "<model-id>",
          "key_env": "MY_AZURE", "settings": {"AZURE_OPENAI_ENDPOINT": "https://x.openai.azure.com"}}
+
+
+class KeylessProviderTests(unittest.TestCase):
+    OLLAMA = {"kind": "api", "protocol": "native", "provider": "ollama",
+              "model": "<model-id>", "key_env": "OLLAMA_KEY"}
+
+    def test_keyless_provider_ignores_key_env(self):
+        env, ready, reason, _ = lp.skillspector_env("o", dict(self.OLLAMA), {})
+        self.assertTrue(ready, reason)
+        self.assertNotIn("is not set", reason)
+
+    def test_keyless_cisco_profile_ignores_key_env(self):
+        out, problem = lp.cisco_env("o", dict(self.OLLAMA), {})
+        self.assertIsNone(problem)
+        self.assertNotIn("MCP_SCANNER_LLM_API_KEY", out)
+
+    def test_keyed_provider_still_needs_its_key(self):
+        profile = {"kind": "api", "protocol": "native", "provider": "anthropic",
+                   "model": "<model-id>", "key_env": "MY_KEY"}
+        _, ready, reason, _ = lp.skillspector_env("a", profile, {})
+        self.assertFalse(ready)
+        self.assertIn("MY_KEY is not set", reason)
+
+    def test_openai_protocol_cisco_profile_still_needs_its_key(self):
+        profile = dict(CEREBRAS)
+        _, problem = lp.cisco_env("c", profile, {})
+        self.assertIn("CEREBRAS_API_KEY is not set", problem)
+
+    def test_keyless_profile_still_needs_required_settings(self):
+        required = [p for p in _providers.CATALOG.values()
+                    if p.kind == "api" and not p.secrets and p.required]
+        if not required:
+            self.skipTest("no keyless provider with required settings")
+        p = required[0]
+        profile = {"kind": "api", "protocol": "native", "provider": p.id, "model": "<model-id>"}
+        _, ready, _, _ = lp.skillspector_env("r", profile, {})
+        self.assertFalse(ready)
 
 
 class OpennessTests(unittest.TestCase):

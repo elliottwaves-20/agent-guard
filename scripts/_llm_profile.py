@@ -220,8 +220,9 @@ def skillspector_env(name: str, profile: dict, env, which=shutil.which):
         if profile["protocol"] == "openai":
             out["SKILLSPECTOR_COMPAT_BASE_URL"] = profile["base_url"]
         target = provider.secrets[0] if provider.secrets else None
-        if var:
-            if key and target:
+        # A provider that takes no key ignores key_env altogether.
+        if var and target:
+            if key:
                 out[target] = key
                 reason = f"profile {name}: {provider.id} (API key)"
             else:
@@ -269,8 +270,10 @@ def cisco_env(name: str, profile: dict, env):
         # its reasoning request rule to this profile's model as well.
         out["AGENT_GUARD_CISCO_REASONING"] = "1"
     var, key = _key(profile, env)
-    if var and not key:
+    # A native provider without secrets takes no key, so key_env is ignored.
+    keyless = profile["protocol"] != "openai" and not _provider_of(profile).secrets
+    if var and not key and not keyless:
         return out, f"profile {name}: {var} is not set"
-    if key:
+    if key and not keyless:
         out["MCP_SCANNER_LLM_API_KEY"] = key
     return out, None
