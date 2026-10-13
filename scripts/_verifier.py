@@ -314,8 +314,10 @@ def from_setup(env=None, cache_path=None):
     model = scan_env.get("SKILLSPECTOR_MODEL", "").strip()
     import _providers
     spec = _providers.CATALOG.get(provider)
+    # Every provider setting that is set (endpoint, deployment, project, region
+    # ...) can change which model answers, so all of them are part of the tag.
     endpoint = "|".join(scan_env[var] for var in (spec.settings if spec else ())
-                        if var.endswith(("_URL", "_ENDPOINT")) and scan_env.get(var, "").strip())
+                        if scan_env.get(var, "").strip())
     path = cache_path if cache_path is not None else default_cache_path(env)
     try:
         return Verifier(provider, model, lambda prompts: run_boot(python, scan_env, prompts),
