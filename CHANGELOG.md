@@ -2,6 +2,8 @@
 
 ## 0.5.0 - unreleased
 
+- Remove the unused reviewed policy for skills CLI 1.5.26; distribution is
+  pinned to 1.7.0 and keeps that version's reviewed findings.
 - **New: `update_skills.py` -- scanned skill updates.** Installed skills are
   fetched by the pinned `skills` CLI in project mode into a throw-away
   directory, pinned to one commit (`owner/repo#<sha>`, recorded by the CLI as
