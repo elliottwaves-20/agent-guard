@@ -2,6 +2,12 @@
 
 ## 0.5.0 - unreleased
 
+- SkillSpector pin moved to main commit `2404212` (package version still
+  2.12.0). It adds #779 (a command wrapper with no command is complete, so a
+  table cell like `| timeout |` no longer counts as a parser limit) and #810
+  (OpenCode keeps its login plugins, so the ChatGPT login works without a
+  local workaround). The parser-span tests now use a dynamic `printf`
+  substitution as their trigger.
 - Remove the unused reviewed policy for skills CLI 1.5.26; distribution is
   pinned to 1.7.0 and keeps that version's reviewed findings.
 - **New: `update_skills.py` -- scanned skill updates.** Installed skills are

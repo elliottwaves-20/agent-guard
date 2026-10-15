@@ -67,17 +67,26 @@ class PinnedParserTests(unittest.TestCase):
             path.write_text(text, encoding="utf-8")
             return ps.run_boot(_tool_python(), [path])[0]
 
-    def test_table_cell_named_like_a_command_is_located(self):
-        text = "# Guide\n\nSome prose.\n\n|---|---|\n| timeout | Max wait in seconds |\n\nMore prose.\n"
+    # A command whose argument comes from a dynamic printf substitution still
+    # stops the parser. A bare wrapper name such as `| timeout |` no longer
+    # does since SkillSpector #779.
+    TRIGGER_ROW = '| `rm $(printf "$X")` | cleanup |\n'
+
+    def test_table_cell_with_a_dynamic_command_is_located(self):
+        text = "# Guide\n\nSome prose.\n\n|---|---|\n" + self.TRIGGER_ROW + "\nMore prose.\n"
         spans = self.spans("guide.md", text)
         self.assertTrue(spans, spans)
         lines = text.splitlines()
         located = "\n".join(lines[s - 1] for a, b in spans for s in range(a, b + 1))
-        self.assertIn("timeout", located)
+        self.assertIn("printf", located)
         self.assertNotIn("More prose", located)
 
+    def test_bare_wrapper_name_in_a_table_cell_has_no_spans(self):
+        text = "|---|---|\n| timeout | Max wait in seconds |\n"
+        self.assertEqual(self.spans("guide.md", text), [])
+
     def test_every_trigger_is_located(self):
-        table = "|---|---|\n| timeout | Max wait in seconds |\n"
+        table = "|---|---|\n" + self.TRIGGER_ROW
         text = table + "\nplain words\n" * 30 + table
         spans = self.spans("guide.md", text)
         self.assertIsNotNone(spans)
