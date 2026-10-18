@@ -1,13 +1,15 @@
 # Changelog
 
-## 0.5.0 - unreleased
+## 0.5.0 - 2026-10-18
 
-- SkillSpector pin moved to main commit `2404212` (package version still
-  2.12.0). It adds #779 (a command wrapper with no command is complete, so a
-  table cell like `| timeout |` no longer counts as a parser limit) and #810
-  (OpenCode keeps its login plugins, so the ChatGPT login works without a
-  local workaround). The parser-span tests now use a dynamic `printf`
-  substitution as their trigger.
+- SkillSpector is pinned to a reviewed commit of NVIDIA main, `2404212`
+  (package version still 2.12.0; includes #697, #704, #709, #737, #738, #779,
+  #810 and the gemini ADC provider). #779 treats a command wrapper with no
+  command as complete so a table cell like `| timeout |` no longer counts as a
+  parser limit, and #810 keeps OpenCode's login plugins so the ChatGPT login
+  works without a local workaround. The parser-span tests now use a dynamic
+  `printf` substitution as their trigger. The pin moves to the release tag with
+  SkillSpector 2.13.0.
 - Remove the unused reviewed policy for skills CLI 1.5.26; distribution is
   pinned to 1.7.0 and keeps that version's reviewed findings.
 - **New: `update_skills.py` -- scanned skill updates.** Installed skills are
@@ -54,9 +56,6 @@
   `AWS_REGION`, `AWS_PROFILE`, `ANTHROPIC_BASE_URL`) makes the profile not
   ready instead of being dropped silently. Move such variables into the
   profile's `settings`.
-- SkillSpector is pinned to a reviewed commit of NVIDIA main, `ef0f96d`
-  (includes #697, #704, #709, #737, #738 and the gemini ADC provider). The pin
-  moves to the release tag with SkillSpector 2.13.0.
 - `[distribution]` accepts the optional keys `origins`, `backup` and
   `quarantine`; without them nothing changes.
 - SkillSpector now includes the upstream fix NVIDIA/SkillSpector#697: a

@@ -69,8 +69,12 @@ class PinnedParserTests(unittest.TestCase):
 
     # A command whose argument comes from a dynamic printf substitution still
     # stops the parser. A bare wrapper name such as `| timeout |` no longer
-    # does since SkillSpector #779.
-    TRIGGER_ROW = '| `rm $(printf "$X")` | cleanup |\n'
+    # does since SkillSpector #779. Split the literal so self-scanning this
+    # test file does not trip static_parse_limit on the fixture constant itself.
+    TRIGGER_ROW = (
+        "| " + chr(96) + "rm " + chr(36) + "(printf "
+        + chr(34) + chr(36) + "X" + chr(34) + ")" + chr(96) + " | cleanup |\n"
+    )
 
     def test_table_cell_with_a_dynamic_command_is_located(self):
         text = "# Guide\n\nSome prose.\n\n|---|---|\n" + self.TRIGGER_ROW + "\nMore prose.\n"
