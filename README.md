@@ -630,13 +630,14 @@ compared with the installed copy; only a difference is scanned, and only a
 SAFE version replaces the installed one. Anything else keeps the installed
 version active:
 
-- **BLOCK:** the new version goes to `quarantine` (with its report), every
-  other skill from the same source is paused, and the skill is reported as
-  `blocked` in every run until you decide: `--accept NAME --reason TEXT`
+- **BLOCK:** the new version goes to `quarantine` (with its report) and the
+  skill is reported as `blocked` in every run (while sibling skills from the
+  same source continue to update) until you decide: `--accept NAME --reason TEXT`
   installs it after review, `--reject NAME` keeps the old one and silences that
-  exact version, `--remove NAME` stops managing the skill. An accepted
-  MEDIUM/LOW finding (rule + file) stays accepted for later versions of that
-  skill; HIGH and CRITICAL findings are never carried over and block again.
+  exact version, `--remove NAME` stops managing the skill. An accepted version
+  approves the exact content hash of each of its files for later versions of
+  that skill; changed or new files are judged anew, and hard evidence always
+  blocks.
 - **No verdict / fetch error:** reported, exit 2; nothing changes.
 
 Exit codes: 0 everything current or updated, 1 something waits for a decision,

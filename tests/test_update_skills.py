@@ -2,8 +2,8 @@
 
 The skills CLI and the scanner are replaced by fakes; what is tested is the
 boundary around them: nothing unscanned is promoted, a BLOCK keeps the old
-version and pauses the source, decisions are explicit, and a format change in
-the CLI's lock stops instead of being guessed around.
+version and blocks only that skill, decisions are explicit, and a format change
+in the CLI's lock stops instead of being guessed around.
 """
 import importlib
 import json
@@ -131,7 +131,7 @@ class UpdateFlowTests(unittest.TestCase):
         self.assertIn("v1", (backups[0] / "SKILL.md").read_text())
         self.assertEqual(json.loads(report.read_text())["skills"]["alpha"]["status"], "updated")
 
-    def test_block_keeps_old_version_quarantines_and_pauses_source(self):
+    def test_block_keeps_old_version_quarantines_and_updates_sibling(self):
         env = Env(self)
         for name in ("alpha", "beta"):
             write_skill(env.inbox / name, "v1")
@@ -141,17 +141,35 @@ class UpdateFlowTests(unittest.TestCase):
         report = env.inbox.parent / "report.json"
         self.assertEqual(env.run("--all", "--json", str(report)), 1)
         self.assertIn("v1", (env.inbox / "alpha" / "SKILL.md").read_text())
-        self.assertIn("v1", (env.inbox / "beta" / "SKILL.md").read_text())
-        self.assertEqual(env.scanned, ["alpha"])            # beta was paused, not scanned
+        self.assertIn("v2", (env.inbox / "beta" / "SKILL.md").read_text())
+        self.assertEqual(env.scanned, ["alpha", "beta"])
+        self.assertNotIn("paused", env.data()["sources"].get("o/r", {}))
         skills = json.loads(report.read_text())["skills"]
         self.assertEqual(skills["alpha"]["status"], "blocked")
-        self.assertEqual(skills["beta"]["status"], "paused")
+        self.assertEqual(skills["beta"]["status"], "updated")
         self.assertTrue(Path(skills["alpha"]["quarantine"]).is_dir())
 
-        # The next run reports the same state again instead of forgetting it.
+        # The next run reports alpha as blocked without re-scanning, and beta as unchanged.
         env.scanned.clear()
-        self.assertEqual(env.run("--all"), 1)
+        report2 = env.inbox.parent / "report2.json"
+        self.assertEqual(env.run("--all", "--json", str(report2)), 1)
         self.assertEqual(env.scanned, [])
+        skills2 = json.loads(report2.read_text())["skills"]
+        self.assertEqual(skills2["alpha"]["status"], "blocked")
+        self.assertEqual(skills2["beta"]["status"], "unchanged")
+
+    def test_manual_source_pause_skips_source(self):
+        env = Env(self)
+        write_skill(env.inbox / "alpha", "v1")
+        env.upstream[("o/r", "alpha")] = "v2"
+        env.origins({"alpha": "o/r"})
+        data = env.data()
+        data["sources"]["o/r"] = {"paused": {"skill": "manual pause", "at": "2026-10-11T00:00:00+00:00"}}
+        staging.save_origins(env.dist.origins, data)
+        report = env.inbox.parent / "report.json"
+        self.assertEqual(env.run("--all", "--json", str(report)), 1)
+        self.assertEqual(env.scanned, [])
+        self.assertEqual(json.loads(report.read_text())["skills"]["alpha"]["status"], "paused")
 
     def test_accept_installs_quarantined_version_and_unpauses(self):
         env = Env(self)
@@ -247,7 +265,9 @@ class UpdateFlowTests(unittest.TestCase):
         env.origins({"alpha": "o/r", "beta": "o/r"})
         env.verdicts["alpha"] = 1
         env.run("--all")
-        self.assertIn("paused", env.data()["sources"]["o/r"])
+        data = env.data()
+        data["sources"]["o/r"] = {"paused": {"skill": "alpha", "at": "2026-10-10T00:00:00+00:00"}}
+        staging.save_origins(env.dist.origins, data)
         self.assertEqual(env.run("--remove", "alpha"), 0)
         self.assertNotIn("alpha", env.data()["skills"])
         self.assertNotIn("paused", env.data()["sources"].get("o/r", {}))

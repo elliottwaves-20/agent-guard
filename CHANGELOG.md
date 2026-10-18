@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `update_skills.py` now blocks only the affected skill when an update scan
+  returns `dangerous` or `unclear`, instead of automatically pausing every
+  other skill from the same GitHub source; manual source pauses in
+  `origins["sources"][source]["paused"]` remain supported.
+
 ## 0.5.0 - 2026-10-18
 
 - SkillSpector is pinned to a reviewed commit of NVIDIA main, `2404212`

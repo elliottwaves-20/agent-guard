@@ -19,9 +19,9 @@ known false-positive patterns and files approved earlier are cleared, and the
 verifier LLM of the `[llm.use] skills` profile looks at what is still open.
 Only a `safe` triage verdict installs. `dangerous` and `unclear` are blocked.
 
-A block is not just skipped. The blocked version is kept in `quarantine`, every
-other skill from the same source is paused, and the skill stays `blocked` in
-each run's report until someone decides:
+A block is not just skipped. The blocked version is kept in `quarantine` and
+the skill stays `blocked` in each run's report (while sibling skills from the
+same source continue to update) until someone decides:
 
   --accept NAME --reason TEXT   install the quarantined version after review and
                                 approve the content of each of its files. A later
@@ -147,21 +147,29 @@ class Run:
                     self.report(name, PAUSED, source=source,
                                 detail=f"source paused since {paused['at']} ({paused['skill']} blocked)")
             return
-        entries = [self.origins["skills"][name] for name in names]
+        active = []
+        for name in names:
+            if self.origins["skills"][name].get("blocked"):
+                self.report_blocked(name)
+            else:
+                active.append(name)
+        if not active:
+            return
+        entries = [self.origins["skills"][name] for name in active]
         try:
             branch, head = _staging.remote_head(source)
             if all(e.get("ref") == head for e in entries):
-                for name, entry in zip(names, entries):
+                for name, entry in zip(active, entries):
                     entry["checked_at"] = now()
                     self.report(name, UNCHANGED, source=source)
                 return
             ref, _since = _staging.settled_ref(source, branch, head)
         except StageError as exc:
-            for name in names:
+            for name in active:
                 self.report(name, FAILED, source=source, detail=str(exc))
             return
         if all(e.get("ref") == ref for e in entries):
-            for name, entry in zip(names, entries):
+            for name, entry in zip(active, entries):
                 entry["checked_at"] = now()
                 self.report(name, COOLDOWN, source=source, head=head,
                             detail=f"newer commit {head[:12]} is less than "
@@ -172,24 +180,19 @@ class Run:
                   f"{_staging.COOLDOWN_DAYS} days old (head {head[:12]} is newer)")
         with tempfile.TemporaryDirectory(prefix="agent-guard-stage-") as work:
             try:
-                staged = _staging.stage(source, ref, names, Path(work))
+                staged = _staging.stage(source, ref, active, Path(work))
             except StageError as exc:
-                for name in names:
+                for name in active:
                     self.report(name, FAILED, source=source, detail=str(exc))
                 return
-            for i, name in enumerate(names):
+            for name in active:
                 if name not in staged:
                     self.report(name, FAILED, source=source,
                                 detail="the source no longer provides this skill")
                     continue
-                if not self.check_one(name, source, ref, staged[name]):
-                    for rest in names[i + 1:]:
-                        self.report(rest, PAUSED, source=source,
-                                    detail=f"source paused: {name} was blocked")
-                    return
+                self.check_one(name, source, ref, staged[name])
 
-    def check_one(self, name, source, ref, staged) -> bool:
-        """False when the source must be paused."""
+    def check_one(self, name, source, ref, staged) -> None:
         entry = self.origins["skills"][name]
         target = self.dist.inbox / name
         try:
@@ -197,19 +200,19 @@ class Run:
             current = _staging.tree_digest(target) if target.exists() else None
         except StageError as exc:
             self.report(name, FAILED, source=source, detail=str(exc))
-            return True
+            return
         entry["checked_at"] = now()
         entry.setdefault("kind", "skill")
         if new == current:
             entry.update(ref=ref, tree_hash=new, files=_dossier.file_hashes(target))
             self.report(name, UNCHANGED, source=source)
-            return True
+            return
         if _dossier.rejected(entry, new):
             self.report(name, REJECTED, source=source, detail="this version was rejected before")
-            return True
+            return
         if self.dry:
             self.report(name, WOULD_SCAN, source=source, ref=ref)
-            return True
+            return
 
         print(f"\n-- scanning {name} ({source}#{ref[:12]}) --")
         report = staged.path.parent.parent.parent / f"report-{name}.json"
@@ -230,19 +233,19 @@ class Run:
             unchanged = False
         if not unchanged:
             self.report(name, FAILED, source=source, detail="staged files changed during the scan")
-            return True
+            return
         if result.verdict == _triage.SAFE:
             try:
                 old = _staging.promote(staged.path, target, new, self.dist.backup)
             except StageError as exc:
                 self.report(name, FAILED, source=source, detail=str(exc))
-                return True
+                return
             entry.update(ref=ref, tree_hash=new, updated_at=now(), verdict="SAFE",
                          files=_dossier.file_hashes(target), triage=summary)
             self.changed.append(name)
             self.report(name, UPDATED if current else INSTALLED, source=source, ref=ref,
                         backup=str(old) if old else None)
-            return True
+            return
         if result.verdict in (_triage.DANGEROUS, _triage.UNCLEAR):
             kept = _staging.quarantine_copy(staged.path, self.dist.quarantine, name, new)
             if kept is not None and report.is_file():
@@ -250,12 +253,10 @@ class Run:
             entry["blocked"] = {"hash": new, "ref": ref, "at": now(),
                                 "quarantine": str(kept) if kept else None,
                                 "verdict": result.verdict, "findings": summary["findings"]}
-            self.origins["sources"].setdefault(source, {})["paused"] = {"skill": name, "at": now()}
             self.report_blocked(name)
-            return False
+            return
         self.report(name, NO_VERDICT, source=source, ref=ref,
                     detail="the scan gave no verdict; the installed version stays active")
-        return True
 
     def report_blocked(self, name):
         entry = self.origins["skills"][name]
