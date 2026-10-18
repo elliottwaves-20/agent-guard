@@ -366,7 +366,10 @@ def main(argv=None) -> int:
         sys.exit(f"ERROR: {exc}")
 
     if args.import_lock:
-        added, skipped = _staging.import_global_lock(args.import_lock, origins, dist.inbox)
+        try:
+            added, skipped = _staging.import_global_lock(args.import_lock, origins, dist.inbox)
+        except StageError as exc:
+            sys.exit(f"ERROR: {exc}")
         _staging.save_origins(dist.origins, origins)
         print(f"[OK] adopted {len(added)} skill(s); skipped {len(skipped)} "
               "(not GitHub, already managed, or not in the inbox)")
@@ -381,8 +384,10 @@ def main(argv=None) -> int:
         _staging.save_origins(dist.origins, origins)
         return 0
     if args.remove:
-        if origins["skills"].pop(args.remove, None) is None:
+        if args.remove not in origins["skills"]:
             sys.exit(f"ERROR: {args.remove} is not managed")
+        clear_block(origins, args.remove)
+        origins["skills"].pop(args.remove, None)
         _staging.save_origins(dist.origins, origins)
         print(f"[OK] {args.remove} is no longer updated; its files in {dist.inbox} are untouched")
         return 0

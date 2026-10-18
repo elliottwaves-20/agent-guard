@@ -261,9 +261,12 @@ def import_global_lock(lock_path: Path, origins: dict, inbox: Path) -> tuple:
     """Adopt GitHub entries of the CLI's global lock for skills in `inbox`.
 
     Returns (added, skipped) name lists. Nothing is fetched here."""
-    data = json.loads(Path(lock_path).read_text(encoding="utf-8"))
-    if data.get("version") != GLOBAL_LOCK_VERSION:
-        raise StageError(f"{lock_path}: unknown global lock format {data.get('version')!r}")
+    try:
+        data = json.loads(Path(lock_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise StageError(f"cannot read {lock_path}: {exc}") from exc
+    if not isinstance(data, dict) or data.get("version") != GLOBAL_LOCK_VERSION:
+        raise StageError(f"{lock_path}: unknown global lock format {data.get('version') if isinstance(data, dict) else data!r}")
     added, skipped = [], []
     for name, entry in sorted((data.get("skills") or {}).items()):
         try:

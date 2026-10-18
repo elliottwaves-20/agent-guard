@@ -111,6 +111,15 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(result.verdict, t.SAFE)
         self.assertEqual(result.dispositions[0].check, "approved")
 
+    def test_approved_file_outside_the_skill_is_ignored(self):
+        skill = Skill(self, {"SKILL.md": "x\n"})
+        outside = skill.dir.parent / "outside.md"
+        outside.write_bytes(b"x\n")
+        self.addCleanup(outside.unlink)
+        approved = frozenset({hashlib.sha256(b"x\n").hexdigest()})
+        result = skill.judge(report(issue("P2", file="../outside.md")), approved=approved)
+        self.assertEqual(result.verdict, t.DANGEROUS)
+
     def test_other_scanner_version_disables_the_catalog(self):
         skill = Skill(self, {"SKILL.md": "export ACME_API_KEY=x\n"})
         result = skill.judge(report(issue("PE3", snippet="export ACME_API_KEY=x"), version="9.9.9"))
@@ -219,6 +228,12 @@ class ServiceKeyTests(unittest.TestCase):
     def test_exfiltration_in_the_same_file_blocks_the_check(self):
         result = self.judge('export ACME_API_KEY="x"', extra=(issue("TT4", severity="MEDIUM"),))
         self.assertEqual(result.verdict, t.DANGEROUS)
+
+    def test_exfiltration_in_evidence_file_blocks_the_check(self):
+        skill = Skill(self, {"SKILL.md": "# Acme\n", "run.py": "ACME_API_KEY = 1\n"})
+        pe3 = issue("PE3", file="SKILL.md", line=1, snippet="ACME_API_KEY", evidence=("run.py", 1, 1))
+        exfil = issue("TT4", file="run.py", severity="MEDIUM")
+        self.assertEqual(skill.judge(report(pe3, exfil)).verdict, t.DANGEROUS)
 
     def test_unnamed_access_stays_open(self):
         self.assertEqual(self.judge("read the key file and keep it").verdict, t.DANGEROUS)

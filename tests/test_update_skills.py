@@ -238,6 +238,28 @@ class UpdateFlowTests(unittest.TestCase):
         env.origins({"alpha": "o/r"})
         self.assertEqual(env.run("--all"), 2)
 
+    def test_remove_unpauses_source_when_blocked_skill_is_removed(self):
+        env = Env(self)
+        write_skill(env.inbox / "alpha", "v1")
+        write_skill(env.inbox / "beta", "v1")
+        env.upstream[("o/r", "alpha")] = "v2"
+        env.upstream[("o/r", "beta")] = "v2"
+        env.origins({"alpha": "o/r", "beta": "o/r"})
+        env.verdicts["alpha"] = 1
+        env.run("--all")
+        self.assertIn("paused", env.data()["sources"]["o/r"])
+        self.assertEqual(env.run("--remove", "alpha"), 0)
+        self.assertNotIn("alpha", env.data()["skills"])
+        self.assertNotIn("paused", env.data()["sources"].get("o/r", {}))
+        self.assertTrue((env.inbox / "alpha" / "SKILL.md").is_file())
+        self.assertEqual(env.run("--all"), 0)
+        self.assertIn("v2", (env.inbox / "beta" / "SKILL.md").read_text())
+
+    def test_import_lock_with_missing_file_exits_cleanly(self):
+        env = Env(self)
+        env.origins()
+        self.assertNotEqual(env.run("--import-lock", str(env.inbox.parent / "missing.json")), 0)
+
 
 class StagingBoundaryTests(unittest.TestCase):
     def test_unknown_lock_version_stops(self):

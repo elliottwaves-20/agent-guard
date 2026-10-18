@@ -207,14 +207,17 @@ def load_catalog(path: Path = CATALOG) -> dict:
 
 # -- helpers --------------------------------------------------------------------
 
-def file_text(skill_dir: Path, rel: str | None) -> str:
+def skill_file(skill_dir: Path, rel: str | None) -> Path | None:
     if not rel:
-        return ""
+        return None
     base = Path(skill_dir).resolve()
-    path = (base / rel).resolve()
-    if not path.is_relative_to(base) or not path.is_file():
-        return ""
-    return path.read_text(encoding="utf-8", errors="replace")
+    path = (base / str(rel)).resolve()
+    return path if path.is_relative_to(base) and path.is_file() else None
+
+
+def file_text(skill_dir: Path, rel: str | None) -> str:
+    path = skill_file(skill_dir, rel)
+    return path.read_text(encoding="utf-8", errors="replace") if path is not None else ""
 
 
 def flagged_text(f: Finding, skill_dir: Path) -> str:
@@ -300,7 +303,7 @@ def check_vendor_installer(f, skill_dir, origin, exfil_files):
         return False, "a URL does not belong to the publisher"
     if SUDO.search(f.snippet or text) or CREDENTIAL_STORE.search(f.snippet or text):
         return False, "uses sudo or a credential store"
-    if norm_path(f.file) in exfil_files:
+    if {norm_path(p) for p in (f.file, f.evidence_file) if p} & exfil_files:
         return False, "the file also shows data leaving the machine"
     return True, f"installer from the publisher's own address ({urlsplit(urls[0]).hostname})"
 
@@ -310,7 +313,7 @@ def check_service_key_env(f, skill_dir, origin, exfil_files):
     context = f"{f.snippet}\n{text}"
     if CREDENTIAL_STORE.search(context):
         return False, "touches a credential store"
-    if norm_path(f.file) in exfil_files:
+    if {norm_path(p) for p in (f.file, f.evidence_file) if p} & exfil_files:
         return False, "the file also shows data leaving the machine"
     if not (SERVICE_VAR.search(context) or DOTENV.search(context)):
         return False, "no named service setting on the flagged lines"
@@ -328,7 +331,7 @@ def check_no_risk_signal(f, skill_dir, origin, exfil_files):
     if (SUDO.search(text) or CREDENTIAL_STORE.search(text) or RISK_SIGNAL.search(text)
             or RISK_DELETE.search(text)):
         return False, "the snippet carries a risk signal"
-    if norm_path(f.evidence_file or f.file) in exfil_files:
+    if {norm_path(p) for p in (f.file, f.evidence_file) if p} & exfil_files:
         return False, "the file also shows data leaving the machine"
     return True, "differs from the declared purpose but carries no risk signal"
 
@@ -511,9 +514,9 @@ def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | Non
         if f.severity not in BLOCKING:
             continue
         # AE1 is about its target file, located or not: one approval key for both.
-        target = Path(skill_dir) / ((f.rule in COVERAGE_RULES and f.coverage_target)
-                                    or f.evidence_file or f.file)
-        if approved and target.is_file() and sha256_file(target) in approved:
+        target = skill_file(skill_dir, (f.rule in COVERAGE_RULES and f.coverage_target)
+                                       or f.evidence_file or f.file)
+        if approved and target is not None and sha256_file(target) in approved:
             out.append(Disposition(f, CLEARED, "approved", "file content approved before"))
             continue
         disposition = Disposition(f, OPEN, None, "no check cleared this finding")
