@@ -70,6 +70,31 @@ class SettledRefTests(unittest.TestCase):
         self.assertEqual(settled(fetch)[0], OLD)
         self.assertEqual(len(fetch.urls), 2)
 
+    def test_cursor_pagination_follows_after_token_from_link_header(self):
+        recent = [activity(HEAD, 1, before=MID)] * staging.ACTIVITY_PAGE
+        seen_urls = []
+
+        def cursor_fetch(url):
+            seen_urls.append(url)
+            if "after=cursor-page-2" in url:
+                return ([activity(OLD, 10)], None)
+            return (recent, "cursor-page-2")
+
+        self.assertEqual(settled(cursor_fetch)[0], OLD)
+        self.assertEqual(len(seen_urls), 2)
+        self.assertNotIn("&page=", seen_urls[0])
+        self.assertIn("after=cursor-page-2", seen_urls[1])
+
+    def test_next_after_cursor_parses_github_link_header(self):
+        header = (
+            '<https://api.github.com/repositories/1/activity?ref=refs%2Fheads%2Fmain'
+            '&per_page=100&after=Y3Vyc29yOnYyOpK7>; rel="next", '
+            '<https://api.github.com/repositories/1/activity?ref=refs%2Fheads%2Fmain>; rel="first"'
+        )
+        self.assertEqual(staging._next_after_cursor(header), "Y3Vyc29yOnYyOpK7")
+        self.assertIsNone(staging._next_after_cursor('<https://api.github.com/x>; rel="prev"'))
+        self.assertIsNone(staging._next_after_cursor(""))
+
     def test_too_many_recent_changes_stop(self):
         recent = [activity(HEAD, 1, before=MID)] * staging.ACTIVITY_PAGE
         with self.assertRaises(staging.StageError):

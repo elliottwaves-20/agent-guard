@@ -103,8 +103,9 @@ def remote_head(source: str, run=subprocess.run) -> tuple:
 # is never staged costs no download and no scan.
 COOLDOWN_DAYS = 7
 ACTIVITY_PAGE = 100
-ACTIVITY_MAX_PAGES = 5
+ACTIVITY_MAX_PAGES = 20
 NULL_SHA = "0" * 40
+_NEXT_LINK_RE = re.compile(r'<([^>]+)>;\s*rel="next"')
 
 
 def _timestamp(value) -> _dt.datetime:
@@ -117,6 +118,32 @@ def _timestamp(value) -> _dt.datetime:
     return stamp
 
 
+def _next_after_cursor(link_header: str) -> str | None:
+    import urllib.parse
+    match = _NEXT_LINK_RE.search(link_header or "")
+    if not match:
+        return None
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(match.group(1)).query)
+    values = query.get("after") or []
+    return values[0] if values and values[0] else None
+
+
+def _fetch_activity_page(url: str) -> tuple:
+    import urllib.error
+    import urllib.request
+    import _url_resolver
+    req = urllib.request.Request(url, headers={**_url_resolver.DEFAULT_HEADERS, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            link = resp.headers.get("Link") or ""
+            return json.load(resp), _next_after_cursor(link)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise _url_resolver.FetchError(_url_resolver.format_fetch_error(url, exc.code, body)) from exc
+    except urllib.error.URLError as exc:
+        raise _url_resolver.FetchError(f"could not fetch {url}: {exc.reason}") from exc
+
+
 def settled_ref(source: str, branch: str, head: str, *, now=None,
                 days: int = COOLDOWN_DAYS, fetch=None) -> tuple:
     """(commit, time) of the newest state of `branch` that is at least `days` old.
@@ -127,17 +154,26 @@ def settled_ref(source: str, branch: str, head: str, *, now=None,
     the head itself is old (time None). Any doubt stops with StageError."""
     import urllib.parse
     import _url_resolver
-    fetch = fetch or _url_resolver.http_json
+    fetch = fetch or _fetch_activity_page
     now = now or _dt.datetime.now(_dt.timezone.utc)
     cutoff = now - _dt.timedelta(days=days)
     ref = urllib.parse.quote(f"refs/heads/{branch}", safe="")
     base = f"https://api.github.com/repos/{check_source(source)}/activity?ref={ref}&per_page={ACTIVITY_PAGE}"
     oldest = None
+    after_cursor = None
     for page in range(1, ACTIVITY_MAX_PAGES + 1):
+        url = f"{base}&after={urllib.parse.quote(after_cursor, safe='')}" if after_cursor else (
+            base if page == 1 else f"{base}&page={page}"
+        )
         try:
-            items = fetch(f"{base}&page={page}")
+            raw = fetch(url)
         except _url_resolver.FetchError as exc:
             raise StageError(f"{source}: branch activity unavailable ({exc})") from exc
+        if isinstance(raw, tuple) and len(raw) == 2:
+            items, next_cursor = raw
+            has_cursor = True
+        else:
+            items, next_cursor, has_cursor = raw, None, False
         if not isinstance(items, list):
             raise StageError(f"{source}: unexpected branch activity answer")
         entries = []
@@ -153,8 +189,9 @@ def settled_ref(source: str, branch: str, head: str, *, now=None,
                 return after, stamp.isoformat()
             if oldest is None or stamp < oldest[0]:
                 oldest = (stamp, after, before)
-        if len(items) < ACTIVITY_PAGE:
+        if len(items) < ACTIVITY_PAGE or (has_cursor and not next_cursor):
             break
+        after_cursor = next_cursor
     else:
         raise StageError(f"{source}: more than {ACTIVITY_PAGE * ACTIVITY_MAX_PAGES} branch changes "
                          f"in {days} days; not choosing a version")

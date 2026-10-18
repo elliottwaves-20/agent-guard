@@ -6,6 +6,9 @@
   returns `dangerous` or `unclear`, instead of automatically pausing every
   other skill from the same GitHub source; manual source pauses in
   `origins["sources"][source]["paused"]` remain supported.
+- `_staging.settled_ref` now follows GitHub's `Link` cursor (`after=...`) on
+  `/repos/{owner}/{repo}/activity` instead of repeating page 1 with `&page=N`
+  (#31).
 
 ## 0.5.0 - 2026-10-18
 
