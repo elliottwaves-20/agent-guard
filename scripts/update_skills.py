@@ -17,7 +17,8 @@ download and no scan. New skills go the same way.
 The raw scan is judged by the triage (_triage.py): hard evidence is final,
 known false-positive patterns and files approved earlier are cleared, and the
 verifier LLM of the `[llm.use] skills` profile looks at what is still open.
-Only a `safe` triage verdict installs. `dangerous` and `unclear` are blocked.
+Only a `safe` triage verdict installs automatically. `dangerous`, `unclear`
+and `no_verdict` wait for an explicit review decision.
 
 A block is not just skipped. The blocked version is kept in `quarantine` and
 the skill stays `blocked` in each run's report (while sibling skills from the
@@ -53,7 +54,7 @@ import _staging
 import _triage
 import _verifier
 import _yara_recheck
-from _skillspector import USER_CONFIG, run_skillspector
+from _skillspector import USER_CONFIG, llm_run_incomplete, run_skillspector
 from _staging import StageError, now
 from _user_config import ConfigError
 
@@ -70,9 +71,33 @@ def load_report(report: Path) -> dict | None:
     """The SkillSpector JSON report, or None when it cannot be read."""
     try:
         data = json.loads(report.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) and isinstance(data.get("issues", []), list) else None
+
+
+def no_verdict_detail(raw: int, data: dict | None) -> str:
+    """Explain a missing verdict without turning diagnostic data into approval."""
+    parts = [f"scanner wrapper exit {raw}"]
+    if data is None:
+        parts.append("unreadable or missing scan report")
+    else:
+        if reason := llm_run_incomplete(data):
+            parts.append(f"LLM: {reason}")
+        completeness = data.get("analysis_completeness")
+        if isinstance(completeness, dict):
+            if completeness.get("coverage_percent") is not None:
+                parts.append(f"coverage {completeness['coverage_percent']}%")
+            exceptions = completeness.get("ledger_exceptions")
+            if isinstance(exceptions, list):
+                for item in exceptions:
+                    if isinstance(item, dict):
+                        parts.append(f"{item.get('reason_code', 'analyzer exception')} "
+                                     f"at {item.get('path', '?')}")
+        if raw in (0, 1):
+            parts.append("triage could not settle the inspection gaps")
+    parts.append("needs manual review; no automatic installation")
+    return "; ".join(parts)
 
 
 def triage_line(summary: dict) -> str:
@@ -217,8 +242,8 @@ class Run:
         print(f"\n-- scanning {name} ({source}#{ref[:12]}) --")
         report = staged.path.parent.parent.parent / f"report-{name}.json"
         raw = run_skillspector(staged.path, report_output=report)
-        data = load_report(report) if raw in (0, 1) else None
-        if data is None:
+        data = load_report(report)
+        if raw not in (0, 1) or data is None:
             result = _triage.Result(_triage.NO_VERDICT, [])
         else:
             result = _triage.triage(data, staged.path, raw, origin=_triage.Origin(source, ref),
@@ -246,13 +271,27 @@ class Run:
             self.report(name, UPDATED if current else INSTALLED, source=source, ref=ref,
                         backup=str(old) if old else None)
             return
-        if result.verdict in (_triage.DANGEROUS, _triage.UNCLEAR):
-            kept = _staging.quarantine_copy(staged.path, self.dist.quarantine, name, new)
-            if kept is not None and report.is_file():
-                kept.with_name(kept.name + ".report.json").write_bytes(report.read_bytes())
+        if result.verdict in (_triage.DANGEROUS, _triage.UNCLEAR, _triage.NO_VERDICT):
+            saved_report = None
+            try:
+                kept = _staging.quarantine_copy(staged.path, self.dist.quarantine, name, new)
+                if kept is None and result.verdict == _triage.NO_VERDICT:
+                    raise StageError("NO VERDICT review needs [distribution] quarantine; "
+                                     "configure it and run the update again")
+                if kept is not None and report.is_file():
+                    saved_report = kept.with_name(kept.name + ".report.json")
+                    saved_report.write_bytes(report.read_bytes())
+            except (OSError, StageError) as exc:
+                self.report(name, FAILED, source=source,
+                            detail=f"could not preserve candidate/report: {exc}")
+                return
             entry["blocked"] = {"hash": new, "ref": ref, "at": now(),
                                 "quarantine": str(kept) if kept else None,
+                                "report": str(saved_report) if saved_report else None,
+                                "scanner_exit": raw,
                                 "verdict": result.verdict, "findings": summary["findings"]}
+            if result.verdict == _triage.NO_VERDICT:
+                entry["blocked"]["detail"] = no_verdict_detail(raw, data)
             self.report_blocked(name)
             return
         self.report(name, NO_VERDICT, source=source, ref=ref,
@@ -261,9 +300,13 @@ class Run:
     def report_blocked(self, name):
         entry = self.origins["skills"][name]
         blocked = entry["blocked"]
-        self.report(name, BLOCKED, source=entry["source"], ref=blocked["ref"],
+        status = NO_VERDICT if blocked.get("verdict") == _triage.NO_VERDICT else BLOCKED
+        detail = f"waiting for --accept/--reject since {blocked['at']}"
+        if blocked.get("detail"):
+            detail += "; " + blocked["detail"]
+        self.report(name, status, source=entry["source"], ref=blocked["ref"],
                     since=blocked["at"], quarantine=blocked.get("quarantine"),
-                    detail=f"waiting for --accept/--reject since {blocked['at']}")
+                    report=blocked.get("report"), detail=detail)
 
     def sync(self):
         if self.changed and not self.dry:
@@ -285,7 +328,7 @@ def accept(dist, origins, name, reason):
     entry = origins["skills"].get(name) or sys.exit(f"ERROR: {name} is not managed")
     blocked = entry.get("blocked") or sys.exit(f"ERROR: {name} is not blocked")
     if not (reason or "").strip():
-        sys.exit("ERROR: --accept needs --reason: why the findings are acceptable")
+        sys.exit("ERROR: --accept needs --reason: what was reviewed and why this version is acceptable")
     kept = Path(blocked["quarantine"]) if blocked.get("quarantine") else None
     if kept is None or not kept.is_dir():
         sys.exit(f"ERROR: no quarantined copy of {name}; run the update again with "
@@ -321,7 +364,11 @@ def pending_text(origins: dict, origins_path) -> str:
                      f"{blocked.get('verdict', 'blocked')} since {blocked['at']}, "
                      f"{len(blocked.get('findings', []))} open finding(s)")
         if blocked.get("quarantine"):
-            lines.append(f"  quarantined copy: {blocked['quarantine']} (report next to it)")
+            lines.append(f"  quarantined copy: {blocked['quarantine']}")
+        if blocked.get("detail"):
+            lines.append(f"  reason: {blocked['detail']}")
+        if blocked.get("report"):
+            lines.append(f"  scan report: {blocked['report']}")
         lines.append(f"  decide: update_skills.py --accept {name} --reason '...' | --reject {name}")
     paused = sorted(s for s, v in origins["sources"].items() if v.get("paused"))
     if paused:
@@ -355,7 +402,7 @@ def main(argv=None) -> int:
     ap.add_argument("--import-lock", type=Path, metavar="FILE",
                     help="adopt GitHub entries of the skills CLI's global lock")
     ap.add_argument("--accept", metavar="NAME")
-    ap.add_argument("--reason", help="with --accept: why the blocking findings are acceptable")
+    ap.add_argument("--reason", help="with --accept: what was reviewed and why this version is acceptable")
     ap.add_argument("--reject", metavar="NAME")
     ap.add_argument("--remove", metavar="NAME")
     args = ap.parse_args(argv)
@@ -425,7 +472,7 @@ def main(argv=None) -> int:
     for source in sorted(by_source):
         run.update_source(source, by_source[source])
 
-    if args.add and run.results.get(args.add, {}).get("status") not in {INSTALLED, BLOCKED}:
+    if args.add and run.results.get(args.add, {}).get("status") not in {INSTALLED, BLOCKED, NO_VERDICT}:
         origins["skills"].pop(args.add, None)
     if not args.dry_run:
         _staging.save_origins(dist.origins, origins)

@@ -53,6 +53,7 @@ class Env:
         self.upstream = {}          # (source, name) -> body
         self.verdicts = {}          # name -> exit code
         self.findings = {}          # name -> [(rule, file, severity)]
+        self.reports = {}           # optional raw report bytes; None means no report
         self.scanned = []
         self.verifier = None        # stage d of the triage; off unless a test sets it
         self.head = REF             # the branch head ls-remote reports
@@ -87,7 +88,9 @@ class Env:
         if report_output is not None:
             issues = [{"id": r, "severity": v, "location": {"file": f, "start_line": 1}}
                       for r, f, v in findings]
-            Path(report_output).write_text(json.dumps({"issues": issues}), encoding="utf-8")
+            content = self.reports.get(name, json.dumps({"issues": issues}).encode("utf-8"))
+            if content is not None:
+                Path(report_output).write_bytes(content)
         return code
 
     def run(self, *argv):
@@ -244,11 +247,160 @@ class UpdateFlowTests(unittest.TestCase):
     def test_failed_add_leaves_no_origin(self):
         env = Env(self)
         env.origins()
-        env.verdicts["gamma"] = 2
-        env.upstream[("o/r", "gamma")] = "v1"
         self.assertEqual(env.run("--add", "gamma", "--source", "o/r"), 2)
         self.assertNotIn("gamma", env.data()["skills"])
         self.assertFalse((env.inbox / "gamma").exists())
+
+
+class NoVerdictReviewTests(unittest.TestCase):
+    def setUp(self):
+        self.env = Env(self)
+        write_skill(self.env.inbox / "alpha", "v1")
+        self.env.upstream[("o/r", "alpha")] = "v2"
+        self.env.origins({"alpha": "o/r"})
+        self.env.verdicts["alpha"] = 2
+        self.env.reports["alpha"] = json.dumps({
+            "issues": [], "analysis_completeness": {
+                "coverage_percent": 72.7, "ledger_exceptions": [{
+                    "reason_code": "obfuscated_instruction_text", "phase": "static",
+                    "fatal": False, "path": "SKILL.md"}]}}).encode("utf-8")
+
+    def test_keeps_report_and_reason_without_installing_or_rescanning(self):
+        env = self.env
+        report = env.inbox.parent / "summary.json"
+        for _ in range(2):
+            self.assertEqual(env.run("--all", "--json", str(report)), 2)
+            entry = env.data()["skills"]["alpha"]
+            self.assertIn("blocked", entry)
+            blocked = entry["blocked"]
+            self.assertEqual(blocked["verdict"], "no_verdict")
+            self.assertIn("v2", (Path(blocked["quarantine"]) / "SKILL.md").read_text())
+            self.assertEqual(Path(blocked["report"]).read_bytes(), env.reports["alpha"])
+            item = json.loads(report.read_text())["skills"]["alpha"]
+            self.assertEqual(item["status"], "no-verdict")
+            for text in (item["detail"], updater.pending_text(env.data(), env.dist.origins)):
+                self.assertIn("72.7", text)
+                self.assertIn("obfuscated_instruction_text", text)
+            self.assertNotIn("approved", entry)
+            self.assertIn("v1", (env.inbox / "alpha" / "SKILL.md").read_text())
+        self.assertEqual(env.scanned, ["alpha"])
+
+    def test_accept_requires_reason_and_records_exact_content(self):
+        env = self.env
+        self.assertEqual(env.run("--all"), 2)
+        self.assertNotEqual(env.run("--accept", "alpha", "--reason", "  "), 0)
+        self.assertEqual(env.run("--accept", "alpha", "--reason", "reviewed all files"), 0)
+        entry = env.data()["skills"]["alpha"]
+        self.assertEqual(entry["verdict"], "ACCEPTED")
+        self.assertNotIn("blocked", entry)
+        self.assertEqual(entry["decisions"][-1]["reason"], "reviewed all files")
+        self.assertEqual(sorted(entry["approved"]), sorted(entry["files"].values()))
+        self.assertIn("v2", (env.inbox / "alpha" / "SKILL.md").read_text())
+        self.assertIn("v1", next(env.dist.backup.glob("*/SKILL.md")).read_text())
+        env.head = env.settled = REF2
+        env.upstream[("o/r", "alpha")] = "v3"
+        self.assertEqual(env.run("--all"), 2)
+        self.assertIn("v2", (env.inbox / "alpha" / "SKILL.md").read_text())
+
+    def test_reject_silences_only_that_candidate(self):
+        env = self.env
+        self.assertEqual(env.run("--all"), 2)
+        self.assertEqual(env.run("--reject", "alpha"), 0)
+        self.assertEqual(env.run("--all"), 0)
+        self.assertEqual(env.scanned, ["alpha"])
+        env.upstream[("o/r", "alpha")] = "v3"
+        self.assertEqual(env.run("--all"), 2)
+        self.assertIn("v1", (env.inbox / "alpha" / "SKILL.md").read_text())
+
+    def test_modified_candidate_cannot_be_accepted(self):
+        env = self.env
+        env.run("--all")
+        entry = env.data()["skills"]["alpha"]
+        self.assertIn("blocked", entry)
+        (Path(entry["blocked"]["quarantine"]) / "extra.txt").write_text("changed")
+        self.assertNotEqual(env.run("--accept", "alpha", "--reason", "reviewed"), 0)
+        self.assertNotIn("approved", env.data()["skills"]["alpha"])
+        self.assertIn("v1", (env.inbox / "alpha" / "SKILL.md").read_text())
+
+    def test_missing_or_invalid_report_still_needs_manual_review(self):
+        env = self.env
+        for content in (None, b"not json", b"\xff", b"[]"):
+            with self.subTest(content=content):
+                env.origins({"alpha": "o/r"})
+                env.reports["alpha"] = content
+                self.assertEqual(env.run("--all"), 2)
+                entry = env.data()["skills"]["alpha"]
+                self.assertIn("blocked", entry)
+                self.assertIn("unreadable or missing", entry["blocked"]["detail"])
+                self.assertIn("exit 2", entry["blocked"]["detail"])
+                if content is not None:
+                    self.assertEqual(Path(entry["blocked"]["report"]).read_bytes(), content)
+                else:
+                    self.assertIsNone(entry["blocked"]["report"])
+
+    def test_new_candidate_remains_managed_for_explicit_accept(self):
+        env = self.env
+        env.origins()
+        env.verdicts["gamma"] = 2
+        env.upstream[("o/r", "gamma")] = "new"
+        self.assertEqual(env.run("--add", "gamma", "--source", "o/r"), 2)
+        self.assertIn("gamma", env.data()["skills"])
+        self.assertFalse((env.inbox / "gamma").exists())
+        self.assertEqual(env.run("--accept", "gamma", "--reason", "reviewed"), 0)
+        self.assertTrue((env.inbox / "gamma" / "SKILL.md").is_file())
+
+    def test_llm_error_is_visible_and_sibling_can_update(self):
+        env = self.env
+        env.reports["alpha"] = json.dumps({"issues": [], "metadata": {
+            "llm_requested": True, "llm_error": "provider unavailable"}}).encode("utf-8")
+        env.origins({"alpha": "o/r", "beta": "o/r"})
+        env.upstream[("o/r", "beta")] = "new"
+        self.assertEqual(env.run("--all"), 2)
+        self.assertIn("blocked", env.data()["skills"]["alpha"])
+        self.assertIn("provider unavailable", env.data()["skills"]["alpha"]["blocked"]["detail"])
+        self.assertEqual(env.data()["skills"]["beta"]["verdict"], "SAFE")
+
+    def test_quarantine_write_failure_keeps_installed_version(self):
+        env = self.env
+        with patch.object(staging, "quarantine_copy", side_effect=OSError("disk full")):
+            self.assertEqual(env.run("--all"), 2)
+        self.assertNotIn("blocked", env.data()["skills"]["alpha"])
+        self.assertIn("v1", (env.inbox / "alpha" / "SKILL.md").read_text())
+
+    def test_triage_gap_with_wrapper_exit_1_is_kept_for_review(self):
+        env = self.env
+        env.verdicts["alpha"] = 1
+        env.reports["alpha"] = json.dumps({"issues": [], "analysis_completeness": {
+            "entirely_uninspected_files": 1, "coverage_percent": 50}}).encode("utf-8")
+        self.assertEqual(env.run("--all"), 2)
+        self.assertIn("blocked", env.data()["skills"]["alpha"])
+        self.assertIn("triage", env.data()["skills"]["alpha"]["blocked"]["detail"])
+        self.assertIn("v1", (env.inbox / "alpha" / "SKILL.md").read_text())
+
+    def test_missing_quarantine_can_be_configured_and_retried(self):
+        env = self.env
+        configured = env.dist
+        env.dist = configured._replace(quarantine=None)
+        self.assertEqual(env.run("--all"), 2)
+        self.assertNotIn("blocked", env.data()["skills"]["alpha"])
+        env.dist = configured
+        self.assertEqual(env.run("--all"), 2)
+        self.assertTrue(Path(env.data()["skills"]["alpha"]["blocked"]["quarantine"]).is_dir())
+
+    def test_accept_does_not_clear_a_finding_in_changed_content(self):
+        env = self.env
+        self.assertEqual(env.run("--all"), 2)
+        self.assertEqual(env.run("--accept", "alpha", "--reason", "reviewed v2"), 0)
+        approved = env.data()["skills"]["alpha"]["approved"]
+        env.head = env.settled = REF2
+        env.upstream[("o/r", "alpha")] = "v3"
+        env.verdicts["alpha"] = 1
+        env.reports.pop("alpha")
+        self.assertEqual(env.run("--all"), 1)
+        entry = env.data()["skills"]["alpha"]
+        self.assertEqual(entry["blocked"]["verdict"], "dangerous")
+        self.assertEqual(entry["approved"], approved)
+        self.assertIn("v2", (env.inbox / "alpha" / "SKILL.md").read_text())
 
     def test_missing_skill_in_source_is_a_failure(self):
         env = Env(self)

@@ -432,7 +432,7 @@ wiring agent-guard into scripts or CI:
 |-----------|---------|--------|
 | `0` | SAFE verdict | Install is reasonable |
 | `1` | BLOCK/REVIEW verdict — real findings, or a partial inspection limited to passages the shell parser gave up on | Read the findings (or the listed passages), decide deliberately |
-| `2` | **No verdict** — scanner/LLM/config error, fail-closed | Fix the cause and re-run; never install |
+| `2` | **No verdict** — scanner/LLM/config error, fail-closed | Fix the cause and re-run; no automatic installation. Managed updates also support explicit manual review below. |
 
 The wrapper writes SkillSpector JSON to a temporary report, so Windows console encoding issues, provider resolution, and SkillSpector's execution/coverage ledger are handled automatically.
 
@@ -638,7 +638,19 @@ version active:
   approves the exact content hash of each of its files for later versions of
   that skill; changed or new files are judged anew, and hard evidence always
   blocks.
-- **No verdict / fetch error:** reported, exit 2; nothing changes.
+- **No verdict:** the candidate and any available raw report are kept in
+  quarantine too. The review item records the scanner wrapper exit code,
+  coverage, analyzer exceptions and LLM failure when available. Status stays
+  `no-verdict`, exit 2, including later runs without another scan. After reviewing
+  that exact candidate, `--accept NAME --reason TEXT` installs it with the same
+  hash check and backup as a BLOCK; describe what you checked in the reason.
+  This is an explicit manual decision, never a SAFE scanner verdict or a blanket
+  exception for parser errors. Changed candidates and inspection gaps still
+  require review. `--reject NAME` dismisses only that version (retaining its
+  quarantine files), and `--remove NAME` stops managing the skill.
+  Configure `quarantine` first; without it the run reports a failure and remains
+  retryable rather than creating a review item with no candidate.
+- **Fetch error:** reported, exit 2; no reviewable candidate was obtained.
 
 Exit codes: 0 everything current or updated, 1 something waits for a decision,
 2 something could not be checked. The `--json` report lists each skill's

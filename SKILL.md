@@ -88,6 +88,13 @@ Professional scanners do the work, each where it is strongest:
    cause (missing API key, wrong path) and re-scan. Never silence scanner
    errors with `2>/dev/null`. (A non-zero exit with a valid report is a real
    verdict: SkillSpector exits 1 when the risk score is above 50.)
+   For managed updates, `update_skills.py` retains NO VERDICT candidates and
+   available reports for manual review. Only an explicit user decision about
+   that exact reviewed version permits `--accept NAME --reason TEXT`; record
+   what was checked. The command verifies the candidate hash, backs up the old
+   version and records ACCEPTED, never SAFE. Do not accept all NO VERDICT results
+   or infer approval from a known parser error, publisher, or earlier version.
+   `--reject NAME` dismisses that candidate while preserving the installed one.
 3. **Scan = install.** The commit that was scanned must be the commit that
    gets installed. Always pin the commit SHA (see workflow below). If the repo
    moves between scan and install, re-scan.

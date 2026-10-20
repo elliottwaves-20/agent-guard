@@ -12,6 +12,11 @@
 
 ## 0.5.0 - 2026-10-18
 
+- **Post-release fix (#34, #33):** retain NO VERDICT update candidates and
+  available scan reports for explicit manual accept/reject. Review items show
+  the failure reason; repeated runs keep exit 2 without rescanning. Acceptance
+  still requires a reason and an unchanged candidate hash, keeps a backup and
+  records per-file approval. NO VERDICT is never automatically accepted.
 - SkillSpector is pinned to a reviewed commit of NVIDIA main, `2404212`
   (package version still 2.12.0; includes #697, #704, #709, #737, #738, #779,
   #810 and the gemini ADC provider). #779 treats a command wrapper with no
