@@ -328,6 +328,17 @@ def _static_only_forced() -> bool:
         "1", "true", "yes", "on")
 
 
+def skipped_dynamic_verdict() -> int:
+    """Verdict of a dynamic stage skipped by --no-dynamic: only an explicit
+    static-only choice keeps it at 0, otherwise the scan has no verdict."""
+    if _static_only_forced():
+        print("[WARN] Dynamic install analysis skipped by --no-dynamic.")
+        return 0
+    print("[BLOCK] NO VERDICT -- dynamic analysis skipped by --no-dynamic "
+          "(set AGENT_GUARD_STATIC_ONLY=1 for an explicit static-only policy)")
+    return 2
+
+
 def resolve_llm() -> tuple[str, bool, str]:
     """Return (provider, ready, reason).
 

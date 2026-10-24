@@ -73,6 +73,7 @@ from _skillspector import (
     die,
     run_bounded,
     run_skillspector as shared_run_skillspector,
+    skipped_dynamic_verdict,
 )
 
 MCP_SCANNER = shutil.which("mcp-scanner")      # Stage 2 / remote: runtime (Cisco)
@@ -777,7 +778,8 @@ def main():
                              "scan, e.g. -- uvx package-name")
         _add_network_options(sp)
         sp.add_argument("--no-dynamic", action="store_true",
-                        help="skip the dynamic install analysis (Stage 1b, needs Docker)")
+                        help="skip the dynamic install analysis (Stage 1b, needs Docker); "
+                             "the result is NO VERDICT unless AGENT_GUARD_STATIC_ONLY=1")
 
     sp = sub.add_parser("local", help="scan a local MCP source directory")
     sp.add_argument("path")
@@ -806,7 +808,7 @@ def main():
             (fetch_pypi if args.mode == "pypi" else fetch_npm)(args.package, dest)
             rc = run_skillspector(dest)
         if args.no_dynamic:
-            print("[WARN] Dynamic install analysis skipped by --no-dynamic.")
+            rc = combine_verdicts(rc, skipped_dynamic_verdict())
         else:
             print("\n-- Stage 1b: dynamic install analysis (OpenSSF sandbox) --")
             rc = combine_verdicts(rc, _dynamic.run(args.mode, args.package, allow_hosts=args.allow_host))

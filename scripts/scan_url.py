@@ -11,7 +11,7 @@ import tempfile
 import urllib.parse
 from pathlib import Path
 
-from _skillspector import combine_verdicts, die
+from _skillspector import combine_verdicts, die, skipped_dynamic_verdict as _skipped_dynamic_verdict
 from _url_resolver import FetchError, ResolvedSource, resolve_url
 from install_skill import (
     TOOLS,
@@ -421,8 +421,7 @@ def persist_source(source: ResolvedSource, keep_source: Path | None) -> Path | N
 def run_dynamic_stage(ecosystem: str, pinned: str, enabled: bool) -> int:
     """Install analysis of exactly the version the static scan fetched."""
     if not enabled:
-        print("[WARN] Dynamic install analysis skipped by --no-dynamic.")
-        return 0
+        return _skipped_dynamic_verdict()
     print("\n-- Dynamic install analysis (OpenSSF sandbox) --")
     return _dynamic.run(ecosystem, pinned)
 
@@ -542,7 +541,8 @@ def main() -> None:
                              "live Cisco stdio scans in Docker for install commands")
     parser.add_argument("--no-dynamic", action="store_true",
                         help="skip the dynamic install analysis of PyPI/npm packages "
-                             "(it needs Docker)")
+                             "(it needs Docker); the result is NO VERDICT "
+                             "unless AGENT_GUARD_STATIC_ONLY=1")
     parser.add_argument("--max-candidates", type=int, default=10,
                         help="maximum marketplace candidates to scan automatically")
     args = parser.parse_args()

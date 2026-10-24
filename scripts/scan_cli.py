@@ -62,7 +62,14 @@ import urllib.request
 from pathlib import Path
 
 import _dynamic
-from _skillspector import SCAN_TIMEOUT, combine_verdicts, die, run_bounded, run_skillspector
+from _skillspector import (
+    SCAN_TIMEOUT,
+    combine_verdicts,
+    die,
+    run_bounded,
+    run_skillspector,
+    skipped_dynamic_verdict,
+)
 from _url_resolver import safe_basename
 from scan_mcp import http_bytes, http_json, run_virustotal, safe_extract_tar
 
@@ -448,7 +455,8 @@ def run_cargo(spec: str) -> int:
 
 def _add_dynamic_options(sp):
     sp.add_argument("--no-dynamic", action="store_true",
-                    help="skip the dynamic install analysis (it needs Docker)")
+                    help="skip the dynamic install analysis (it needs Docker); the result is "
+                         "NO VERDICT unless AGENT_GUARD_STATIC_ONLY=1")
     sp.add_argument("--allow-host", action="append", default=[], metavar="HOST[:PORT]",
                     help="dynamic analysis: also allow this destination (default port 443; the "
                          "package registry is always allowed). Repeatable")
@@ -486,8 +494,7 @@ def main():
     if args.mode in _dynamic.ECOSYSTEMS:
         rc = run_guarddog(args.mode, args.package)
         if args.no_dynamic:
-            print("[WARN] Dynamic install analysis skipped by --no-dynamic.")
-            sys.exit(rc)
+            sys.exit(combine_verdicts(rc, skipped_dynamic_verdict()))
         print("\n-- Dynamic install analysis (OpenSSF sandbox) --")
         sys.exit(combine_verdicts(rc, _dynamic.run(args.mode, args.package,
                                                    allow_hosts=args.allow_host)))

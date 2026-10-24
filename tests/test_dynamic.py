@@ -378,11 +378,33 @@ class WiringTests(unittest.TestCase):
              patch.object(cli._dynamic, "run", return_value=0):
             self.assertEqual(self.main(cli, ["scan_cli.py", "pypi", "six"]), 1)
 
-    def test_scan_cli_no_dynamic_skips_the_stage(self):
+    @staticmethod
+    def env(static_only):
+        """Environment with AGENT_GUARD_STATIC_ONLY set or removed."""
+        e = {k: v for k, v in os.environ.items() if k != "AGENT_GUARD_STATIC_ONLY"}
+        if static_only:
+            e["AGENT_GUARD_STATIC_ONLY"] = "1"
+        return patch.dict(os.environ, e, clear=True)
+
+    def test_scan_cli_no_dynamic_is_no_verdict(self):
         cli = importlib.import_module("scan_cli")
-        with patch.object(cli, "run_guarddog", return_value=0), \
+        with self.env(False), patch.object(cli, "run_guarddog", return_value=0), \
+             patch.object(cli._dynamic, "run") as run:
+            self.assertEqual(self.main(cli, ["scan_cli.py", "pypi", "six", "--no-dynamic"]), 2)
+        run.assert_not_called()
+
+    def test_scan_cli_no_dynamic_with_static_only_is_safe(self):
+        cli = importlib.import_module("scan_cli")
+        with self.env(True), patch.object(cli, "run_guarddog", return_value=0), \
              patch.object(cli._dynamic, "run") as run:
             self.assertEqual(self.main(cli, ["scan_cli.py", "pypi", "six", "--no-dynamic"]), 0)
+        run.assert_not_called()
+
+    def test_scan_cli_no_dynamic_keeps_a_static_block(self):
+        cli = importlib.import_module("scan_cli")
+        with self.env(False), patch.object(cli, "run_guarddog", return_value=1), \
+             patch.object(cli._dynamic, "run") as run:
+            self.assertEqual(self.main(cli, ["scan_cli.py", "pypi", "six", "--no-dynamic"]), 1)
         run.assert_not_called()
 
     def test_scan_cli_go_has_no_dynamic_stage(self):
@@ -401,13 +423,37 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(code, 1)
         run.assert_called_once_with("pypi", "mcp-server-time", allow_hosts=[])
 
-    def test_scan_mcp_no_dynamic(self):
+    def test_scan_mcp_no_dynamic_is_no_verdict(self):
         sm = importlib.import_module("scan_mcp")
-        with patch.object(sm, "fetch_npm"), \
+        with self.env(False), patch.object(sm, "fetch_npm"), \
+             patch.object(sm, "run_skillspector", return_value=0), \
+             patch.object(sm._dynamic, "run") as run:
+            self.assertEqual(self.main(sm, ["scan_mcp.py", "npm", "x", "--no-dynamic"]), 2)
+        run.assert_not_called()
+
+    def test_scan_mcp_no_dynamic_with_static_only_is_safe(self):
+        sm = importlib.import_module("scan_mcp")
+        with self.env(True), patch.object(sm, "fetch_npm"), \
              patch.object(sm, "run_skillspector", return_value=0), \
              patch.object(sm._dynamic, "run") as run:
             self.assertEqual(self.main(sm, ["scan_mcp.py", "npm", "x", "--no-dynamic"]), 0)
         run.assert_not_called()
+
+    def test_scan_mcp_no_dynamic_keeps_a_static_block(self):
+        sm = importlib.import_module("scan_mcp")
+        with self.env(False), patch.object(sm, "fetch_pypi"), \
+             patch.object(sm, "run_skillspector", return_value=1), \
+             patch.object(sm._dynamic, "run") as run:
+            self.assertEqual(self.main(sm, ["scan_mcp.py", "pypi", "x", "--no-dynamic"]), 1)
+        run.assert_not_called()
+
+    def test_run_dynamic_stage_disabled_is_no_verdict(self):
+        su = importlib.import_module("scan_url")
+        with self.env(False), redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(su.run_dynamic_stage("pypi", "x==1", enabled=False), 2)
+        self.assertIn("NO VERDICT", out.getvalue())
+        with self.env(True), redirect_stdout(io.StringIO()):
+            self.assertEqual(su.run_dynamic_stage("pypi", "x==1", enabled=False), 0)
 
 
 class UrlScanTests(unittest.TestCase):
@@ -438,8 +484,16 @@ class UrlScanTests(unittest.TestCase):
         run.assert_called_once_with("npm", "some-mcp@2.0.0")
         offer.assert_not_called()
 
-    def test_no_dynamic_is_honoured(self):
-        code, run, offer = self.scan("npm", "some-mcp", "some-mcp@2.0.0", 1, dynamic=False)
+    def test_no_dynamic_is_no_verdict_and_no_install_offer(self):
+        with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": ""}):
+            code, run, offer = self.scan("npm", "some-mcp", "some-mcp@2.0.0", 1, dynamic=False)
+        self.assertEqual(code, 2)
+        run.assert_not_called()
+        offer.assert_not_called()
+
+    def test_no_dynamic_with_static_only_is_honoured(self):
+        with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}):
+            code, run, offer = self.scan("npm", "some-mcp", "some-mcp@2.0.0", 1, dynamic=False)
         self.assertEqual(code, 0)
         run.assert_not_called()
         offer.assert_called_once()
