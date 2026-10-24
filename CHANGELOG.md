@@ -1,12 +1,49 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 - 2026-10-25
 
-- `update_skills.py` now blocks only the affected skill when an update scan
+### Security
+
+- Earlier versions could report unchecked or partly checked cases as SAFE (exit 0). Upgrade recommended.
+
+### Changed
+
+- Exit codes: 0 SAFE, 1 BLOCK, 2 NO VERDICT. Decide by the exit code, not the
+  text: exit 2 may print as `[WARN]` or `[BLOCK]`. The skill-scan exit codes
+  are documented correctly now: a single HIGH or CRITICAL finding alone gives
+  exit 1.
+- No SAFE without a completed AI analysis (any provider; only
+  `metadata.llm_available` counts): the scan ends exit 2 "static only".
+  Scheduled updates (`update_skills.py`) quarantine such cases and keep the
+  old version active.
+- `AGENT_GUARD_STATIC_ONLY=1` now means "static checking is deliberately
+  enough": it disables the AI analysis and accepts a dynamic stage skipped
+  with `--no-dynamic` (exit 0 instead of 2). It does not skip that stage by
+  itself.
+- `--no-dynamic` gives exit 2 unless `AGENT_GUARD_STATIC_ONLY=1`
+  (`scan_url.py`, `scan_mcp.py`, `scan_cli.py`).
+- `audit_installed.py` without `--execute` gives exit 2 (NOT EXECUTED);
+  unreadable configs and entries whose source cannot be inferred give exit 2.
+- Hash-lookup results: an unseen hash, a suspicious-only file, a file skipped
+  by the file limit, API errors and a missing, malformed or inconsistent
+  summary give exit 2 instead of SAFE. Single-file checks in
+  `scan_cli.py binary` no longer treat errors as clean.
+- GuardDog and malcontent images run with `docker run --pull=always`, so
+  their rules stay current. Offline means no verdict (exit 2), never SAFE.
+- `scan_url.py`: a repo with no skill and no package manifest gives exit 2
+  "unsupported repo layout" (no README-only check); so do skill collections
+  with non-documentation files outside the skill folders and marketplace
+  candidates skipped by `--max-candidates`.
+- Cooldown: a skill branch without activity entries is accepted only if the
+  repository creation time proves it older than the cooldown; otherwise the
+  update stops (FAILED).
+- The `scan_cli.py` documentation no longer says a new or unknown binary
+  passes unnoticed; it gives no verdict.
+- `update_skills.py` blocks only the affected skill when an update scan
   returns `dangerous` or `unclear`, instead of automatically pausing every
   other skill from the same GitHub source; manual source pauses in
   `origins["sources"][source]["paused"]` remain supported.
-- `_staging.settled_ref` now follows GitHub's `Link` cursor (`after=...`) on
+- `_staging.settled_ref` follows GitHub's `Link` cursor (`after=...`) on
   `/repos/{owner}/{repo}/activity` instead of repeating page 1 with `&page=N`
   (#31).
 

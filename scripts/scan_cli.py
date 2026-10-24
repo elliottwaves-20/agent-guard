@@ -35,8 +35,9 @@ Exit codes (same contract as scan_skill.py / scan_mcp.py):
   2 = no verdict         (scanner failed/unparsable -- fail closed)
 
 Detection limits (documented, not hidden):
-  - VirusTotal only recognises KNOWN malware hashes; novel or targeted
-    binaries pass unnoticed.
+  - VirusTotal only knows files it has seen: an unseen hash gives NO VERDICT
+    (exit 2), never SAFE. A known-and-clean hash can still be a targeted
+    payload that no engine detects yet; prefer signed releases.
   - malcontent's Windows PE analysis is weaker than its ELF analysis.
   - GuardDog is heuristic; a clean result is not proof of harmlessness.
   - A static script scan cannot see second-stage payloads fetched at runtime.
@@ -381,9 +382,10 @@ def run_binary(url: str, deep: bool) -> int:
         digest = _sha256(dest)
         print(f"  SHA256: {digest}")
         print(f"  size:   {dest.stat().st_size} bytes")
-        print("  LIMIT: VirusTotal only recognises KNOWN malware hashes. A "
-              "novel or targeted binary passes this check unnoticed. Prefer "
-              "binaries from signed releases of well-known projects.")
+        print("  LIMIT: VirusTotal only knows files it has seen. An unseen hash "
+              "gives NO VERDICT (exit 2), never SAFE. A known-and-clean hash "
+              "can still be a targeted payload that no engine detects yet. "
+              "Prefer signed releases of well-known projects.")
         rc = run_virustotal(dest, max_files=1)
         if deep:
             print("\n-- deep: malcontent capability analysis --")

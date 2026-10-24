@@ -42,7 +42,7 @@ agent-guard never writes its own detection — it routes every install target to
 - **[cisco-ai-mcp-scanner](https://github.com/cisco-ai-defense/mcp-scanner)** handles the optional **live runtime** MCP check. A static scan cannot see MCP tools that a server registers only at runtime; `scan_mcp.py --sandbox` starts the server inside a throwaway Docker container (no host filesystem access, every network destination recorded) to inspect them.
 - **[Datadog GuardDog](https://github.com/DataDog/guarddog)** handles **CLI-tool package scans** (npm, PyPI, Go, cargo): malware heuristics + YARA over package source and registry metadata, via the official Docker image on Windows.
 - **[OpenSSF package-analysis](https://github.com/ossf/package-analysis)** handles the **dynamic install analysis** of npm and PyPI packages: the package is installed and imported inside gVisor, and what it reads, writes, resolves, connects to and starts is judged against rules calibrated on clean packages.
-- **VirusTotal + [malcontent](https://github.com/chainguard-dev/malcontent)** handle **release binaries**: hash reputation against 70+ AV vendors, optionally (`--deep`) a capability analysis of what the binary can actually do.
+- **VirusTotal + [malcontent](https://github.com/chainguard-dev/malcontent)** handle **release binaries**: hash reputation against 70+ AV vendors (an unseen hash gives NO VERDICT, never SAFE), optionally (`--deep`) a capability analysis of what the binary can actually do.
 
 ## What you get
 
@@ -114,13 +114,13 @@ Required for the normal scan/install workflow:
 
 - [uv](https://docs.astral.sh/uv/) — installs SkillSpector and Cisco mcp-scanner in isolated tool environments. uv also fetches the Python 3.12 runtime that SkillSpector needs.
 - Python 3.10+ — runs the agent-guard wrapper scripts: `scripts/install_skill.py`, `scripts/scan_skill.py`, `scripts/scan_mcp.py`, `scripts/scan_cli.py`, and `scripts/scan_url.py`.
-- For full SkillSpector LLM coverage: a logged-in coding-agent CLI on PATH (`claude` or `opencode` — auto-detected, no API key) **or** a hosted-provider key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `NVIDIA_INFERENCE_KEY`, ...). Without either, skill and static MCP source scans still run static-only.
+- For full SkillSpector LLM coverage: a logged-in coding-agent CLI on PATH (`claude` or `opencode` — auto-detected, no API key) **or** a hosted-provider key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `NVIDIA_INFERENCE_KEY`, ...). Without either, skill and static MCP source scans still run static-only but end with exit 2 (no verdict) unless `AGENT_GUARD_STATIC_ONLY=1` is set.
 - A LiteLLM-compatible runtime provider for Cisco live MCP checks (API key required; Cisco has no CLI-login path): `MCP_SCANNER_LLM_API_KEY` plus `MCP_SCANNER_LLM_MODEL`. This can be OpenAI, Anthropic, Gemini, Bedrock, Azure OpenAI, Ollama, or another LiteLLM-supported provider.
 
 Optional, depending on what you scan or install:
 
 - [Docker](https://docs.docker.com/get-docker/) — needed for the dynamic install analysis that npm/PyPI scans run by default (`scan_cli.py npm|pypi`, `scan_mcp.py npm|pypi`, the package path of `scan_url.py`; without Docker they end in no verdict unless you pass `--no-dynamic`), for Docker-isolated live stdio MCP checks (`scan_mcp.py ... --sandbox`), for GuardDog package scans (`scan_cli.py npm/pypi/go`) on Windows where Docker is GuardDog's only supported install (Linux/macOS can use a native `guarddog` on PATH instead), and for the optional malcontent binary analysis (`scan_cli.py binary --deep`). Skill scans, `scan_mcp.py local|remote`, and `scan_cli.py script` do not need Docker; Cargo uses GuardDog and needs Docker on Windows. The Docker daemon must be **running** first (on Windows/macOS: start Docker Desktop); `failed to connect to the docker API` means it is not. Disk: the dynamic analysis image is about 1 GB and its package cache volume (`agent-guard-dynamic-cache`) grows to a few GB; that analysis runs a **privileged** container (`--privileged --cgroupns=host`), which gVisor needs to build its own sandbox inside it.
-- `VIRUSTOTAL_API_KEY` — required for `scan_cli.py binary` (release-binary hash reputation) and optional malware-reputation checks for bundled binaries, archives, PDFs, images, and similar non-source files in MCP scans. VirusTotal's Public API is free for registered users but rate-limited (4 lookups/min); see [LLM provider support](#llm-provider-support).
+- `VIRUSTOTAL_API_KEY` — required for `scan_cli.py binary` (release-binary hash reputation) and optional malware-reputation checks for bundled binaries, archives, PDFs, images, and similar non-source files in MCP scans. VirusTotal's Public API is free for registered users but rate-limited (4 lookups/min); an unseen hash or an API error gives NO VERDICT (exit 2), never SAFE; see [LLM provider support](#llm-provider-support).
 - Node.js/npm — optional. Needed if you install or run npm MCP servers through `npx`, install the Firecrawl CLI with npm, or explicitly configure a preinstalled Node renderer for protected marketplaces.
 - Firecrawl CLI or Node Playwright — optional renderers for JavaScript-heavy/protected marketplace pages. Direct GitHub/archive/raw SKILL.md/npm/PyPI URLs work without them.
 - Git — optional, but needed for `install_skill.py mcp-git` / `uv tool install --from git+...` and for manual clone/checkout workflows after a SAFE verdict.
@@ -195,7 +195,7 @@ injection. Use these names (see `.env.example` for all optional settings):
 | `SKILLSPECTOR_PROVIDER` | Optional explicit CLI/provider choice: `claude_cli`, `opencode_cli`, `gemini_cli` (only when named), or a hosted provider. `codex_cli` and `antigravity_cli` are refused. |
 | `SKILLSPECTOR_MODEL` | Optional model override; unset uses the provider/CLI default. |
 | `MCP_SCANNER_LLM_API_KEY` and `MCP_SCANNER_LLM_MODEL` | Separate credentials/model for optional Cisco runtime scans. |
-| `VIRUSTOTAL_API_KEY` | Hash reputation checks for binary downloads. |
+| `VIRUSTOTAL_API_KEY` | Hash reputation checks for binary downloads (unseen hash or API error = NO VERDICT, exit 2). |
 
 **Windows:** open **Environment Variables → User variables** and add the
 settings there. For a non-secret provider preference, PowerShell also supports:
@@ -421,7 +421,7 @@ runtime checks are routed through `scan_mcp.py sandbox`. The audit also prints
 removal guidance for each detected item; review and remove malicious entries
 from the relevant agent config before restarting the affected agent.
 
-Scanner errors or empty output mean **no verdict** — never treat a failed scan as safe. A non-zero exit *with* a report is a real verdict (SkillSpector exits 1 when the risk score is above 50).
+Scanner errors or empty output mean **no verdict** — never treat a failed scan as safe. A non-zero exit *with* a report is a real verdict (skill scans exit 0 = SAFE: score <= 50, no HIGH/CRITICAL finding, complete inspection; 1 = BLOCK: score > 50, a DO_NOT_INSTALL recommendation or any single HIGH/CRITICAL finding; 2 = no verdict: errors, missing AI analysis or partial inspection).
 
 ### Exit codes
 
@@ -433,6 +433,14 @@ wiring agent-guard into scripts or CI:
 | `0` | SAFE verdict | Install is reasonable |
 | `1` | BLOCK/REVIEW verdict — real findings, or a partial inspection limited to passages the shell parser gave up on | Read the findings (or the listed passages), decide deliberately |
 | `2` | **No verdict** — scanner/LLM/config error, fail-closed | Fix the cause and re-run; no automatic installation. Managed updates also support explicit manual review below. |
+
+**Decide by the exit code, not the text.** Exit `2` may print as `[WARN] NO VERDICT`, `[WARN] INCONCLUSIVE` or `[BLOCK] NO VERDICT`; treat it as "do not install". Cases that give `2` instead of `0`:
+
+- **No completed AI analysis.** A SAFE verdict needs an AI analysis that actually ran (any provider; only the report's `metadata.llm_available` counts). Without it the scan ends `static only` with exit 2, and scheduled updates (`update_skills.py`) quarantine the candidate while the old version stays active. `AGENT_GUARD_STATIC_ONLY=1` states that static checking is deliberately enough: it disables the AI analysis and accepts a dynamic stage you skipped with `--no-dynamic` (exit 0 instead of 2) for a clean static result. It does not skip the dynamic stage by itself.
+- **Skipped dynamic stage.** `--no-dynamic` (`scan_url.py`, `scan_mcp.py`, `scan_cli.py`) gives exit 2 unless `AGENT_GUARD_STATIC_ONLY=1` is set.
+- **Nothing was scanned.** `audit_installed.py` without `--execute` (NOT EXECUTED), unreadable configs and entries whose source cannot be inferred. In `scan_url.py`: a repo with neither a skill nor a package manifest (unsupported repo layout), a skill collection with non-documentation files outside the skill folders, and marketplace candidates left out by `--max-candidates`.
+- **Incomplete hash lookup.** A missing, malformed or inconsistent hash-lookup summary, an unseen hash, a suspicious-only file or a file skipped by the file limit.
+- **Stale scanner rules.** GuardDog and malcontent run with `docker run --pull=always`; if the image cannot be pulled (offline) there is no verdict, never SAFE.
 
 The wrapper writes SkillSpector JSON to a temporary report, so Windows console encoding issues, provider resolution, and SkillSpector's execution/coverage ledger are handled automatically.
 
@@ -498,7 +506,7 @@ Agents increasingly install plain command-line tools instead of MCP servers — 
 
 ```bash
 # npm / PyPI / Go packages -> Datadog GuardDog (heuristics + YARA + registry metadata);
-# npm and PyPI then also get the dynamic install analysis (Docker; --no-dynamic skips it):
+# npm and PyPI then also get the dynamic install analysis (Docker; --no-dynamic skips it and gives exit 2 unless AGENT_GUARD_STATIC_ONLY=1):
 python scripts/scan_cli.py npm left-pad
 python scripts/scan_cli.py pypi requests==2.32.0
 python scripts/scan_cli.py go github.com/user/module
@@ -519,8 +527,8 @@ Exit codes follow the same contract as every other agent-guard scanner: `0` SAFE
 
 Requirements per mode:
 
-- **npm / pypi / go / cargo** use [GuardDog](https://github.com/DataDog/guarddog). It runs natively if `guarddog` is on PATH (Linux/macOS: `pipx install guarddog`); on **Windows, Docker is GuardDog's only supported install**, so the wrapper falls back to the official image `ghcr.io/datadog/guarddog` automatically (first scan pulls it — start Docker Desktop first). GuardDog's `capability-*` rules are transparency notes ("can read files / spawn processes") that fire on nearly every real library — the wrapper prints them but only lets **malware-heuristic** rules drive the BLOCK verdict; review the capability list for anything implausible for the package's purpose. Exception: `capability-process-hooks` (a setup.py install/develop hook — code that runs at `pip install` time, the classic PyPI malware vector) **does block**; this was verified against DataDog's own malicious-package dataset, where a real sample fires only that rule.
-- **binary** needs `VIRUSTOTAL_API_KEY` (free tier: 4 lookups/min). `--deep` needs Docker for [malcontent](https://github.com/chainguard-dev/malcontent).
+- **npm / pypi / go / cargo** use [GuardDog](https://github.com/DataDog/guarddog). It runs natively if `guarddog` is on PATH (Linux/macOS: `pipx install guarddog`); on **Windows, Docker is GuardDog's only supported install**, so the wrapper falls back to the official image `ghcr.io/datadog/guarddog` automatically (pulled fresh on every run with `--pull=always`, so rules stay current; offline means NO VERDICT — start Docker Desktop first). GuardDog's `capability-*` rules are transparency notes ("can read files / spawn processes") that fire on nearly every real library — the wrapper prints them but only lets **malware-heuristic** rules drive the BLOCK verdict; review the capability list for anything implausible for the package's purpose. Exception: `capability-process-hooks` (a setup.py install/develop hook — code that runs at `pip install` time, the classic PyPI malware vector) **does block**; this was verified against DataDog's own malicious-package dataset, where a real sample fires only that rule.
+- **binary** needs `VIRUSTOTAL_API_KEY` (free tier: 4 lookups/min). `--deep` needs Docker for [malcontent](https://github.com/chainguard-dev/malcontent); its image is pulled fresh on every run (`--pull=always`), offline means NO VERDICT. VirusTotal only knows files it has seen: an unseen hash, a rate-limit/API error, a suspicious-only result or a file skipped by the file limit gives NO VERDICT (exit 2), never SAFE.
 - **script** uses the SkillSpector static scan already set up by `setup.sh` / `setup.ps1`. **cargo** runs both: GuardDog's `crates` scan and a SkillSpector static scan of the crate source; the worse verdict wins.
 
 #### Dynamic install analysis
@@ -555,7 +563,7 @@ OpenSSF's own script then fails; what was recorded until then is judged and the
 output says so in a `LIMIT:` line. A failed or missing install or import phase, a
 result for another package or version, a timeout
 (`AGENT_GUARD_DYNAMIC_TIMEOUT`, default 1200 s) or missing Docker gives **no
-verdict**; `--no-dynamic` skips the stage knowingly and says so. The first run
+verdict**; `--no-dynamic` skips the stage knowingly and says so, and gives exit 2 unless `AGENT_GUARD_STATIC_ONLY=1`. The first run
 pulls the image and fills the cache (about 2–3 minutes); later runs of small
 packages take seconds. The analysed package really reaches the network — the
 sandbox holds nothing worth stealing, and what the package contacts is exactly
@@ -758,7 +766,7 @@ Notes on individual paths:
 
 With a [personal config file](#configuration-prefer-environment-variables), `[llm.use]` names one profile per layer instead (`skills`, `mcp`, plus `campaign` for budgeted scans) and the environment variables in this table are only read for keys; `python scripts/llm_check.py` shows what each scanner will use. Token limits for models SkillSpector does not know yet come from the profile (`context`, `max_output`), and `reasoning = true` lets the Cisco scanner treat a new model as a reasoning model that its pinned LiteLLM does not recognise yet.
 
-**SkillSpector provider resolution** (`scripts/_skillspector.py`): `AGENT_GUARD_STATIC_ONLY=1` disables the LLM layer only; static analyzers can still use configured lookups such as OSV. An active config profile decides next and ignores stale `SKILLSPECTOR_*` settings. Otherwise an explicit `SKILLSPECTOR_PROVIDER` is used and validated (a CLI provider needs its binary on PATH, a hosted one its key). With no provider named, a hosted key in the environment wins (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `NVIDIA_INFERENCE_KEY`, in that order), then the first of `claude`, `opencode` found on PATH. `SKILLSPECTOR_PROVIDER=gemini` means the Google Cloud ADC API provider, not the Gemini CLI (that one is `gemini_cli`). If nothing is usable the scan runs static-only and says so in the verdict line. With `SKILLSPECTOR_MODEL` you can pin a model (`<model-id>`); leave it empty to use the CLI's own default. A model from another vendor is ignored with a note. The wrapper also starts SkillSpector inside its own tool environment with the aggregate scan deadline raised from upstream's hard-coded 60 s to `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` (default: `AGENT_GUARD_SCAN_TIMEOUT` minus 60 s), because CLI providers exhaust the 60 s budget on medium-sized skills and would otherwise end in NO VERDICT (upstream: NVIDIA/SkillSpector#460).
+**SkillSpector provider resolution** (`scripts/_skillspector.py`): `AGENT_GUARD_STATIC_ONLY=1` declares static checking deliberately enough: it disables the LLM layer, lifts the exit-2 rule for "no AI analysis ran" and accepts a dynamic stage skipped with `--no-dynamic` (it does not skip that stage by itself); static analyzers can still use configured lookups such as OSV. An active config profile decides next and ignores stale `SKILLSPECTOR_*` settings. Otherwise an explicit `SKILLSPECTOR_PROVIDER` is used and validated (a CLI provider needs its binary on PATH, a hosted one its key). With no provider named, a hosted key in the environment wins (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `NVIDIA_INFERENCE_KEY`, in that order), then the first of `claude`, `opencode` found on PATH. `SKILLSPECTOR_PROVIDER=gemini` means the Google Cloud ADC API provider, not the Gemini CLI (that one is `gemini_cli`). If nothing is usable the scan runs static-only and ends with no verdict (exit 2) unless `AGENT_GUARD_STATIC_ONLY=1` is set. With `SKILLSPECTOR_MODEL` you can pin a model (`<model-id>`); leave it empty to use the CLI's own default. A model from another vendor is ignored with a note. The wrapper also starts SkillSpector inside its own tool environment with the aggregate scan deadline raised from upstream's hard-coded 60 s to `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` (default: `AGENT_GUARD_SCAN_TIMEOUT` minus 60 s), because CLI providers exhaust the 60 s budget on medium-sized skills and would otherwise end in NO VERDICT (upstream: NVIDIA/SkillSpector#460).
 
 **Why a separate LLM process instead of letting the installing agent judge the code?** Two reasons. (1) The LLM layer is not just a summary of the static findings — SkillSpector's semantic analyzers read the raw files and look for the residual gap: prompt injection, exfiltration instructions, and obfuscated intent phrased in natural language that regex/YARA cannot encode. (2) To judge semantically, an LLM must ingest the untrusted content — and the agent that installs the skill is exactly the target a poisoned SKILL.md is written for. The scanner therefore runs the model as a separate process with no tools, no MCP servers, no settings (`claude -p --permission-mode dontAsk --strict-mcp-config --setting-sources=`), feeds the content via stdin, and forces a JSON-schema answer. The verdict is an exit code the agent receives *before* it reads anything. The CLI providers give you that isolation on your existing subscription.
 
@@ -796,7 +804,7 @@ No scanner — not agent-guard, not the professional tools it wraps — can guar
 
 | Stage | Limit |
 |-------|-------|
-| VirusTotal (`binary`, MCP non-source files) | Recognises only **known** malware hashes. A novel or targeted binary passes unnoticed. Prefer signed releases of well-known projects. |
+| VirusTotal (`binary`, MCP non-source files) | Recognises only **known** malware hashes. An unseen hash gives NO VERDICT (exit 2), never SAFE; a known-and-clean hash can still be a targeted payload that no engine detects yet. Prefer signed releases of well-known projects. |
 | malcontent (`binary --deep`) | Capability analysis, not proof. **Windows PE coverage is weaker than Linux ELF** — treat a clean `.exe` result with extra care. |
 | GuardDog (`npm`/`pypi`/`go`/`cargo`) | Heuristics + YARA over known attack patterns. A clean result is not proof of harmlessness. `capability-*` findings are printed as informational and do **not** block (exception: `capability-process-hooks` — install-time code execution — blocks) — a malicious package whose only tell is an implausible remaining capability needs your judgment on that list. |
 | cargo | GuardDog's crates support is new (3.2.0) and its metadata rules are thinner than for npm/PyPI; the second pass (SkillSpector) is static. `sfw cargo install <crate>` remains a good install-time net. |
@@ -830,7 +838,7 @@ The warnings describe what the skill genuinely does:
 - **It runs external binaries.** The skill drives [SkillSpector](https://github.com/NVIDIA/SkillSpector) (skills + static MCP scan) and [cisco-ai-mcp-scanner](https://github.com/cisco-ai-defense/mcp-scanner) (optional live MCP runtime check) — that *is* its job. Both are official, open-source security tools installed isolated via `uv`. SkillSpector is **pinned to the exact commit behind a tagged release** (see `scripts/_pins.py`), so "scan = install" applies to the scanner itself (review and bump deliberately); the Cisco MCP scanner is pulled from PyPI at the latest version.
 - **It starts Docker containers, one of them privileged.** The live MCP check runs the target in a locked-down container next to a packet-capture container (`NET_RAW` only), and the dynamic install analysis runs OpenSSF's image with `--privileged`, which gVisor needs to build its own sandbox inside it. The analysed package runs inside gVisor, not in the privileged container itself.
 - **It installs across multiple agents.** The bundled installer links the audited skill into every agent you have — the "one scan, every agent" feature. Scanners read cross-platform installation as expanded reach; here it is the intended behavior, and you can limit it with `--tools`.
-- **It can route data to an LLM.** SkillSpector sends scanned skill/static-source contents to the provider you configure — by default the coding-agent CLI you are logged into (so the data goes to that vendor under your own account), otherwise the hosted provider whose key you set. `AGENT_GUARD_STATIC_ONLY=1` disables only that LLM layer; static analyzers can still use configured network lookups such as OSV. Cisco's runtime MCP scan sends runtime tool/prompt data to the provider you configure for it (`[llm.use] mcp` profile or `MCP_SCANNER_LLM_*`).
+- **It can route data to an LLM.** SkillSpector sends scanned skill/static-source contents to the provider you configure — by default the coding-agent CLI you are logged into (so the data goes to that vendor under your own account), otherwise the hosted provider whose key you set. `AGENT_GUARD_STATIC_ONLY=1` disables that LLM layer and accepts a static-only SAFE (and a dynamic stage skipped with `--no-dynamic`); static analyzers can still use configured network lookups such as OSV. Cisco's runtime MCP scan sends runtime tool/prompt data to the provider you configure for it (`[llm.use] mcp` profile or `MCP_SCANNER_LLM_*`).
 
 You cannot drive these flags to green without removing the tool's reason to exist. What keeps it trustworthy is everything in the [Security model](#security-model) above: scanned content is treated as data, the workflow fails closed, repos are pinned and ZIP-scanned before any clone, and the skill ships **no hidden or invisible characters** of its own.
 

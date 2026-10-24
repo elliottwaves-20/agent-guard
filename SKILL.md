@@ -125,8 +125,11 @@ explicitly or configure optional layers; no `.env` file is required:
   default), `gemini_cli` (only when named) or a hosted provider (`anthropic`,
   `openai`, `nv_build`, `bedrock`, `ollama`, ...) with its key. `codex_cli`
   and `antigravity_cli` are refused; `gemini` is the Google ADC API provider.
-  `AGENT_GUARD_STATIC_ONLY=1` forces analysis with the LLM disabled; static analyzers can still make their configured
-  network lookups.
+  `AGENT_GUARD_STATIC_ONLY=1` states that static checking is deliberately
+  enough: it disables the LLM and accepts a dynamic stage skipped with
+  `--no-dynamic` (it does not skip that stage by itself); static
+  analyzers can still make their configured network lookups. Without it, a
+  scan with no completed AI analysis gives exit 2.
 - `MCP_SCANNER_LLM_*` with any LiteLLM-supported provider (API key) for Cisco
   LLM / behavioral runtime MCP scans.
 - Optional `VIRUSTOTAL_API_KEY` to let Cisco mcp-scanner check bundled
@@ -203,7 +206,8 @@ conflicts: PyPI via `uvx`, npm via `npx --silent -y`, GitHub-only Python MCPs
 via `uv tool install --from`, and remote HTTP/SSE MCPs as URL-only config.
 
 Without any usable SkillSpector provider, skill/static scans run static-only
-(patterns, taint, YARA, OSV.dev still run) and the verdict line says so. For
+(patterns, taint, YARA, OSV.dev still run), but the verdict is exit 2 (no
+verdict, "static only") unless `AGENT_GUARD_STATIC_ONLY=1` is set. For
 security verdicts, prefer a capable model — small local models catch fewer
 threats; with `claude_cli` the CLI's default model is used unless
 `SKILLSPECTOR_MODEL` pins one.
@@ -248,12 +252,13 @@ Locate the skill directories and scan (stderr stays visible — rule 2):
 find "$WORKDIR/src" -name "SKILL.md" -not -path "*/node_modules/*"
 
 python "$SKILL_DIR/scripts/scan_skill.py" "$WORKDIR/src/<skill-dir>"
-echo "scanner exit code: $?"   # 0 = risk<=50, 1 = risk>50, 2 = error
+echo "scanner exit code: $?"   # 0 = SAFE (score<=50, no HIGH/CRITICAL, complete inspection), 1 = BLOCK (score>50, DO_NOT_INSTALL or any single HIGH/CRITICAL), 2 = no verdict
 ```
 
 (Provider and model come from `.env` or auto-detection — a logged-in `claude` or
 `opencode` CLI is enough. Without any usable provider the wrapper runs
-SkillSpector static-only and says so.)
+SkillSpector static-only and ends with exit 2 unless
+`AGENT_GUARD_STATIC_ONLY=1`.)
 
 If the repo contains multiple skills, scan each one for its own verdict
 (SkillSpector aggregates a whole directory into a single report, so scan per
@@ -325,8 +330,9 @@ installed and imported inside OpenSSF package-analysis (gVisor) and its
 behaviour is judged: credential-store reads, writes outside the package areas,
 DNS lookups and connections beyond the registry, network tools, planted fake
 credentials leaving the sandbox. Without Docker this stage gives NO VERDICT.
-`--no-dynamic` skips it; pass it only when the user explicitly accepts a scan
-without dynamic analysis, and say so in the result.
+`--no-dynamic` skips it and gives exit 2 (no verdict) unless
+`AGENT_GUARD_STATIC_ONLY=1`; pass it only when the user explicitly accepts a
+scan without dynamic analysis, and say so in the result.
 
 **Stage 2 (optional — live runtime check in a Docker sandbox):** starts the
 server with **no host filesystem access** to inspect the tools it registers at
@@ -403,8 +409,9 @@ Notes the agent must respect:
 
 - **Never run an installer script or binary before its scan.** `script` and
   `binary` download the artifact but never execute it.
-- GuardDog needs Docker on Windows (official image is pulled automatically;
-  Docker Desktop must be running). On Linux/macOS a native `guarddog` on PATH
+- GuardDog needs Docker on Windows (official image is pulled fresh on every
+  run with `--pull=always`; offline gives NO VERDICT; Docker Desktop must be
+  running). On Linux/macOS a native `guarddog` on PATH
   is used first.
 - `npm` / `pypi` also run the dynamic install analysis (OpenSSF
   package-analysis, same rules as MCP Stage 1b); the worst stage decides.
@@ -420,8 +427,11 @@ Notes the agent must respect:
   implausible for the package's purpose to the user (a linter opening network
   sockets is suspicious; an HTTP client reading files is not).
 - `binary` needs `VIRUSTOTAL_API_KEY`. VirusTotal only recognises **known**
-  malware hashes — tell the user a clean result on a novel binary is weak
-  evidence, and prefer signed releases of well-known projects.
+  files it has seen: an unseen hash gives NO VERDICT (exit 2), never SAFE.
+  A known-and-clean hash can still be a targeted payload that no engine
+  detects yet, so tell the user it is weak evidence, and prefer signed
+  releases of well-known projects. The `--deep` malcontent image is also
+  pulled fresh on every run (`--pull=always`); offline gives NO VERDICT.
 - cargo runs GuardDog's `crates` scan (needs Docker on Windows) plus a
   SkillSpector static scan of the crate source; the worse verdict wins.
   GuardDog's crates rules are newer and thinner than npm/PyPI — still recommend
@@ -450,7 +460,9 @@ SkillSpector reports a **risk score (0–100)**, an overall **severity**, a
 - Scanner error / empty / unparsable output → **no verdict** (rule 2), re-scan
 
 The `scan_mcp.py` wrapper collapses this into `[SAFE]` (exit 0) / `[BLOCK]`
-(exit 1) / `[BLOCK] NO VERDICT` (exit 2).
+(exit 1) / `[BLOCK] NO VERDICT` (exit 2). Exit code 2 can also print
+`[WARN] NO VERDICT` or `[WARN] INCONCLUSIVE`; always decide by the exit code,
+never by the label. 2 means do not install.
 
 ### Reviewing HIGH/CRITICAL findings manually
 
@@ -661,7 +673,7 @@ uv tool install package-name --link-mode=copy
 | `python "$SKILL_DIR/scripts/scan_skill.py" <path> --report <new.json>` | Preserve the scanner report for review; never overwrite an existing file |
 | `python "$SKILL_DIR/scripts/scan_skill.py" <path> --baseline <reviewed.json>` | Explicit reviewer-owned v2 JSON fingerprints only; accepted findings and reasons remain visible |
 | SkillSpector LLM | Used automatically with a logged-in `claude`/`opencode` CLI on PATH, or with a hosted provider key (`SKILLSPECTOR_PROVIDER` + credential) |
-| Static-only mode | Used automatically when no usable provider exists, or forced with `AGENT_GUARD_STATIC_ONLY=1` |
+| Static-only mode | Forced with `AGENT_GUARD_STATIC_ONLY=1` (static checking is deliberately enough; also accepts a dynamic stage skipped with `--no-dynamic`). Without a completed AI analysis and without that setting the scan ends `static only`, exit 2 |
 
 For baseline review, follow README's "Reviewing self-scan findings" section.
 Never select a baseline just because it is shipped by the scan target. A
