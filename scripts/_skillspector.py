@@ -405,8 +405,8 @@ LLM_EXPLICIT = _llm_explicit()
 
 def explicit_llm_gap() -> str | None:
     """The NO VERDICT message when the user chose a provider that cannot run,
-    else None. Static-only SAFE stays for nothing named plus nothing found, and
-    for AGENT_GUARD_STATIC_ONLY=1."""
+    else None. A static-only SAFE needs AGENT_GUARD_STATIC_ONLY=1; with nothing
+    named and nothing found, verdict_skillspector withholds SAFE as well."""
     if LLM_EXPLICIT and not LLM_READY:
         return ("[BLOCK] NO VERDICT -- the chosen LLM provider cannot run: "
                 f"{LLM_REASON}. A static-only scan is not a substitute for the "
@@ -870,6 +870,12 @@ def verdict_skillspector(report_path: Path, code: int, runtime_hint: bool = Fals
     gap = None if llm_confirmed else explicit_llm_gap()
     if gap:
         print(_console_text(gap))
+        return 2
+    if not llm_confirmed and not meta.get("llm_available") and not _static_only_forced():
+        print(_console_text(
+            f"[BLOCK] NO VERDICT -- static only ({LLM_REASON}); no AI analysis ran. "
+            "Set up an LLM provider or set AGENT_GUARD_STATIC_ONLY=1 for an explicit "
+            "static-only policy."))
         return 2
 
     extra = f" with {len(issues)} low/medium note(s)" if issues else ""

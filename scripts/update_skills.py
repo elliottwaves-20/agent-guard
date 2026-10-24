@@ -54,7 +54,7 @@ import _staging
 import _triage
 import _verifier
 import _yara_recheck
-from _skillspector import USER_CONFIG, llm_run_incomplete, run_skillspector
+from _skillspector import USER_CONFIG, _static_only_forced, llm_run_incomplete, run_skillspector
 from _staging import StageError, now
 from _user_config import ConfigError
 
@@ -248,7 +248,8 @@ class Run:
         else:
             result = _triage.triage(data, staged.path, raw, origin=_triage.Origin(source, ref),
                                     approved=_dossier.approved(entry), verifier=self.verifier,
-                                    spans=self.spans, yara=self.yara)
+                                    spans=self.spans, yara=self.yara,
+                                    require_llm=not _static_only_forced())
         summary = _dossier.summary(result)
         if result.verdict != _triage.NO_VERDICT:
             print(triage_line(summary))

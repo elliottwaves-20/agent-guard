@@ -915,7 +915,8 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 src = Path(src_dir)
                 (src / "SKILL.md").write_text("---\nname: static\n---\n",
                                                encoding="utf-8")
-                self.assertEqual(module.run_skillspector(src), 0)
+                # Static only by default is no verdict, not SAFE.
+                self.assertEqual(module.run_skillspector(src), 2)
         finally:
             (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
              module.SKILLSPECTOR, module.run_bounded) = original_state
@@ -924,7 +925,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("--no-llm", calls[0])
 
-    def _clean_verdict(self, env, on_path=()):
+    def _clean_verdict(self, env, on_path=(), **kwargs):
         """Exit code of verdict_skillspector for a clean report, with the
         provider resolution run under a controlled environment."""
         import shutil
@@ -942,7 +943,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 report = Path(d) / "report.json"
                 self._write_report(report, metadata={"llm_available": False})
                 with contextlib.redirect_stdout(out):
-                    code = module.verdict_skillspector(report, 0)
+                    code = module.verdict_skillspector(report, 0, **kwargs)
             return code, out.getvalue()
         finally:
             shutil.which = old_which
@@ -962,10 +963,21 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("NO VERDICT", text)
 
-    def test_nothing_named_and_nothing_found_stays_static_safe(self):
+    def test_nothing_named_and_no_ai_analysis_gives_no_verdict(self):
         code, text = self._clean_verdict({})
+        self.assertEqual(code, 2)
+        self.assertIn("NO VERDICT", text)
+        self.assertIn("static only", text)
+
+    def test_static_only_policy_allows_static_verdict_without_provider(self):
+        code, text = self._clean_verdict({"AGENT_GUARD_STATIC_ONLY": "1"})
         self.assertEqual(code, 0)
         self.assertIn("static only", text)
+
+    def test_caller_confirmed_ai_analysis_is_safe(self):
+        # Campaign scans check the report for the requested AI analysis themselves.
+        code, _text = self._clean_verdict({}, llm_confirmed=True)
+        self.assertEqual(code, 0)
 
     def test_static_only_policy_allows_static_verdict_despite_named_provider(self):
         code, _text = self._clean_verdict({"SKILLSPECTOR_PROVIDER": "codex",
