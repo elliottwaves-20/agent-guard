@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -362,6 +363,67 @@ class ScanBoundaryTests(unittest.TestCase):
              patch.object(scan_url, 'offer_mcp_install') as offer:
             self.assertEqual(scan_url.scan_install_command('uvx demo', False, False), 0)
             offer.assert_not_called()
+
+    def _raw(self, url, data=b'echo hi\n'):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        with patch.object(resolver, 'http_bytes', return_value=data):
+            source = resolver.resolve_url(url, Path(d.name))
+        return Path(d.name), source
+
+    def test_raw_script_keeps_its_name_and_is_classified_as_file(self):
+        dest, source = self._raw('https://raw.githubusercontent.com/o/r/main/run.sh')
+        self.assertEqual(source.source_path, dest / 'run.sh')
+        self.assertEqual(source.kind, 'file')
+        self.assertEqual(scan_url.classify_source(source), 'file')
+
+    def test_raw_markdown_keeps_name_and_stays_markdown(self):
+        for name in ('README.md', 'Notes.MARKDOWN'):
+            dest, source = self._raw(f'https://raw.githubusercontent.com/o/r/main/{name}')
+            self.assertEqual(source.source_path, dest / name)
+            self.assertEqual(source.kind, 'markdown')
+            self.assertEqual(scan_url.classify_source(source), 'markdown')
+
+    def test_raw_file_with_hostile_name_stays_directly_in_dest(self):
+        for name in ('..%5Cx.sh', 'a%2F..%2F..%2Fx.sh'):
+            dest, source = self._raw(f'https://raw.githubusercontent.com/o/r/main/{name}')
+            self.assertEqual(source.source_path.parent.resolve(), dest.resolve())
+
+    def test_github_subpath_with_unsafe_segments_is_refused(self):
+        for sub in ('../../x', 'a/./b', 'C:', 'a%5Cb', 'a/b:c'):
+            with self.subTest(sub=sub):
+                with self.assertRaises(resolver.FetchError):
+                    resolver.github_parts(f'https://github.com/o/r/tree/main/{sub}')
+
+    def _github_zip(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr('r-abc/skills/demo/SKILL.md', 'x')
+        return buf.getvalue()
+
+    def test_github_subpath_missing_in_archive_is_refused(self):
+        with tempfile.TemporaryDirectory() as d, \
+             patch.object(resolver, 'github_ref_sha', return_value='a' * 40), \
+             patch.object(resolver, 'http_bytes', return_value=self._github_zip()):
+            with self.assertRaises(resolver.FetchError):
+                resolver.resolve_url('https://github.com/o/r/tree/main/nope', Path(d))
+
+    def test_github_existing_subpath_still_resolves(self):
+        with tempfile.TemporaryDirectory() as d, \
+             patch.object(resolver, 'github_ref_sha', return_value='a' * 40), \
+             patch.object(resolver, 'http_bytes', return_value=self._github_zip()):
+            source = resolver.resolve_url('https://github.com/o/r/tree/main/skills/demo', Path(d))
+            self.assertTrue(source.source_path.is_dir())
+
+    def test_scan_url_exits_2_for_unsafe_github_subpath(self):
+        argv = ['scan_url.py', 'https://github.com/o/r/tree/main/../../x']
+        with patch.object(sys, 'argv', argv), \
+             patch.object(resolver, 'github_ref_sha', return_value='a' * 40), \
+             patch.object(resolver, 'http_bytes', return_value=self._github_zip()), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                scan_url.main()
+        self.assertEqual(cm.exception.code, 2)
 
 
 if __name__ == '__main__':
