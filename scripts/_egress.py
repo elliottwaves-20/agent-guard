@@ -81,6 +81,14 @@ def parse_allow(entries) -> set:
     return allowed
 
 
+def private_address(address: str) -> bool:
+    """True for loopback, RFC 1918 and other private addresses; False if not an address."""
+    try:
+        return ipaddress.ip_address(address).is_private
+    except ValueError:
+        return False
+
+
 def _endpoint(text: str, v6: bool) -> tuple:
     if v6:
         host, dot, port = text.rpartition(".")
@@ -147,6 +155,8 @@ def analyse(lines, local_ips, allow: set) -> Report:
             continue  # replies and anything addressed to the target
 
         if dport == 53:
+            if not private_address(dst):   # only the sandbox's own resolver is exempt
+                finding(f"DNS traffic to a public address: {dst}")
             query = _QUERY.match(payload)
             if query:
                 name = query.group(3).rstrip(".").lower()

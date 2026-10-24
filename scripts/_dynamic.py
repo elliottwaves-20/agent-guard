@@ -167,7 +167,8 @@ def analyse(result: dict, ecosystem: str, allow_hosts=(), expect_name: str | Non
                 finding(f"{name}: DNS lookup of {host}")
         for sock in phase.get("Sockets") or []:
             port, address = sock.get("Port") or 0, sock.get("Address", "")
-            if port in (0, 53):   # 0: resolved only, never connected; 53: the resolver
+            # 0: resolved only, never connected; 53 on a private address: the resolver
+            if port == 0 or (port == 53 and _egress.private_address(address)):
                 continue
             names = [h.rstrip(".").lower() for h in sock.get("Hostnames") or []]
             if (address, port) in allow or any((h, port) in allow for h in names):

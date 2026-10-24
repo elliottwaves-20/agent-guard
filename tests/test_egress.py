@@ -92,6 +92,24 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(report.findings,
                          ["DNS lookup of a host that is not allowed: evil-exfil-test.example.com"])
 
+    def test_dns_query_to_a_public_resolver_is_a_finding(self):
+        report = analyse(["17:35:18.258128 IP 172.17.0.2.50928 > 1.1.1.1.53: 41011+ A? pypi.org. (45)"])
+        self.assertEqual(report.findings, ["DNS traffic to a public address: 1.1.1.1"])
+
+    def test_tcp_syn_to_port_53_on_a_public_address_is_a_finding(self):
+        report = analyse(["17:35:18.358137 IP 172.17.0.2.44712 > 8.8.8.8.53: Flags [S], seq 1, "
+                          "win 64240, length 0"])
+        self.assertEqual(report.findings, ["DNS traffic to a public address: 8.8.8.8"])
+
+    def test_dns_to_the_private_sandbox_resolver_is_fine(self):
+        self.assertEqual(analyse(PYPI[:2]).findings, [])
+
+    def test_private_address_helper(self):
+        for address in ["127.0.0.11", "10.0.0.2", "192.168.65.7", "172.17.0.1", "fd00::1"]:
+            self.assertTrue(eg.private_address(address), address)
+        for address in ["1.1.1.1", "8.8.8.8", "2606:4700::1111", "not-an-address"]:
+            self.assertFalse(eg.private_address(address), address)
+
     def test_connection_to_a_bare_ip_is_a_finding(self):
         report = analyse(BARE_IP)
         self.assertEqual(report.findings,

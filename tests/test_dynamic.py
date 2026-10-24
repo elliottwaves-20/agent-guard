@@ -66,7 +66,7 @@ def npm_clean():
                 names=["registry.npmjs.org"],
                 sockets=[("104.16.0.34", 0, ["registry.npmjs.org"]),
                          ("104.16.0.34", 443, ["registry.npmjs.org"]),
-                         ("8.8.8.8", 53, [])],
+                         ("10.0.0.2", 53, [])],
                 commands=[cmd("node", "/usr/bin/npm", "install", "is-number@7.0.0"),
                           cmd("sh", "-c", "node install.js"), cmd("node", "install.js")]),
         },
@@ -86,7 +86,7 @@ def pypi_clean():
                        write("/tmp/pip-unpack-abc"), write("/dev/null")],
                 names=["pypi.org", "files.pythonhosted.org"],
                 sockets=[("151.101.0.223", 443, ["files.pythonhosted.org", "pypi.org"]),
-                         ("2a04:4e42::223", 443, ["pypi.org"]), ("8.8.8.8", 53, [])],
+                         ("2a04:4e42::223", 443, ["pypi.org"]), ("10.0.0.2", 53, [])],
                 commands=[cmd("/app/.pyenv/bin/python3", "-m", "pip", "install", "six==1.17.0"),
                           cmd("uname", "-rs"), cmd("lsb_release", "-a"), cmd("rustc", "--version")]),
         },
@@ -154,6 +154,17 @@ class FindingTests(unittest.TestCase):
             "install: DNS lookup of phone-home.example.net",
             "install: connection to 104.20.23.154:443 (example.com)",
             "install: connection to 203.0.113.7:4444 (no DNS name)"])
+
+    def test_port_53_counts_as_the_resolver_only_on_private_addresses(self):
+        result = npm_clean()
+        result["Analysis"]["install"]["Sockets"].append(
+            {"Address": "8.8.8.8", "Port": 53, "Hostnames": []})
+        self.assertEqual(analyse(result).findings,
+                         ["install: connection to 8.8.8.8:53 (no DNS name)"])
+        result = npm_clean()
+        result["Analysis"]["install"]["Sockets"].append(
+            {"Address": "10.0.0.2", "Port": 53, "Hostnames": []})
+        self.assertEqual(analyse(result).findings, [])
 
     def test_registry_of_the_other_ecosystem_is_not_allowed(self):
         result = npm_clean()
