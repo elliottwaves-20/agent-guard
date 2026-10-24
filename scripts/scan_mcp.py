@@ -204,6 +204,8 @@ SANDBOX_DOCKERFILE = (
 # (pandas, numpy, ...) inside a fresh container.
 STDIO_TIMEOUT = int(os.environ.get("SCAN_MCP_STDIO_TIMEOUT", "240"))
 VT_MAX_FILES = int(os.environ.get("MCP_SCANNER_VT_MAX_FILES", "10"))
+# A VirusTotal report older than this was made with outdated engine signatures.
+VT_STALE_DAYS = 30
 
 VT_HELPER = r"""
 import json
@@ -231,19 +233,53 @@ analyzer = VirusTotalAnalyzer(
 )
 
 if target.is_file():
-    finding = analyzer.analyze_file(str(target))
-    findings = [finding] if finding else []
+    # analyze_file() returns None for a clean file, an unknown hash and a failed
+    # lookup alike. Query the hash directly so those outcomes stay apart --
+    # "VirusTotal could not tell" must never read as "clean".
+    import hashlib
+    h = hashlib.sha256()
+    with target.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    file_hash = h.hexdigest()
     summary = {
         "total_found": 1,
         "total_to_scan": 1,
-        "scanned": 1,
-        "clean": 0 if finding else 1,
-        "malicious": 1 if finding else 0,
+        "scanned": 0,
+        "clean": 0,
+        "malicious": 0,
+        "suspicious": 0,
         "not_found": 0,
         "throttled": 0,
         "failed": 0,
         "skipped_by_limit": 0,
     }
+    findings = []
+    try:
+        vt_result, hash_found, error_reason = analyzer._query_virustotal_cached(file_hash)
+        if not error_reason and not hash_found and analyzer.upload_files:
+            vt_result = analyzer._upload_and_scan(target, file_hash)
+            hash_found = vt_result is not None
+            error_reason = None if hash_found else "upload_failed"
+    except Exception as exc:  # fail closed, including a changed private API
+        vt_result, hash_found, error_reason = None, False, f"exception: {exc}"
+    if error_reason in ("rate_limit", "quota_exceeded", "daily_cap_reached", "auth_error"):
+        summary["throttled"] = 1
+    elif error_reason:
+        summary["failed"] = 1
+    elif not hash_found:
+        summary["not_found"] = 1
+    else:
+        summary["scanned"] = 1
+        summary["scan_date"] = vt_result.get("scan_date")
+        if vt_result.get("malicious", 0) > 0:
+            summary["malicious"] = 1
+            findings = [analyzer._create_finding(
+                file_path=str(target), file_hash=file_hash, vt_result=vt_result)]
+        elif vt_result.get("suspicious", 0) > 0:
+            summary["suspicious"] = 1
+        else:
+            summary["clean"] = 1
 elif target.is_dir():
     findings = analyzer.analyze_directory(str(target))
     summary = analyzer.last_scan_summary
@@ -625,9 +661,19 @@ def virustotal_verdict(report: dict) -> int:
     print("\n" + "=" * 60)
     print("VirusTotal summary:")
     for key in ("total_found", "total_to_scan", "scanned", "clean", "malicious",
-                "not_found", "throttled", "failed", "skipped_by_limit"):
+                "suspicious", "not_found", "throttled", "failed", "skipped_by_limit"):
         if key in summary:
             print(f"  {key}: {summary[key]}")
+    scan_date = summary.get("scan_date")
+    if isinstance(scan_date, (int, float)):
+        import time
+        age_days = (time.time() - scan_date) / 86400
+        print(f"  last VirusTotal analysis: {time.strftime('%Y-%m-%d', time.gmtime(scan_date))} "
+              f"({age_days:.0f} days ago)")
+        if age_days > VT_STALE_DAYS:
+            print(f"  NOTE: that report is older than {VT_STALE_DAYS} days -- engines "
+                  "updated since then were not applied. Re-analyse on virustotal.com "
+                  "if in doubt.")
 
     if findings:
         for finding in findings:
@@ -640,6 +686,25 @@ def virustotal_verdict(report: dict) -> int:
 
     if summary.get("failed", 0) or summary.get("throttled", 0):
         print("\n[WARN] INCONCLUSIVE -- some VirusTotal lookups failed or were throttled.")
+        return 2
+    if summary.get("not_found", 0):
+        print(f"\n[WARN] NO VERDICT -- VirusTotal has never seen {summary['not_found']} "
+              "file(s). Unknown is not clean: a new or targeted payload looks exactly "
+              "like this. Review manually.")
+        return 2
+    if summary.get("suspicious", 0):
+        print("\n[WARN] NO VERDICT -- VirusTotal engines rate a file suspicious. "
+              "Review the report manually.")
+        return 2
+    # Cisco's directory scan counts a suspicious-only file as scanned but neither
+    # clean nor malicious; any such gap is an unexplained result.
+    if summary.get("scanned", 0) > summary.get("clean", 0) + summary.get("malicious", 0):
+        print("\n[WARN] NO VERDICT -- not every checked file came back clean "
+              "(likely rated suspicious). Review manually.")
+        return 2
+    if summary.get("skipped_by_limit", 0):
+        print(f"\n[WARN] NO VERDICT -- {summary['skipped_by_limit']} file(s) were not "
+              "checked (file limit). Raise MCP_SCANNER_VT_MAX_FILES or review manually.")
         return 2
 
     print("\n[SAFE] VirusTotal found no known-malicious files in the checked set.")

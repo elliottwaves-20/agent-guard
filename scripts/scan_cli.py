@@ -154,7 +154,10 @@ def guarddog_command(ecosystem: str, package: str, version: str = None) -> list:
         die("GuardDog is not on PATH and Docker was not found. On Windows, "
             "GuardDog only runs via Docker -- start Docker Desktop, or install "
             "GuardDog natively (Linux/macOS: pipx install guarddog).")
-    return ["docker", "run", "--rm", GUARDDOG_IMAGE] + args
+    # --pull=always: `docker run` reuses a cached :latest image forever, so the
+    # heuristics would freeze at the first pull. Offline, the pull fails and the
+    # run produces no report -> NO VERDICT.
+    return ["docker", "run", "--rm", "--pull=always", GUARDDOG_IMAGE] + args
 
 
 # GuardDog 3.0 ships two kinds of rules. `capability-*` rules are transparency
@@ -259,7 +262,7 @@ def run_guarddog(ecosystem: str, spec: str) -> int:
     shown = version or "latest"
     print(f"  GuardDog scan ({ecosystem}): {package} {shown}")
     if cmd[0] == "docker":
-        print(f"  via Docker image {GUARDDOG_IMAGE} (first run pulls the image)")
+        print(f"  via Docker image {GUARDDOG_IMAGE} (pulled fresh on every run)")
     try:
         r = run_bounded(cmd, timeout=SCAN_TIMEOUT)
     except subprocess.TimeoutExpired:
@@ -320,7 +323,7 @@ def run_malcontent(path: Path) -> int:
     print(f"  malcontent capability scan via {MALCONTENT_IMAGE}")
     print("  NOTE: malcontent's Windows PE analysis is weaker than ELF -- "
           "treat a clean result on .exe files with extra care.")
-    cmd = ["docker", "run", "--rm",
+    cmd = ["docker", "run", "--rm", "--pull=always",
            "-v", f"{path.parent}:/scan:ro",
            MALCONTENT_IMAGE,
            "--format=json", "analyze", f"/scan/{path.name}"]

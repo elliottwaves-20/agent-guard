@@ -993,6 +993,112 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             "findings": [{"severity": "HIGH", "summary": "malicious file"}],
         }), 1)
 
+    def test_virustotal_verdict_unknown_hash_is_no_verdict(self):
+        # A hash VirusTotal has never seen is exactly what a new payload looks
+        # like -- it must not read as clean.
+        scan_mcp = importlib.import_module("scan_mcp")
+        self.assertEqual(scan_mcp.virustotal_verdict({
+            "summary": {"scanned": 1, "clean": 0, "not_found": 1,
+                        "failed": 0, "throttled": 0},
+            "findings": [],
+        }), 2)
+
+    def test_virustotal_verdict_unchecked_or_suspicious_files_are_no_verdict(self):
+        scan_mcp = importlib.import_module("scan_mcp")
+        self.assertEqual(scan_mcp.virustotal_verdict({
+            "summary": {"scanned": 10, "clean": 10, "skipped_by_limit": 3,
+                        "failed": 0, "throttled": 0},
+            "findings": [],
+        }), 2)
+        self.assertEqual(scan_mcp.virustotal_verdict({
+            "summary": {"scanned": 1, "clean": 0, "suspicious": 1,
+                        "failed": 0, "throttled": 0},
+            "findings": [],
+        }), 2)
+
+    def test_virustotal_verdict_clean_known_hash_is_safe(self):
+        scan_mcp = importlib.import_module("scan_mcp")
+        self.assertEqual(scan_mcp.virustotal_verdict({
+            "summary": {"scanned": 1, "clean": 1, "not_found": 0,
+                        "failed": 0, "throttled": 0, "skipped_by_limit": 0},
+            "findings": [],
+        }), 0)
+
+    def _run_vt_helper_single_file(self, query_result):
+        """Execute VT_HELPER's single-file branch against a stub analyzer."""
+        import contextlib
+        import io
+        import tempfile
+        import types
+        scan_mcp = importlib.import_module("scan_mcp")
+
+        class StubAnalyzer:
+            def __init__(self, **kwargs):
+                self.upload_files = kwargs.get("upload_files", False)
+
+            def _query_virustotal_cached(self, file_hash):
+                return query_result
+
+            def _create_finding(self, file_path, file_hash, vt_result):
+                return types.SimpleNamespace(severity="HIGH", summary="malicious",
+                                             details={"permalink": "x"})
+
+            def analyze_file(self, path):  # the old, ambiguous entry point
+                return None
+
+        constants = types.ModuleType("mcpscanner.config.constants")
+        constants.MCPScannerConstants = types.SimpleNamespace()
+        analyzer_mod = types.ModuleType("mcpscanner.core.analyzers.virustotal_analyzer")
+        analyzer_mod.VirusTotalAnalyzer = StubAnalyzer
+        stubs = {"mcpscanner": types.ModuleType("mcpscanner"),
+                 "mcpscanner.config": types.ModuleType("mcpscanner.config"),
+                 "mcpscanner.config.constants": constants,
+                 "mcpscanner.core": types.ModuleType("mcpscanner.core"),
+                 "mcpscanner.core.analyzers": types.ModuleType("mcpscanner.core.analyzers"),
+                 "mcpscanner.core.analyzers.virustotal_analyzer": analyzer_mod}
+        old_modules = {k: sys.modules.get(k) for k in stubs}
+        old_argv, old_env = sys.argv[:], os.environ.copy()
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "tool.exe"
+            target.write_bytes(b"MZ payload")
+            out = io.StringIO()
+            try:
+                sys.modules.update(stubs)
+                sys.argv = ["-c", str(target), "1"]
+                os.environ["VIRUSTOTAL_API_KEY"] = "vt-test"
+                with contextlib.redirect_stdout(out):
+                    exec(scan_mcp.VT_HELPER, {"__name__": "__main__"})
+            finally:
+                for k, v in old_modules.items():
+                    if v is None:
+                        sys.modules.pop(k, None)
+                    else:
+                        sys.modules[k] = v
+                sys.argv = old_argv
+                os.environ.clear()
+                os.environ.update(old_env)
+        report = json.loads(out.getvalue().strip().splitlines()[-1])
+        return scan_mcp.virustotal_verdict(report)
+
+    def test_vt_helper_single_file_unknown_hash_is_no_verdict(self):
+        self.assertEqual(self._run_vt_helper_single_file((None, False, None)), 2)
+
+    def test_vt_helper_single_file_lookup_errors_are_no_verdict(self):
+        for reason in ("rate_limit", "quota_exceeded", "daily_cap_reached",
+                       "auth_error", "api_error", "request_error"):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    self._run_vt_helper_single_file((None, False, reason)), 2)
+
+    def test_vt_helper_single_file_verdicts_for_known_hash(self):
+        clean = {"malicious": 0, "suspicious": 0, "total_engines": 70,
+                 "scan_date": 1_900_000_000, "permalink": "x"}
+        self.assertEqual(self._run_vt_helper_single_file((clean, True, None)), 0)
+        bad = dict(clean, malicious=3)
+        self.assertEqual(self._run_vt_helper_single_file((bad, True, None)), 1)
+        sus = dict(clean, suspicious=1)
+        self.assertEqual(self._run_vt_helper_single_file((sus, True, None)), 2)
+
     def test_cisco_verdict_fails_closed_on_llm_auth_errors_even_with_safe_summary(self):
         scan_mcp = importlib.import_module("scan_mcp")
 
@@ -2009,9 +2115,10 @@ class ScanCliRouterTests(unittest.TestCase):
             cmd = self.scan_cli.guarddog_command("npm", "left-pad")
         finally:
             self.scan_cli.shutil.which = original
-        self.assertEqual(cmd[:4], ["docker", "run", "--rm",
+        # --pull=always: a cached :latest image would keep old rules forever.
+        self.assertEqual(cmd[:5], ["docker", "run", "--rm", "--pull=always",
                                    self.scan_cli.GUARDDOG_IMAGE])
-        self.assertEqual(cmd[4:], ["npm", "scan", "left-pad",
+        self.assertEqual(cmd[5:], ["npm", "scan", "left-pad",
                                    "--output-format", "json"])
 
     def test_guarddog_command_dies_without_guarddog_or_docker(self):
