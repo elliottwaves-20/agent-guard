@@ -63,6 +63,7 @@ from pathlib import Path
 
 import _dynamic
 from _skillspector import SCAN_TIMEOUT, combine_verdicts, die, run_bounded, run_skillspector
+from _url_resolver import safe_basename
 from scan_mcp import http_bytes, http_json, run_virustotal, safe_extract_tar
 
 GUARDDOG_IMAGE = os.environ.get(
@@ -292,12 +293,20 @@ def malcontent_verdict(report: dict) -> int:
     """Judge a malcontent JSON report: CRITICAL/HIGH risk -> BLOCK."""
     print("\n" + "=" * 60)
     files = report.get("Files") or {}
+    if not isinstance(files, dict):
+        print("[BLOCK] NO VERDICT -- malcontent report has an unexpected format "
+              "(Files is not an object). Review manually before installing.")
+        return 2
     worst = ""
+    unknown = False
     order = ["NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
     for name, info in files.items():
-        level = str((info or {}).get("RiskLevel") or "NONE").upper()
-        print(f"  {name}: risk {level}")
-        if order.index(level) > order.index(worst or "NONE"):
+        raw = info.get("RiskLevel") if isinstance(info, dict) else None
+        level = str(raw).upper() if raw else ""
+        print(f"  {name}: risk {level or 'MISSING'}")
+        if level not in order:
+            unknown = True
+        elif order.index(level) > order.index(worst or "NONE"):
             worst = level
     if not files:
         print("[WARN] NO VERDICT -- malcontent reported no analyzed files. "
@@ -307,6 +316,10 @@ def malcontent_verdict(report: dict) -> int:
         print(f"[BLOCK] malcontent rates the binary {worst} risk -- review its "
               "behavior report before installing.")
         return 1
+    if unknown:
+        print("[BLOCK] NO VERDICT -- malcontent gave a missing or unknown risk "
+              "level for at least one file. Review manually before installing.")
+        return 2
     print(f"[SAFE] malcontent risk level {worst or 'NONE'}. Capability analysis "
           "only -- Windows PE coverage is weaker than ELF; not a guarantee.")
     return 0
@@ -351,7 +364,11 @@ def run_malcontent(path: Path) -> int:
 
 def run_binary(url: str, deep: bool) -> int:
     with tempfile.TemporaryDirectory() as d:
-        dest = Path(d) / (url.rstrip("/").rsplit("/", 1)[-1] or "download.bin")
+        dest = Path(d) / safe_basename(url, "download.bin")
+        if dest.resolve().parent != Path(d).resolve():
+            print("[BLOCK] NO VERDICT -- the download name would leave the "
+                  "temp directory. Do NOT install.")
+            return 2
         print(f"  downloading (never executed): {url}")
         _download(url, dest)
         digest = _sha256(dest)
@@ -371,10 +388,14 @@ def run_binary(url: str, deep: bool) -> int:
 
 def run_script(url: str) -> int:
     with tempfile.TemporaryDirectory() as d:
-        name = url.rstrip("/").rsplit("/", 1)[-1] or "installer"
+        name = safe_basename(url, "installer")
         if "." not in name:
             name += ".sh"
         dest = Path(d) / name
+        if dest.resolve().parent != Path(d).resolve():
+            print("[BLOCK] NO VERDICT -- the download name would leave the "
+                  "temp directory. Do NOT install.")
+            return 2
         print(f"  downloading installer (never executed): {url}")
         _download(url, dest)
         print(f"  SHA256: {_sha256(dest)}")

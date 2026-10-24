@@ -2209,6 +2209,38 @@ class ScanCliRouterTests(unittest.TestCase):
         self.assertEqual(self.scan_cli.malcontent_verdict({"Files": {}}), 2)
         self.assertEqual(self.scan_cli.malcontent_verdict({}), 2)
 
+    def test_malcontent_verdict_unknown_risk_data_is_no_verdict(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(self.scan_cli.malcontent_verdict(
+                {"Files": {"a": {}}}), 2)
+            self.assertEqual(self.scan_cli.malcontent_verdict(
+                {"Files": {"a": {"RiskLevel": "WEIRD"}}}), 2)
+            self.assertEqual(self.scan_cli.malcontent_verdict(
+                {"Files": ["a"]}), 2)
+        self.assertIn("NO VERDICT", buf.getvalue())
+
+    def test_malcontent_verdict_keeps_block_next_to_unknown_level(self):
+        self.assertEqual(self.scan_cli.malcontent_verdict(
+            {"Files": {"a": {"RiskLevel": "CRITICAL"},
+                       "b": {"RiskLevel": "WEIRD"}}}), 1)
+
+    def test_safe_basename_returns_only_a_bare_file_name(self):
+        resolver = importlib.import_module("_url_resolver")
+        cases = {
+            "https://x/a/tool.exe": "tool.exe",
+            "https://x/a/tool.exe?v=..": "tool.exe",
+            "https://x/a/..%5C..%5Cevil.exe": "evil.exe",
+            "https://x/a/..\\..\\evil.exe": "evil.exe",
+            "https://x/a/C:\\evil.exe": "evil.exe",
+            "https://x/a/C:evil.exe": "download.bin",
+            "https://x/a/..": "download.bin",
+            "https://x/": "download.bin",
+        }
+        for url, name in cases.items():
+            with self.subTest(url=url):
+                self.assertEqual(resolver.safe_basename(url, "download.bin"), name)
+
     # -- binary flow -----------------------------------------------------------
 
     def test_run_binary_hashes_then_delegates_to_virustotal(self):
@@ -2232,6 +2264,27 @@ class ScanCliRouterTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(calls["url"], "https://example.com/releases/tool.exe")
         self.assertEqual(calls["vt"].name, "tool.exe")
+
+    def test_run_binary_keeps_download_inside_temp_dir(self):
+        from unittest.mock import patch
+
+        seen = {}
+
+        def fake_download(url, dest):
+            seen["dest"] = Path(dest)
+            Path(dest).write_bytes(b"x")
+            return Path(dest)
+
+        with patch.object(self.scan_cli, "_download", fake_download), \
+                patch.object(self.scan_cli, "run_virustotal",
+                             lambda path, max_files=10: 0), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = self.scan_cli.run_binary(
+                "https://example.com/a/..%5C..%5Cevil.exe", deep=False)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["dest"].name, "evil.exe")
+        self.assertEqual(seen["dest"].parent.parent.resolve(),
+                         Path(tempfile.gettempdir()).resolve())
 
     def test_run_binary_deep_combines_verdicts_fail_closed(self):
         original_download = self.scan_cli._download

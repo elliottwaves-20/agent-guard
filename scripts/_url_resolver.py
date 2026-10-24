@@ -195,6 +195,16 @@ def format_fetch_error(url: str, code: int, body: str) -> str:
     return f"could not fetch {url}: HTTP {code}"
 
 
+def safe_basename(url: str, fallback: str) -> str:
+    """Last path segment of a URL as a bare file name, never a path.
+    Returns `fallback` when the segment is empty, "." / "..", or has a drive colon."""
+    path = urllib.parse.unquote(urllib.parse.urlsplit(url).path)
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    if name in ("", ".", "..") or ":" in name:
+        return fallback
+    return name
+
+
 def safe_extract_tar(data: bytes, dest: Path) -> None:
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tf:
         try:
