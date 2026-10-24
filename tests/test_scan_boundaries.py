@@ -242,6 +242,8 @@ class ScanBoundaryTests(unittest.TestCase):
                              ('Unsafe items: 0', 0), ('Total tools scanned: 0\nUnsafe items: 0', 0)]:
             self.assertEqual(scan_mcp.verdict(output, code), 2)
         self.assertEqual(scan_mcp.verdict('Total tools scanned: 2\nUnsafe items: 0', 0), 0)
+        self.assertEqual(scan_mcp.verdict(
+            'Total tools scanned: 2\nUnsafe items: 0\nUnsafe items: 3', 0), 2)
 
     def test_cisco_incomplete_items_are_not_safe(self):
         # Since 4.8.5 a crashed analyzer yields is_safe=None, reported as

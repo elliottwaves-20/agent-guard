@@ -435,8 +435,9 @@ def run_cisco(cmd: list, label: str, env: dict = None) -> int:
               "install. The server may hang on start, or its dependencies are too "
               "slow to fetch. Raise SCAN_MCP_TIMEOUT or review manually.")
         return 2
-    out = (r.stdout or "") + (r.stderr or "")
-    print(out)
+    out = r.stdout or ""
+    # stderr is shown for the user but never parsed: it could carry a forged summary.
+    print(out + (r.stderr or ""))
     return verdict(out, r.returncode)
 
 
@@ -590,14 +591,16 @@ def _shquote(s: str) -> str:
 
 def _summary_int(output: str, key: str):
     """Pull an integer that follows `key:` in the scanner summary, or None."""
+    found = []
     for line in output.splitlines():
         low = line.lower().strip()
         if low.startswith(key):
             try:
-                return int(line.split(":", 1)[1])
+                found.append(int(line.split(":", 1)[1]))
             except (ValueError, IndexError):
                 return None
-    return None
+    # A repeated line is ambiguous: no value rather than the first one.
+    return found[0] if len(found) == 1 else None
 
 
 def verdict(output: str, code: int) -> int:
@@ -656,7 +659,9 @@ def verdict(output: str, code: int) -> int:
 
 
 def virustotal_verdict(report: dict) -> int:
-    summary = report.get("summary") or {}
+    summary = report.get("summary")
+    if not isinstance(summary, dict):
+        summary = {}
     findings = report.get("findings") or []
     print("\n" + "=" * 60)
     print("VirusTotal summary:")
@@ -684,6 +689,24 @@ def virustotal_verdict(report: dict) -> int:
         print("\n[BLOCK] VirusTotal flagged one or more files. Do not install.")
         return 1
 
+    # An absent or malformed summary is not a clean report (bool is not an int here).
+    total = summary.get("total_to_scan")
+    if not summary or type(total) is not int or total < 0:
+        print("\n[WARN] NO VERDICT -- the VirusTotal summary is missing or malformed. "
+              "Re-run the scan.")
+        return 2
+    if total > 0:
+        # Absent "malicious" has always meant none; the other counts must be present.
+        counts = [summary.get("scanned"), summary.get("clean"), summary.get("malicious", 0)]
+        scanned, clean, malicious = counts
+        if any(type(c) is not int or c < 0 for c in counts):
+            print("\n[WARN] NO VERDICT -- the VirusTotal summary is incomplete or has "
+                  "invalid counts. Re-run the scan.")
+            return 2
+        if malicious:
+            print("\n[BLOCK] VirusTotal counts malicious file(s). Do not install.")
+            return 1
+
     if summary.get("failed", 0) or summary.get("throttled", 0):
         print("\n[WARN] INCONCLUSIVE -- some VirusTotal lookups failed or were throttled.")
         return 2
@@ -698,9 +721,10 @@ def virustotal_verdict(report: dict) -> int:
         return 2
     # Cisco's directory scan counts a suspicious-only file as scanned but neither
     # clean nor malicious; any such gap is an unexplained result.
-    if summary.get("scanned", 0) > summary.get("clean", 0) + summary.get("malicious", 0):
-        print("\n[WARN] NO VERDICT -- not every checked file came back clean "
-              "(likely rated suspicious). Review manually.")
+    if total > 0 and (summary["scanned"] < 1
+                      or summary["clean"] + summary.get("malicious", 0) != summary["scanned"]):
+        print("\n[WARN] NO VERDICT -- the VirusTotal counts do not add up (not every "
+              "checked file came back clean). Review manually.")
         return 2
     if summary.get("skipped_by_limit", 0):
         print(f"\n[WARN] NO VERDICT -- {summary['skipped_by_limit']} file(s) were not "

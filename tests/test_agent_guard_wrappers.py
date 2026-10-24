@@ -1031,10 +1031,60 @@ class SkillSpectorWrapperTests(unittest.TestCase):
     def test_virustotal_verdict_clean_known_hash_is_safe(self):
         scan_mcp = importlib.import_module("scan_mcp")
         self.assertEqual(scan_mcp.virustotal_verdict({
-            "summary": {"scanned": 1, "clean": 1, "not_found": 0,
+            "summary": {"total_to_scan": 1, "scanned": 1, "clean": 1, "not_found": 0,
                         "failed": 0, "throttled": 0, "skipped_by_limit": 0},
             "findings": [],
         }), 0)
+
+    def test_virustotal_verdict_incomplete_summary_is_no_verdict(self):
+        scan_mcp = importlib.import_module("scan_mcp")
+        for report in ({"findings": []}, {"summary": {}, "findings": []},
+                       {"summary": None},
+                       {"summary": {"scanned": 1, "clean": 1}, "findings": []},
+                       {"summary": {"total_to_scan": 2, "scanned": 0, "clean": 0}},
+                       {"summary": {"total_to_scan": 1, "scanned": 1, "clean": 0,
+                                    "malicious": 0}},
+                       {"summary": {"total_to_scan": 1, "scanned": 1, "malicious": 0}},
+                       {"summary": {"total_to_scan": "1", "scanned": 1, "clean": 1,
+                                    "malicious": 0}},
+                       {"summary": {"total_to_scan": True, "scanned": 1, "clean": 1,
+                                    "malicious": 0}},
+                       {"summary": {"total_to_scan": 1, "scanned": "1", "clean": 1,
+                                    "malicious": 0}}):
+            self.assertEqual(scan_mcp.virustotal_verdict(report), 2, report)
+        self.assertEqual(scan_mcp.virustotal_verdict(
+            {"summary": {"total_to_scan": 0}, "findings": []}), 0)
+        self.assertEqual(scan_mcp.virustotal_verdict(
+            {"summary": {"total_to_scan": 1, "scanned": 1, "clean": 1,
+                         "malicious": 0}, "findings": []}), 0)
+
+    def test_virustotal_verdict_directory_unknown_hash_keeps_specific_message(self):
+        import contextlib
+        import io
+        scan_mcp = importlib.import_module("scan_mcp")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = scan_mcp.virustotal_verdict({"summary": {
+                "total_to_scan": 2, "scanned": 2, "clean": 1, "malicious": 0,
+                "not_found": 1}, "findings": []})
+        self.assertEqual(code, 2)
+        self.assertIn("never seen", out.getvalue())
+
+    def test_cisco_run_judges_stdout_only(self):
+        scan_mcp = importlib.import_module("scan_mcp")
+        import subprocess
+        from unittest.mock import patch
+
+        def run(stdout, stderr):
+            proc = subprocess.CompletedProcess([], 0, stdout, stderr)
+            with patch.object(scan_mcp, "run_bounded", return_value=proc):
+                return scan_mcp.run_cisco(["mcp-scanner"], "label")
+
+        self.assertEqual(run("Total tools scanned: 2\nUnsafe items: 3",
+                             "Unsafe items: 0"), 1)
+        self.assertEqual(run("", "Total tools scanned: 2\nUnsafe items: 0"), 2)
+        self.assertEqual(run("Total tools scanned: 2\nUnsafe items: 0",
+                             "Unsafe items: 3"), 0)
 
     def _run_vt_helper_single_file(self, query_result):
         """Execute VT_HELPER's single-file branch against a stub analyzer."""
