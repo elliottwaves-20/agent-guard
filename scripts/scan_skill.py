@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-from _skillspector import die, run_skillspector
+from _skillspector import combine_verdicts, die, run_skillspector
 
 GITHUB_LINK_RE = re.compile(r"https://github\.com/[^\s)\]>\"']+")
 
@@ -40,7 +40,9 @@ def find_skill_dirs(root: Path) -> list:
     Each is scanned on its own: SkillSpector aggregates a whole directory into a
     single report, so per-skill scans are what give per-skill verdicts."""
     out = set()
-    for p in root.rglob("SKILL.md"):
+    for p in root.rglob("*"):
+        if p.name.lower() != "skill.md" or not p.is_file():
+            continue
         if "node_modules" in p.parts:
             continue
         out.add(p.parent)
@@ -148,7 +150,7 @@ def main():
         worst = 0
         for d in skills:
             print(f"\n== {d} ==")
-            worst = max(worst, run_skillspector(d))
+            worst = combine_verdicts(worst, run_skillspector(d))
         print("\n" + "=" * 60)
         print(f"Scanned {len(skills)} skill(s). Worst verdict -> exit {worst} "
               f"({'BLOCK' if worst else 'all SAFE'}).")

@@ -29,7 +29,41 @@ from scan_skill import run_skillspector as run_skill_static
 
 
 def has_skill_manifest(path: Path) -> bool:
-    return path.is_dir() and ((path / "SKILL.md").is_file() or (path / "skill.md").is_file())
+    return path.is_dir() and any(
+        p.is_file() and p.name.lower() == "skill.md" for p in path.iterdir()
+    )
+
+
+DOC_SUFFIXES = {".md", ".markdown", ".txt", ".rst", ".png", ".jpg", ".jpeg", ".gif",
+                ".svg", ".webp"}
+DOC_NAME_PREFIXES = ("license", "copying", "notice")
+DOC_NAMES = {".gitignore", ".gitattributes"}
+DOC_DIRS = {".git", ".github"}
+
+
+def is_documentation_file(rel: Path) -> bool:
+    name = rel.name.lower()
+    if rel.parts and rel.parts[0].lower() in DOC_DIRS:
+        return True
+    return (rel.suffix.lower() in DOC_SUFFIXES or name in DOC_NAMES
+            or name.startswith(DOC_NAME_PREFIXES))
+
+
+def files_outside_skills(root: Path, skills: list) -> list[Path]:
+    """Non-documentation files that no skill scan covers (relative to root)."""
+    skill_dirs = [Path(s).resolve() for s in skills]
+    out = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() and not p.is_symlink():
+            continue
+        resolved = p.resolve()
+        if any(sd == resolved.parent or sd in resolved.parents for sd in skill_dirs):
+            continue
+        rel = p.relative_to(root)
+        if is_documentation_file(rel):
+            continue
+        out.append(rel)
+    return out
 
 
 def classify_source(source: ResolvedSource) -> str:
@@ -52,7 +86,7 @@ def classify_source(source: ResolvedSource) -> str:
     # static-source signal, but runtime verification still needs explicit command.
     if (path / "pyproject.toml").is_file() or (path / "package.json").is_file():
         return "mcp-source"
-    return "catalog"
+    return "unknown"
 
 
 def print_skill_install_hint(path: Path, dry_run: bool) -> None:
@@ -320,14 +354,18 @@ def scan_marketplace_candidates(source: ResolvedSource, sandbox: bool,
             if not sandbox:
                 print("[BLOCK] NO VERDICT -- discovered remote endpoint was not contacted. "
                       "Use --sandbox for explicit runtime inspection or scan the chosen remote URL directly.")
-                worst = max(worst, 2)
+                worst = combine_verdicts(worst, 2)
                 continue
             rc = run_remote(item)
             if rc == 0:
                 offer_remote_mcp_install(mcp_name_from_url(item), item, dry_run=dry_run)
         else:
             rc = scan_install_command(item, sandbox=sandbox, dry_run=dry_run)
-        worst = max(worst, rc)
+        worst = combine_verdicts(worst, rc)
+
+    left_out = len(candidates) - scanned
+    if left_out:
+        worst = combine_verdicts(worst, 2)
 
     print("\n" + "=" * 60)
     if worst == 0:
@@ -472,9 +510,20 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
     if kind == "skill-collection":
         worst = 0
         skills = find_skill_dirs(path)
+        if not skills:
+            print("[BLOCK] NO VERDICT -- no skill found in the skill collection.")
+            return 2
         for d in skills:
             print(f"\n== {d} ==")
-            worst = max(worst, run_skill_static(d))
+            worst = combine_verdicts(worst, run_skill_static(d))
+        unscanned = files_outside_skills(path, skills)
+        if unscanned:
+            print("\n[BLOCK] NO VERDICT -- files outside the skill folders were not scanned:")
+            for rel in unscanned[:20]:
+                print(f"  {rel}")
+            if len(unscanned) > 20:
+                print(f"  ... and {len(unscanned) - 20} more")
+            worst = combine_verdicts(worst, 2)
         print("\n" + "=" * 60)
         print(f"Scanned {len(skills)} skill(s). Worst verdict -> exit {worst} "
               f"({'BLOCK' if worst else 'all SAFE'}).")
@@ -496,6 +545,11 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
         if rc == 0:
             offer_git_mcp_install(source, dry_run)
         return rc
+
+    if kind == "unknown":
+        print("[BLOCK] NO VERDICT -- unsupported repo layout: no skill, no package "
+              "manifest. Nothing but the README could be checked.")
+        return 2
 
     if kind in {"catalog", "markdown", "file"}:
         rc = scan_catalog(path)

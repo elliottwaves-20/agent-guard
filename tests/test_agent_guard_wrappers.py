@@ -1857,6 +1857,150 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             self.assertEqual(stable, target.resolve())
             self.assertTrue((target / "SKILL.md").is_file())
 
+    def _quiet_scan_resolved(self, scan_url, source, kind="auto", **kwargs):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = scan_url.scan_resolved(source, kind, **kwargs)
+        return rc, out.getvalue()
+
+    def test_scan_url_empty_skill_collection_has_no_verdict(self):
+        scan_url = importlib.import_module("scan_url")
+        for dry_run in (False, True):
+            with tempfile.TemporaryDirectory() as src_dir:
+                source = scan_url.ResolvedSource(kind="github", source_path=Path(src_dir))
+                rc, _ = self._quiet_scan_resolved(scan_url, source, "skill-collection",
+                                                  dry_run=dry_run)
+                self.assertEqual(rc, 2)
+
+    def test_scan_url_unknown_layout_is_no_verdict_and_skips_catalog_scan(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / ".claude-plugin").mkdir()
+            (src / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
+            (src / "hooks").mkdir()
+            (src / "hooks" / "run.sh").write_text("echo hi\n", encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            self.assertEqual(scan_url.classify_source(source), "unknown")
+            with patch.object(scan_url, "scan_catalog", return_value=0) as catalog:
+                rc, out = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+            self.assertEqual(rc, 2)
+            catalog.assert_not_called()
+            self.assertIn("unsupported repo layout", out)
+
+    def test_scan_url_collection_with_script_outside_skills_is_no_verdict(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n", encoding="utf-8")
+            (src / "install.ps1").write_text("Write-Host hi\n", encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            with patch.object(scan_url, "run_skill_static", return_value=0):
+                rc, out = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+            self.assertEqual(rc, 2)
+            self.assertIn("install.ps1", out)
+
+    def test_scan_url_collection_with_node_modules_outside_skills_is_no_verdict(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n", encoding="utf-8")
+            (src / "node_modules" / "x").mkdir(parents=True)
+            (src / "node_modules" / "x" / "index.js").write_text("1\n", encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            with patch.object(scan_url, "run_skill_static", return_value=0):
+                rc, out = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+            self.assertEqual(rc, 2)
+            self.assertIn("node_modules", out)
+
+    def test_scan_url_collection_with_only_docs_outside_skills_is_safe(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n", encoding="utf-8")
+            (src / "README.md").write_text("# hi\n", encoding="utf-8")
+            (src / "LICENSE").write_text("MIT\n", encoding="utf-8")
+            (src / ".github" / "workflows").mkdir(parents=True)
+            (src / ".github" / "workflows" / "ci.yml").write_text("on: push\n", encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            with patch.object(scan_url, "run_skill_static", return_value=0):
+                rc, _ = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+            self.assertEqual(rc, 0)
+
+    def test_scan_url_collection_block_beats_unscanned_files(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n", encoding="utf-8")
+            (src / "install.ps1").write_text("Write-Host hi\n", encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            with patch.object(scan_url, "run_skill_static", return_value=1):
+                rc, _ = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+            self.assertEqual(rc, 1)
+
+    def test_find_skill_dirs_accepts_lowercase_manifest(self):
+        scan_skill = importlib.import_module("scan_skill")
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "skill.md").write_text("x\n", encoding="utf-8")
+            (src / "skills" / "b").mkdir()
+            (src / "skills" / "b" / "Skill.MD").write_text("x\n", encoding="utf-8")
+            self.assertEqual(scan_skill.find_skill_dirs(src),
+                             [src / "skills" / "a", src / "skills" / "b"])
+            self.assertTrue(scan_url.has_skill_manifest(src / "skills" / "b"))
+
+    def test_scan_url_marketplace_left_out_candidates_are_no_verdict(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        source = scan_url.ResolvedSource(
+            kind="catalog",
+            source_urls=["https://github.com/a/one", "https://github.com/a/two",
+                         "https://github.com/a/three"],
+        )
+        with patch.object(scan_url, "scan_candidate_source_url", return_value=0), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = scan_url.scan_marketplace_candidates(
+                source, sandbox=False, max_candidates=1, dry_run=True)
+        self.assertEqual(rc, 2)
+
+    def test_scan_url_marketplace_block_is_not_lost_behind_no_verdict(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        source = scan_url.ResolvedSource(
+            kind="catalog",
+            source_urls=["https://github.com/a/one", "https://github.com/a/two"],
+        )
+        with patch.object(scan_url, "scan_candidate_source_url", side_effect=[1, 2]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = scan_url.scan_marketplace_candidates(
+                source, sandbox=False, max_candidates=5, dry_run=True)
+        self.assertEqual(rc, 1)
+
+    def test_scan_skill_all_block_is_not_lost_behind_no_verdict(self):
+        from unittest.mock import patch
+        scan_skill = importlib.import_module("scan_skill")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            for name in ("a", "b"):
+                (src / name).mkdir()
+                (src / name / "SKILL.md").write_text("x\n", encoding="utf-8")
+            with patch.object(scan_skill, "run_skillspector", side_effect=[1, 2]), \
+                    patch.object(sys, "argv", ["scan_skill.py", str(src), "--all"]), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as cm:
+                    scan_skill.main()
+        self.assertEqual(cm.exception.code, 1)
+
     def test_audit_installed_infers_uvx_git_mcp_scan_commands(self):
         audit = importlib.import_module("audit_installed")
         entry = {
