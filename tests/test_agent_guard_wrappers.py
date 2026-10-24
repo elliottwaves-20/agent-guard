@@ -926,6 +926,81 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("--no-llm", calls[0])
 
+    def _run_scan_with(self, fake_run, **kwargs):
+        """run_skillspector over a minimal skill with an LLM-ready provider and
+        `fake_run` in place of run_bounded. Returns (exit code, call count)."""
+        module = importlib.import_module("_skillspector")
+        calls = []
+
+        def counting(cmd, **kw):
+            calls.append(cmd)
+            return fake_run(cmd, **kw)
+
+        with patch.object(module, "PROVIDER", "claude_cli"), \
+             patch.object(module, "LLM_READY", True), \
+             patch.object(module, "LLM_EXPLICIT", False), \
+             patch.object(module, "LLM_REASON", "claude CLI (local login)"), \
+             patch.object(module, "SKILLSPECTOR", "skillspector"), \
+             patch.object(module, "SKILLSPECTOR_CMD", ["skillspector"]), \
+             patch.object(module, "LLM_RETRIES", 0), \
+             patch.object(module, "run_bounded", counting), \
+             tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "SKILL.md").write_text("---\nname: failing\n---\n", encoding="utf-8")
+            return module.run_skillspector(src, **kwargs), len(calls)
+
+    def test_skillspector_timeout_is_no_verdict(self):
+        import subprocess
+
+        def fake_run(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, 1)
+
+        self.assertEqual(self._run_scan_with(fake_run), (2, 1))
+
+    def test_skillspector_run_aborted_before_the_report_is_no_verdict(self):
+        class Result:
+            stdout = ""
+            stderr = ""
+
+            def __init__(self, returncode):
+                self.returncode = returncode
+
+        # The scanner dies without writing a report, whatever exit code it gives.
+        for code in (0, 1, 2, -9):
+            with self.subTest(returncode=code):
+                code_result, _ = self._run_scan_with(lambda cmd, **kw: Result(code))
+                self.assertEqual(code_result, 2)
+
+    def test_skillspector_interrupt_is_not_swallowed_into_a_verdict(self):
+        def fake_run(cmd, **kwargs):
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            self._run_scan_with(fake_run)
+
+    def test_skillspector_unsavable_report_is_no_verdict(self):
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def fake_run(cmd, **kwargs):
+            self._write_report(Path(cmd[cmd.index("--output") + 1]))
+            return Result()
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            # A clean report would be SAFE; an existing target is never overwritten.
+            existing = Path(out_dir) / "report.json"
+            existing.write_text("keep", encoding="utf-8")
+            self.assertEqual(self._run_scan_with(fake_run, report_output=existing), (2, 1))
+            self.assertEqual(existing.read_text(encoding="utf-8"), "keep")
+            # And a destination that cannot be created at all.
+            self.assertEqual(self._run_scan_with(
+                fake_run, report_output=Path(out_dir) / "missing-dir" / "report.json"), (2, 1))
+            # Control: the same scan with a writable destination is SAFE.
+            self.assertEqual(self._run_scan_with(
+                fake_run, report_output=Path(out_dir) / "new.json"), (0, 1))
+
     def _clean_verdict(self, env, on_path=(), **kwargs):
         """Exit code of verdict_skillspector for a clean report, with the
         provider resolution run under a controlled environment."""

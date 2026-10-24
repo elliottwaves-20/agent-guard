@@ -238,6 +238,129 @@ class ScanBoundaryTests(unittest.TestCase):
                  [], 3, '{"issues": 0, "results": {}}', '')):
             self.assertEqual(scan_cli.run_guarddog('pypi', 'demo'), 2)
 
+    def test_guarddog_timeout_and_unreadable_output_are_no_verdict(self):
+        clean = '{"issues": 0, "errors": {}, "results": {}}'
+        cases = {
+            'timeout': subprocess.TimeoutExpired([], 5),
+            'not json': subprocess.CompletedProcess([], 0, 'no report here', ''),
+            'truncated json': subprocess.CompletedProcess([], 0, '{"issues": 0, "res', ''),
+            'empty': subprocess.CompletedProcess([], 0, '', ''),
+            'crash after clean report': subprocess.CompletedProcess([], 1, clean, ''),
+        }
+        for label, outcome in cases.items():
+            with self.subTest(label), \
+                 patch.object(scan_cli, 'guarddog_command', return_value=['guarddog']), \
+                 patch.object(scan_cli, 'run_bounded', side_effect=[outcome]):
+                self.assertEqual(scan_cli.run_guarddog('pypi', 'demo==1'), 2)
+        # Control: the same clean report from a clean exit is SAFE.
+        with patch.object(scan_cli, 'guarddog_command', return_value=['guarddog']), \
+             patch.object(scan_cli, 'run_bounded',
+                          return_value=subprocess.CompletedProcess([], 0, clean, '')):
+            self.assertEqual(scan_cli.run_guarddog('pypi', 'demo==1'), 0)
+
+    def test_guarddog_issue_count_that_is_not_a_number_is_no_verdict(self):
+        for issues in ('0', 'none', None, [], 0.0):
+            with self.subTest(issues=issues):
+                self.assertEqual(scan_cli.guarddog_verdict({'issues': issues}), 2)
+
+    def test_malcontent_timeout_and_unreadable_output_are_no_verdict(self):
+        clean = '{"Files": {"file": {"RiskLevel": "LOW"}}}'
+        cases = {
+            'timeout': subprocess.TimeoutExpired([], 5),
+            'not json': subprocess.CompletedProcess([], 0, 'oops', ''),
+            'truncated json': subprocess.CompletedProcess([], 0, '{"Files": {"fi', ''),
+            'empty': subprocess.CompletedProcess([], 0, '', ''),
+        }
+        for label, outcome in cases.items():
+            with self.subTest(label), \
+                 patch.object(scan_cli.shutil, 'which', return_value='docker'), \
+                 patch.object(scan_cli, 'run_bounded', side_effect=[outcome]):
+                self.assertEqual(scan_cli.run_malcontent(Path('file')), 2)
+        with patch.object(scan_cli.shutil, 'which', return_value='docker'), \
+             patch.object(scan_cli, 'run_bounded',
+                          return_value=subprocess.CompletedProcess([], 0, clean, '')):
+            self.assertEqual(scan_cli.run_malcontent(Path('file')), 0)
+
+    def test_cisco_timeout_is_no_verdict(self):
+        with patch.object(scan_mcp, 'run_bounded',
+                          side_effect=subprocess.TimeoutExpired([], 5)):
+            self.assertEqual(scan_mcp.run_cisco(['mcp-scanner'], 'label'), 2)
+
+    def test_virustotal_helper_failures_are_no_verdict(self):
+        clean = json.dumps({'summary': {'total_to_scan': 1, 'scanned': 1, 'clean': 1},
+                            'findings': []})
+        cases = {
+            'no output': subprocess.CompletedProcess([], 0, '', ''),
+            'broken json': subprocess.CompletedProcess([], 0, '{"summary": {', ''),
+            'plain text': subprocess.CompletedProcess([], 0, 'Traceback', 'boom'),
+            'error in report': subprocess.CompletedProcess(
+                [], 0, json.dumps({'error': 'rate limited'}), ''),
+            'error beside a clean summary': subprocess.CompletedProcess(
+                [], 0, json.dumps({'error': 'x', 'summary': {'total_to_scan': 0}}), ''),
+            'crash after clean report': subprocess.CompletedProcess([], 1, clean, 'crash'),
+        }
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.dict(scan_mcp.os.environ, {'VIRUSTOTAL_API_KEY': 'test-key'}), \
+             patch.object(scan_mcp, 'mcpscanner_python', return_value='python'):
+            for label, outcome in cases.items():
+                with self.subTest(label), \
+                     patch.object(scan_mcp, 'run_bounded', side_effect=[outcome]):
+                    self.assertEqual(scan_mcp.run_virustotal(Path(tmp)), 2)
+            # A helper that hangs is not caught inside run_virustotal; it must end
+            # the run (non-zero exit), never come back as a verdict of 0.
+            with patch.object(scan_mcp, 'run_bounded',
+                              side_effect=subprocess.TimeoutExpired([], 5)), \
+                 self.assertRaises(subprocess.TimeoutExpired):
+                scan_mcp.run_virustotal(Path(tmp))
+            # Control: the clean report from a clean exit is SAFE.
+            with patch.object(scan_mcp, 'run_bounded', return_value=subprocess.CompletedProcess(
+                    [], 0, clean, '')):
+                self.assertEqual(scan_mcp.run_virustotal(Path(tmp)), 0)
+
+    def test_sandbox_result_survives_a_failing_container_cleanup(self):
+        for failure in (OSError('docker gone'), subprocess.TimeoutExpired('docker', 30)):
+            for scan_result in (0, 1, 2):
+                with self.subTest(failure=type(failure).__name__, scan=scan_result), \
+                     patch.object(scan_mcp, 'need_mcp_scanner'), \
+                     patch.object(scan_mcp, 'build_sandbox_image'), \
+                     patch.object(scan_mcp.shutil, 'which', return_value='docker'), \
+                     patch.object(scan_mcp, 'MCP_SCANNER', 'mcp-scanner'), \
+                     patch.object(scan_mcp, 'CISCO_LLM_KEY', 'runtime-test-secret'), \
+                     patch.object(scan_mcp, 'CISCO_LLM_MODEL', 'test-model'), \
+                     patch.object(scan_mcp, 'run_cisco', return_value=scan_result), \
+                     patch.object(scan_mcp._egress.Capture, 'start') as capture, \
+                     patch.object(scan_mcp._egress, 'verdict', return_value=0), \
+                     patch.object(scan_mcp.subprocess, 'run', side_effect=failure):
+                    capture.return_value.name = 'agent-guard-net-test'
+                    self.assertEqual(scan_mcp.run_sandbox(['python', '-c', 'print(1)']),
+                                     scan_result)
+
+    def test_sandbox_scan_error_is_not_masked_by_a_failing_cleanup(self):
+        with patch.object(scan_mcp, 'need_mcp_scanner'),              patch.object(scan_mcp, 'build_sandbox_image'),              patch.object(scan_mcp.shutil, 'which', return_value='docker'),              patch.object(scan_mcp, 'MCP_SCANNER', 'mcp-scanner'),              patch.object(scan_mcp, 'CISCO_LLM_KEY', 'runtime-test-secret'),              patch.object(scan_mcp, 'CISCO_LLM_MODEL', 'test-model'),              patch.object(scan_mcp, 'run_cisco', side_effect=RuntimeError('failed handshake')),              patch.object(scan_mcp._egress.Capture, 'start') as capture,              patch.object(scan_mcp.subprocess, 'run', side_effect=OSError('docker gone')):
+            capture.return_value.name = 'agent-guard-net-test'
+            with self.assertRaises(RuntimeError):
+                scan_mcp.run_sandbox(['python', '-c', 'print(1)'])
+            capture.return_value.remove.assert_called_once()
+
+    @patch.object(installer, "detect_tools", return_value={})
+    def test_installer_refuses_files_added_to_the_staged_tree_during_the_scan(self, _detect):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            source.mkdir()
+            (source / "SKILL.md").write_text("reviewed")
+            workspace = root / "workspace"
+
+            def scan(candidate, **kwargs):
+                (candidate / "added.py").write_text("print('added after the scan started')")
+                return 0
+
+            with patch.object(installer, "run_skillspector", side_effect=scan):
+                with self.assertRaises(SystemExit):
+                    installer.install_skill(source, "demo", workspace, False)
+            self.assertFalse((workspace / "demo").exists())
+            self.assertEqual(list(workspace.glob(".guard-stage-*")), [])
+
     def test_cisco_requires_success_and_analyzed_tools(self):
         for output, code in [('Total tools scanned: 2\nUnsafe items: 0', 1),
                              ('Unsafe items: 0', 0), ('Total tools scanned: 0\nUnsafe items: 0', 0)]:

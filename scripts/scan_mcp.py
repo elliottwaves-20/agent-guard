@@ -555,8 +555,14 @@ def run_sandbox(command: list, *, allow_hosts=(), network: bool = True) -> int:
     finally:
         # A timed-out analyzer may leave its child alive. Remove only this
         # invocation's uniquely named container, including on failed handshakes.
-        subprocess.run(["docker", "rm", "--force", container],
-                       capture_output=True, text=True, timeout=30)
+        # A failed cleanup must not replace the scan result or leave the capture
+        # container behind; say so instead.
+        try:
+            subprocess.run(["docker", "rm", "--force", container],
+                           capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"[WARN] could not remove sandbox container {container}: {exc}. "
+                  "Remove it manually (docker rm --force).", file=sys.stderr)
         if capture is not None and not finished:
             capture.remove()
     if capture is not None:
