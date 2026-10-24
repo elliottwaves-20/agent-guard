@@ -24,6 +24,10 @@
   (`scan_url.py`, `scan_mcp.py`, `scan_cli.py`).
 - `audit_installed.py` without `--execute` gives exit 2 (NOT EXECUTED);
   unreadable configs and entries whose source cannot be inferred give exit 2.
+- `AGENT_GUARD_DNS_RESOLVERS` (comma-separated IP addresses) names resolvers
+  that count as the sandbox's own resolver on port 53 even when they are
+  public addresses (Linux Docker bridges copy the host's DNS servers);
+  otherwise only private resolver addresses are exempt.
 - Hash-lookup results: an unseen hash, a suspicious-only file, a file skipped
   by the file limit, API errors and a missing, malformed or inconsistent
   summary give exit 2 instead of SAFE. Single-file checks in

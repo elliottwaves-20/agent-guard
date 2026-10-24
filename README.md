@@ -482,7 +482,10 @@ blocks the verdict and is listed. A capture that does not start, drops
 packets or is cut short gives no verdict. Allow more destinations for one run
 with `--allow-host HOST[:PORT]` (default port 443, repeatable) or permanently
 with `AGENT_GUARD_SANDBOX_ALLOW=host1,host2`; `--no-network` runs the target
-with no network at all (only for commands that need no downloads). Inside the
+with no network at all (only for commands that need no downloads). DNS traffic
+counts as the sandbox's own resolver only on a private address; if the resolver
+is a public address (on Linux the Docker bridge copies the host's DNS servers),
+list it in `AGENT_GUARD_DNS_RESOLVERS=ip1,ip2`. Inside the
 sandbox uv may not download Python builds and npm skips its update check, so
 neither reaches for hosts outside the list.
 

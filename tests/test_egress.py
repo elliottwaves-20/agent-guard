@@ -96,6 +96,25 @@ class AnalysisTests(unittest.TestCase):
         report = analyse(["17:35:18.258128 IP 172.17.0.2.50928 > 1.1.1.1.53: 41011+ A? pypi.org. (45)"])
         self.assertEqual(report.findings, ["DNS traffic to a public address: 1.1.1.1"])
 
+    def test_configured_resolver_address_counts_as_the_resolver(self):
+        packets = ["17:35:18.258128 IP 172.17.0.2.50928 > 1.1.1.1.53: 41011+ A? pypi.org. (45)"]
+        with patch.dict(os.environ, {"AGENT_GUARD_DNS_RESOLVERS": "1.1.1.1, ::1"}):
+            self.assertEqual(analyse(packets).findings, [])
+        with patch.dict(os.environ, {"AGENT_GUARD_DNS_RESOLVERS": "9.9.9.9"}):
+            self.assertEqual(analyse(packets).findings,
+                             ["DNS traffic to a public address: 1.1.1.1"])
+        env = {k: v for k, v in os.environ.items() if k != "AGENT_GUARD_DNS_RESOLVERS"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(analyse(packets).findings,
+                             ["DNS traffic to a public address: 1.1.1.1"])
+
+    def test_invalid_resolver_entries_are_ignored_with_a_warning(self):
+        err = io.StringIO()
+        with patch.dict(os.environ, {"AGENT_GUARD_DNS_RESOLVERS": "nonsense,1.1.1.1"}), \
+                unittest.mock.patch.object(sys, "stderr", err):
+            self.assertEqual(eg.dns_resolvers(), {"1.1.1.1"})
+        self.assertIn("nonsense", err.getvalue())
+
     def test_tcp_syn_to_port_53_on_a_public_address_is_a_finding(self):
         report = analyse(["17:35:18.358137 IP 172.17.0.2.44712 > 8.8.8.8.53: Flags [S], seq 1, "
                           "win 64240, length 0"])

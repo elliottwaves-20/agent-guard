@@ -147,6 +147,7 @@ def analyse(result: dict, ecosystem: str, allow_hosts=(), expect_name: str | Non
         if text not in report.findings:
             report.findings.append(text)
 
+    resolvers = _egress.dns_resolvers()
     order = [p for p in PHASE_ORDER if p in analysis] + \
             [p for p in analysis if p not in PHASE_ORDER]
     report.phases = order
@@ -167,8 +168,8 @@ def analyse(result: dict, ecosystem: str, allow_hosts=(), expect_name: str | Non
                 finding(f"{name}: DNS lookup of {host}")
         for sock in phase.get("Sockets") or []:
             port, address = sock.get("Port") or 0, sock.get("Address", "")
-            # 0: resolved only, never connected; 53 on a private address: the resolver
-            if port == 0 or (port == 53 and _egress.private_address(address)):
+            # 0: resolved only, never connected; 53 on a private or configured address: the resolver
+            if port == 0 or (port == 53 and _egress.resolver_address(address, resolvers)):
                 continue
             names = [h.rstrip(".").lower() for h in sock.get("Hostnames") or []]
             if (address, port) in allow or any((h, port) in allow for h in names):

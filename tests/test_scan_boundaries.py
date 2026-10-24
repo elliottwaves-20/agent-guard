@@ -377,6 +377,13 @@ class ScanBoundaryTests(unittest.TestCase):
         both = 'Total tools scanned: 2\nSafe items: 0\nUnsafe items: 1\nIncomplete items: 1'
         self.assertEqual(scan_mcp.verdict(both, 0), 1)
 
+    def test_cisco_malformed_or_repeated_incomplete_line_is_no_verdict(self):
+        head = 'Total tools scanned: 2\nUnsafe items: 0\n'
+        self.assertEqual(scan_mcp.verdict(head + 'Incomplete items: x', 0), 2)
+        self.assertEqual(scan_mcp.verdict(head + 'Incomplete items: 0\nIncomplete items: 0', 0), 2)
+        self.assertEqual(scan_mcp.verdict(head + 'Incomplete items: 0', 0), 0)
+        self.assertEqual(scan_mcp.verdict(head.rstrip('\n'), 0), 0)
+
     def test_unresolved_git_ref_never_falls_back_to_mutable_branch(self):
         for result in [{}, {'sha': 'main'}]:
             with patch.object(resolver, 'http_json', return_value=result):

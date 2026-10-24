@@ -45,8 +45,10 @@ def is_documentation_file(rel: Path) -> bool:
     name = rel.name.lower()
     if rel.parts and rel.parts[0].lower() in DOC_DIRS:
         return True
-    return (rel.suffix.lower() in DOC_SUFFIXES or name in DOC_NAMES
-            or name.startswith(DOC_NAME_PREFIXES))
+    if name.startswith(DOC_NAME_PREFIXES):
+        # license.sh is code, not a license text
+        return rel.suffix.lower() in {"", ".md", ".markdown", ".txt", ".rst"}
+    return rel.suffix.lower() in DOC_SUFFIXES or name in DOC_NAMES
 
 
 def files_outside_skills(root: Path, skills: list) -> list[Path]:
@@ -468,6 +470,13 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
                   keep_source: Path | None = None, sandbox: bool = False,
                   scan_candidates: bool = True, max_candidates: int = 10,
                   dynamic: bool = True) -> int:
+    if kind in {"catalog", "markdown"}:
+        # An explicit kind must not shrink a repo or directory to a README check.
+        detected = classify_source(source)
+        if detected not in {"catalog", "markdown", "file"}:
+            print(f"[BLOCK] NO VERDICT -- --kind {kind} would check only the README "
+                  f"of a {detected} source.")
+            return 2
     if kind == "auto":
         kind = classify_source(source)
     stable_path = persist_source(source, keep_source)

@@ -166,5 +166,39 @@ class RemoteHeadTests(unittest.TestCase):
                 staging.remote_head("o/r", run=lambda argv, r=result, **kw: r)
 
 
+class FetchFailureTests(unittest.TestCase):
+    """A bad answer or a timeout is a FetchError, so settled_ref ends in StageError."""
+
+    def _urlopen(self, body=None, error=None):
+        import io
+        from unittest.mock import MagicMock
+        if error is not None:
+            return MagicMock(side_effect=error)
+        resp = MagicMock()
+        resp.__enter__.return_value = resp
+        resp.headers.get.return_value = ""
+        resp.read.return_value = body
+        resp.fp = io.BytesIO(body)
+        return MagicMock(return_value=resp)
+
+    def test_invalid_json_and_timeouts_become_fetch_errors(self):
+        import socket
+        from unittest.mock import patch
+        cases = [{"body": b"<html>not json"}, {"error": TimeoutError("slow")},
+                 {"error": socket.timeout("slow")}]
+        for case in cases:
+            for fetcher in (staging._fetch_activity_page, staging._fetch_repo):
+                with self.subTest(case=case, fetcher=fetcher.__name__):
+                    with patch("urllib.request.urlopen", self._urlopen(**case)):
+                        with self.assertRaises(url_resolver.FetchError):
+                            fetcher("https://api.github.com/repos/o/r")
+
+    def test_settled_ref_reports_a_bad_answer_as_stage_error(self):
+        from unittest.mock import patch
+        with patch("urllib.request.urlopen", self._urlopen(body=b"{broken")):
+            with self.assertRaises(staging.StageError):
+                staging.settled_ref("o/r", "main", HEAD, now=NOW)
+
+
 if __name__ == "__main__":
     unittest.main()

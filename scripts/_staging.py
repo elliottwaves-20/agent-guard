@@ -142,6 +142,8 @@ def _fetch_activity_page(url: str) -> tuple:
         raise _url_resolver.FetchError(_url_resolver.format_fetch_error(url, exc.code, body)) from exc
     except urllib.error.URLError as exc:
         raise _url_resolver.FetchError(f"could not fetch {url}: {exc.reason}") from exc
+    except (ValueError, TimeoutError) as exc:   # invalid JSON, or a timeout while reading
+        raise _url_resolver.FetchError(f"could not fetch {url}: {exc}") from exc
 
 
 def _fetch_repo(url: str) -> dict:
@@ -157,6 +159,8 @@ def _fetch_repo(url: str) -> dict:
         raise _url_resolver.FetchError(_url_resolver.format_fetch_error(url, exc.code, body)) from exc
     except urllib.error.URLError as exc:
         raise _url_resolver.FetchError(f"could not fetch {url}: {exc.reason}") from exc
+    except (ValueError, TimeoutError) as exc:   # invalid JSON, or a timeout while reading
+        raise _url_resolver.FetchError(f"could not fetch {url}: {exc}") from exc
 
 
 def settled_ref(source: str, branch: str, head: str, *, now=None,

@@ -1134,6 +1134,15 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             {"summary": {"total_to_scan": 1, "scanned": 1, "clean": 1,
                          "malicious": 0}, "findings": []}), 0)
 
+    def test_virustotal_verdict_safe_needs_every_file_clean(self):
+        scan_mcp = importlib.import_module("scan_mcp")
+        self.assertEqual(scan_mcp.virustotal_verdict({"summary": {
+            "total_to_scan": 3, "scanned": 2, "clean": 2, "malicious": 0},
+            "findings": []}), 2)
+        self.assertEqual(scan_mcp.virustotal_verdict({"summary": {
+            "total_to_scan": 3, "scanned": 3, "clean": 3, "malicious": 0},
+            "findings": []}), 0)
+
     def test_virustotal_verdict_directory_unknown_hash_keeps_specific_message(self):
         import contextlib
         import io
@@ -1164,6 +1173,10 @@ class SkillSpectorWrapperTests(unittest.TestCase):
 
     def _run_vt_helper_single_file(self, query_result):
         """Execute VT_HELPER's single-file branch against a stub analyzer."""
+        return self._run_vt_helper(query_result)
+
+    def _run_vt_helper(self, query_result, directory=False, dir_summary=None):
+        """Execute VT_HELPER against a stub analyzer; return the verdict."""
         import contextlib
         import io
         import tempfile
@@ -1180,6 +1193,16 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             def _create_finding(self, file_path, file_hash, vt_result):
                 return types.SimpleNamespace(severity="HIGH", summary="malicious",
                                              details={"permalink": "x"})
+
+            def analyze_directory(self, path):
+                if dir_summary is not None:
+                    self.last_scan_summary = dir_summary
+                else:  # one file, looked up through the (wrapped) query method
+                    found = self._query_virustotal_cached("h")[1]
+                    self.last_scan_summary = {
+                        "total_to_scan": 1, "scanned": int(found), "clean": int(found),
+                        "malicious": 0, "not_found": int(not found)}
+                return []
 
             def analyze_file(self, path):  # the old, ambiguous entry point
                 return None
@@ -1199,6 +1222,8 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             target = Path(d) / "tool.exe"
             target.write_bytes(b"MZ payload")
+            if directory:
+                target = Path(d)
             out = io.StringIO()
             try:
                 sys.modules.update(stubs)
@@ -1217,6 +1242,23 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 os.environ.update(old_env)
         report = json.loads(out.getvalue().strip().splitlines()[-1])
         return scan_mcp.virustotal_verdict(report)
+
+    def test_vt_helper_empty_directory_summary_means_nothing_to_scan(self):
+        # Nothing scannable: the helper reports total_to_scan 0 (note, not an error).
+        self.assertEqual(self._run_vt_helper((None, False, None), directory=True,
+                                             dir_summary={}), 0)
+
+    def test_vt_helper_unanalysed_hash_is_not_found_in_both_branches(self):
+        # A known hash with no engine results yet (total_engines 0) is not clean.
+        empty = {"malicious": 0, "suspicious": 0, "total_engines": 0, "scan_date": 1}
+        for result in (empty, {"malicious": 0, "suspicious": 0},
+                       dict(empty, total_engines="70")):
+            with self.subTest(result=result):
+                self.assertEqual(self._run_vt_helper((result, True, None)), 2)
+                self.assertEqual(self._run_vt_helper((result, True, None),
+                                                     directory=True), 2)
+        clean = dict(empty, total_engines=70)
+        self.assertEqual(self._run_vt_helper((clean, True, None), directory=True), 0)
 
     def test_vt_helper_single_file_unknown_hash_is_no_verdict(self):
         self.assertEqual(self._run_vt_helper_single_file((None, False, None)), 2)
@@ -2009,6 +2051,37 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 rc, _ = self._quiet_scan_resolved(scan_url, source, dry_run=True)
             self.assertEqual(rc, 0)
 
+    def test_scan_url_license_with_code_suffix_is_not_documentation(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        for name, expected in (("LICENSE", 0), ("LICENSE.md", 0), ("license.sh", 2)):
+            with tempfile.TemporaryDirectory() as src_dir:
+                src = Path(src_dir)
+                (src / "skills" / "a").mkdir(parents=True)
+                (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n",
+                                                               encoding="utf-8")
+                (src / name).write_text("x\n", encoding="utf-8")
+                source = scan_url.ResolvedSource(kind="github", source_path=src)
+                with patch.object(scan_url, "run_skill_static", return_value=0):
+                    rc, _ = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+                self.assertEqual(rc, expected, name)
+
+    def test_scan_url_explicit_catalog_kind_does_not_shrink_a_repo_scan(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n",
+                                                           encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            for kind in ("catalog", "markdown"):
+                with patch.object(scan_url, "scan_catalog", return_value=0) as catalog:
+                    rc, out = self._quiet_scan_resolved(scan_url, source, kind, dry_run=True)
+                self.assertEqual(rc, 2, kind)
+                self.assertIn("would check only the README", out)
+                catalog.assert_not_called()
+
     def test_scan_url_collection_block_beats_unscanned_files(self):
         from unittest.mock import patch
         scan_url = importlib.import_module("scan_url")
@@ -2218,11 +2291,28 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             ({"command": "npx", "args": ["-y", "pkg", "stdio"]}, "npm"),
             ({"command": "uvx", "args": ["pkg", "serve"]}, "pypi"),
             ({"command": "uvx", "args": ["--python", "3.12", "pkg"]}, "pypi"),
-            ({"command": "npx", "args": ["--registry", "https://r.example", "pkg"]}, "npm"),
+            ({"command": "npx", "args": ["-p", "pkg", "bin"]}, "npm"),
+            ({"command": "npx", "args": ["--package=pkg", "bin"]}, "npm"),
+            ({"command": "npx", "args": ["--package", "pkg", "bin"]}, "npm"),
+            ({"command": "uvx", "args": ["--from", "pkg", "cmd"]}, "pypi"),
+            ({"command": "uvx", "args": ["--from=pkg", "cmd"]}, "pypi"),
         ]
         for entry, ecosystem in cases:
             cmd = audit.mcp_source_scan_command(entry)
             self.assertEqual(cmd, ["python", "scripts/scan_mcp.py", ecosystem, "pkg"], entry)
+
+    def test_audit_launch_with_unscannable_extras_is_not_inferred(self):
+        audit = importlib.import_module("audit_installed")
+        cases = [
+            {"command": "uvx", "args": ["--with", "extra", "pkg"]},
+            {"command": "uvx", "args": ["--with=extra", "pkg"]},
+            {"command": "uvx", "args": ["--index-url", "https://i.example", "pkg"]},
+            {"command": "uvx", "args": ["--index-url=https://i.example", "pkg"]},
+            {"command": "npx", "args": ["--registry", "https://r.example", "pkg"]},
+            {"command": "npx", "args": ["--registry=https://r.example", "pkg"]},
+        ]
+        for entry in cases:
+            self.assertIsNone(audit.mcp_source_scan_command(entry), entry)
 
     def _audit_mcps_with(self, servers, codes):
         audit = importlib.import_module("audit_installed")

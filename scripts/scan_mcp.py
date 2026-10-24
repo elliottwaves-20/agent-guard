@@ -233,6 +233,26 @@ analyzer = VirusTotalAnalyzer(
     exclusion_extensions=getattr(CONSTANTS, "VIRUSTOTAL_EXCLUSION_EXTENSIONS", set()),
 )
 
+# VirusTotal answers 200 with empty engine stats for a hash it knows but has not
+# analysed yet; the analyzer then reports 0 engines and the file looks clean.
+# Treat such a result as "not found" (unknown is not clean) in both branches below.
+# A positive verdict is never downgraded.
+_query_original = analyzer._query_virustotal_cached
+
+
+def _query_with_engines(file_hash):
+    result = _query_original(file_hash)
+    vt_result, hash_found, error_reason = result
+    if hash_found and not error_reason and isinstance(vt_result, dict):
+        engines = vt_result.get("total_engines")
+        positive = vt_result.get("malicious", 0) or vt_result.get("suspicious", 0)
+        if not positive and (type(engines) is not int or engines <= 0):
+            return None, False, None
+    return result
+
+
+analyzer._query_virustotal_cached = _query_with_engines
+
 if target.is_file():
     # analyze_file() returns None for a clean file, an unknown hash and a failed
     # lookup alike. Query the hash directly so those outcomes stay apart --
@@ -283,7 +303,8 @@ if target.is_file():
             summary["clean"] = 1
 elif target.is_dir():
     findings = analyzer.analyze_directory(str(target))
-    summary = analyzer.last_scan_summary
+    # An empty summary means nothing was eligible to scan.
+    summary = analyzer.last_scan_summary or {"total_to_scan": 0}
 else:
     print(json.dumps({"error": "missing_path"}))
     sys.exit(2)
@@ -610,6 +631,10 @@ def _summary_int(output: str, key: str):
     return found[0] if len(found) == 1 else None
 
 
+def _summary_line_count(output: str, key: str) -> int:
+    return sum(1 for line in output.splitlines() if line.lower().strip().startswith(key))
+
+
 def verdict(output: str, code: int) -> int:
     """Turn an mcp-scanner (Cisco) summary into a clear verdict. Fail closed.
 
@@ -652,6 +677,10 @@ def verdict(output: str, code: int) -> int:
     # Since 4.8.5 an analyzer that crashed leaves its item at is_safe=None,
     # listed as "Incomplete items: N". Unchecked is not clean.
     incomplete = _summary_int(output, "incomplete items:")
+    if unsafe == 0 and incomplete is None and _summary_line_count(output, "incomplete items:"):
+        print("[BLOCK] NO VERDICT -- the 'Incomplete items' line is unreadable or "
+              "repeated. Do NOT install. Re-run the scan.")
+        return 2
     if unsafe == 0 and incomplete:
         print(f"[BLOCK] NO VERDICT -- {incomplete} item(s) not fully analyzed (an "
               "analyzer failed, see above). Do NOT install. Re-run the scan.")
@@ -714,6 +743,10 @@ def virustotal_verdict(report: dict) -> int:
             print("\n[BLOCK] VirusTotal counts malicious file(s). Do not install.")
             return 1
 
+    if total == 0:
+        print("\nNOTE: no file was eligible for a VirusTotal check, so there is "
+              "nothing to report.")
+
     if summary.get("failed", 0) or summary.get("throttled", 0):
         print("\n[WARN] INCONCLUSIVE -- some VirusTotal lookups failed or were throttled.")
         return 2
@@ -729,7 +762,8 @@ def virustotal_verdict(report: dict) -> int:
     # Cisco's directory scan counts a suspicious-only file as scanned but neither
     # clean nor malicious; any such gap is an unexplained result.
     if total > 0 and (summary["scanned"] < 1
-                      or summary["clean"] + summary.get("malicious", 0) != summary["scanned"]):
+                      or summary["clean"] + summary.get("malicious", 0) != summary["scanned"]
+                      or summary["clean"] != total):
         print("\n[WARN] NO VERDICT -- the VirusTotal counts do not add up (not every "
               "checked file came back clean). Review manually.")
         return 2

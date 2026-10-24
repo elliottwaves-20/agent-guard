@@ -25,7 +25,9 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import re
+import os
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -89,6 +91,33 @@ def private_address(address: str) -> bool:
         return False
 
 
+def dns_resolvers() -> set:
+    """Extra resolver addresses from AGENT_GUARD_DNS_RESOLVERS (comma-separated IPs).
+
+    On Linux the Docker bridge copies the host's DNS servers into the container,
+    so the resolver may be a public address. Invalid entries are ignored."""
+    found = set()
+    for entry in os.environ.get("AGENT_GUARD_DNS_RESOLVERS", "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            found.add(str(ipaddress.ip_address(entry)))
+        except ValueError:
+            print(f"[WARN] AGENT_GUARD_DNS_RESOLVERS: ignoring invalid address {entry!r}",
+                  file=sys.stderr)
+    return found
+
+
+def resolver_address(address: str, resolvers: set) -> bool:
+    """The sandbox's own resolver: a private address or one named in `resolvers`."""
+    try:
+        normal = str(ipaddress.ip_address(address))
+    except ValueError:
+        return False
+    return private_address(address) or normal in resolvers
+
+
 def _endpoint(text: str, v6: bool) -> tuple:
     if v6:
         host, dot, port = text.rpartition(".")
@@ -128,6 +157,7 @@ def analyse(lines, local_ips, allow: set) -> Report:
         via = ", ".join(sorted(names)) or "no DNS lookup"
         finding(f"{kind} {ip}:{port} ({via})")
 
+    resolvers = dns_resolvers()
     for raw in lines:
         line = raw.strip()
         if line.startswith("listening on"):
@@ -155,7 +185,7 @@ def analyse(lines, local_ips, allow: set) -> Report:
             continue  # replies and anything addressed to the target
 
         if dport == 53:
-            if not private_address(dst):   # only the sandbox's own resolver is exempt
+            if not resolver_address(dst, resolvers):   # only the sandbox's own resolver is exempt
                 finding(f"DNS traffic to a public address: {dst}")
             query = _QUERY.match(payload)
             if query:

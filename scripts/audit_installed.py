@@ -138,16 +138,35 @@ OPTIONS_WITH_VALUE = {"--from", "-p", "--package", "--with", "--python",
                       "--index-url", "--registry"}
 
 
+# Options that pull in packages or a registry we cannot scan from the entry alone.
+UNSCANNABLE_OPTIONS = {"--with", "--registry", "--index-url"}
+# Options whose value is itself the package to scan.
+PACKAGE_OPTIONS = {"--from", "-p", "--package"}
+
+
 def first_positional(args: list[str]) -> str | None:
     skip_value = False
-    for arg in args:
+    package = None
+    positional = None
+    for i, arg in enumerate(args):
         if skip_value:
             skip_value = False
+            continue
+        name, has_value, value = arg.partition("=")
+        if name in UNSCANNABLE_OPTIONS:
+            return None
+        if name in PACKAGE_OPTIONS:
+            if not has_value and i + 1 < len(args):
+                value = args[i + 1]
+                skip_value = True
+            if value.startswith("git+"):   # only the GitHub path in mcp_source_scan_command is scannable
+                return None
+            package = package or value
         elif arg in OPTIONS_WITH_VALUE:
             skip_value = True
-        elif not arg.startswith("-"):
-            return arg
-    return None
+        elif not arg.startswith("-") and positional is None:
+            positional = arg
+    return package or positional
 
 
 def launcher_name(command: str) -> str:

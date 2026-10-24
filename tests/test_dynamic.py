@@ -166,6 +166,19 @@ class FindingTests(unittest.TestCase):
             {"Address": "10.0.0.2", "Port": 53, "Hostnames": []})
         self.assertEqual(analyse(result).findings, [])
 
+    def test_configured_resolver_on_port_53_is_not_a_finding(self):
+        def sockets():
+            result = npm_clean()
+            result["Analysis"]["install"]["Sockets"].append(
+                {"Address": "1.1.1.1", "Port": 53, "Hostnames": []})
+            return result
+        with patch.dict(os.environ, {"AGENT_GUARD_DNS_RESOLVERS": "1.1.1.1"}):
+            self.assertEqual(analyse(sockets()).findings, [])
+        env = {k: v for k, v in os.environ.items() if k != "AGENT_GUARD_DNS_RESOLVERS"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(analyse(sockets()).findings,
+                             ["install: connection to 1.1.1.1:53 (no DNS name)"])
+
     def test_registry_of_the_other_ecosystem_is_not_allowed(self):
         result = npm_clean()
         result["Analysis"]["install"]["DNS"][0]["Queries"].append(
