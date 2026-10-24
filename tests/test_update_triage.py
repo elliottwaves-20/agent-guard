@@ -76,7 +76,7 @@ class TriageInUpdateTests(unittest.TestCase):
 
     def test_medium_findings_alone_do_not_block(self):
         env = self.changed()
-        env.verdicts["alpha"] = 1
+        env.verdicts["alpha"] = 0
         env.findings["alpha"] = [("RP1", "SKILL.md", "MEDIUM")]
         self.assertEqual(env.run("--all"), 0)
         self.assertIn("v2", (env.inbox / "alpha" / "SKILL.md").read_text())

@@ -397,9 +397,10 @@ def inert_media(skill_dir: Path, rel: str) -> bool:
 def unsettled_gap(report: dict, skill_dir: Path) -> bool:
     """A gap in the scan the triage cannot settle: a file not read at all, a fatal
     or unknown exception, a limitation, a scope exclusion other than a real
-    image. With every file read, references that match no or several bundled
-    files, images the text analyzers skip, and parser limits the span locator
-    can replay are judged."""
+    image. With every file read, references that match no bundled file, images
+    the text analyzers skip, and parser limits the span locator can replay are
+    judged. A reference matching several files needs a reviewed baseline, which
+    only the wrapper has."""
     completeness = report.get("analysis_completeness") or {}
     if completeness.get("entirely_uninspected_files"):
         return True
@@ -417,7 +418,7 @@ def unsettled_gap(report: dict, skill_dir: Path) -> bool:
         if not isinstance(item, dict) or item.get("fatal") is not False:
             return True
         if (item.get("phase") == "reference_resolution"
-                and item.get("reason_code") in ("reference_missing", "reference_unresolved")):
+                and item.get("reason_code") == "reference_missing"):
             continue
         if (item.get("phase") == "static" and item.get("reason_code") == PARSE_LIMIT
                 and replayable(item.get("analyzers"))):
@@ -476,14 +477,15 @@ def recheck_yara(findings: list, skill_dir: Path, yara, version: str) -> set:
 
 def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | None = None,
            catalog: dict | None = None, approved: frozenset = frozenset(),
-           verifier=None, spans=None, yara=None) -> Result:
+           verifier=None, spans=None, yara=None, require_llm: bool = False) -> Result:
     """Judge a SkillSpector report. `raw_code` is verdict_skillspector's exit code;
     `approved` holds SHA-256 hashes of files a person already approved;
     `verifier(open_dispositions, skill_dir) -> answers` is stage d (optional);
     `spans(skill_dir, [rel, ...]) -> {rel: [(start, end), ...] | None}` locates
     the lines behind parser-limit AE1 findings (_parse_spans.py, optional);
     `yara(skill_dir, [(rule, namespace, rel), ...]) -> {(rule, namespace, rel): bool|None}`
-    rechecks YARA matches with corrected rules (_yara_recheck.py, optional)."""
+    rechecks YARA matches with corrected rules (_yara_recheck.py, optional);
+    `require_llm` withholds SAFE from a report whose AI analysis did not run."""
     if raw_code not in (0, 1):
         return Result(NO_VERDICT, [])
     catalog = catalog if catalog is not None else load_catalog()
@@ -541,11 +543,18 @@ def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | Non
 
     if any(blocks(d) for d in out):
         verdict = DANGEROUS
-    elif raw_code == 1 and unsettled_gap(report, skill_dir):
-        # The wrapper blocked on a finding before judging completeness.
+    elif unsettled_gap(report, skill_dir):
+        # At exit 1 the wrapper blocked on a finding before judging completeness;
+        # at exit 0 it may have let excluded files through as complete.
         verdict = NO_VERDICT
     elif any(d.status == OPEN for d in out):
         verdict = UNCLEAR
+    elif raw_code == 1 and not out:
+        # The wrapper blocked on its risk score or recommendation without a
+        # finding the triage can judge, so nothing here clears that block.
+        verdict = UNCLEAR
+    elif require_llm and (report.get("metadata") or {}).get("llm_available") is not True:
+        verdict = NO_VERDICT
     else:
         verdict = SAFE
     return Result(verdict, out)
