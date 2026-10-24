@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2095,6 +2096,76 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         path = Path("C:/repo/node_modules/pkg/build/main/cli.js")
 
         self.assertEqual(audit.package_root_for_file(path), Path("C:/repo/node_modules/pkg"))
+
+    def test_audit_dry_run_is_no_verdict(self):
+        audit = importlib.import_module("audit_installed")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(audit.run(["x"], execute=False), 2)
+
+    def test_audit_download_dry_run_is_no_verdict_and_says_so(self):
+        audit = importlib.import_module("audit_installed")
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as src_dir:
+            with contextlib.redirect_stdout(buf):
+                rc = audit.audit_download(Path(src_dir), "mcp", False)
+        self.assertEqual(rc, 2)
+        self.assertIn("NOT EXECUTED -- rerun with --execute for a verdict", buf.getvalue())
+
+    def test_audit_read_json_raises_on_broken_file_and_ignores_missing(self):
+        audit = importlib.import_module("audit_installed")
+        with tempfile.TemporaryDirectory() as src_dir:
+            broken = Path(src_dir) / "broken.json"
+            broken.write_text("{not json", encoding="utf-8")
+            with self.assertRaises(audit.ConfigReadError):
+                audit.read_json(broken)
+            self.assertEqual(audit.read_json(Path(src_dir) / "missing.json"), {})
+
+    def test_audit_installed_broken_config_is_no_verdict(self):
+        audit = importlib.import_module("audit_installed")
+        with patch.object(audit, "installed_skill_dirs", return_value=[]), \
+                patch.object(audit, "installed_mcp_servers",
+                             side_effect=audit.ConfigReadError("broken config")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(audit.audit_installed("mcps", True, None), 2)
+
+    def test_audit_codex_broken_toml_raises_config_read_error(self):
+        audit = importlib.import_module("audit_installed")
+        with tempfile.TemporaryDirectory() as src_dir:
+            cfg = Path(src_dir) / "config.toml"
+            cfg.write_bytes(b"\xff\xfe[mcp_servers.x\x00")
+            with patch.object(Path, "read_text", side_effect=OSError("denied")):
+                with self.assertRaises(audit.ConfigReadError):
+                    audit.read_codex_mcp_servers(cfg)
+
+    def test_audit_picks_package_from_first_positional_argument(self):
+        audit = importlib.import_module("audit_installed")
+        cases = [
+            ({"command": "npx", "args": ["-y", "pkg", "stdio"]}, "npm"),
+            ({"command": "uvx", "args": ["pkg", "serve"]}, "pypi"),
+            ({"command": "uvx", "args": ["--python", "3.12", "pkg"]}, "pypi"),
+            ({"command": "npx", "args": ["--registry", "https://r.example", "pkg"]}, "npm"),
+        ]
+        for entry, ecosystem in cases:
+            cmd = audit.mcp_source_scan_command(entry)
+            self.assertEqual(cmd, ["python", "scripts/scan_mcp.py", ecosystem, "pkg"], entry)
+
+    def _audit_mcps_with(self, servers, codes):
+        audit = importlib.import_module("audit_installed")
+        with patch.object(audit, "installed_skill_dirs", return_value=[]), \
+                patch.object(audit, "installed_mcp_servers", return_value=servers), \
+                patch.object(audit, "run", side_effect=codes), \
+                contextlib.redirect_stdout(io.StringIO()):
+            return audit.audit_installed("mcps", True, None)
+
+    def test_audit_installed_unknown_source_is_no_verdict(self):
+        servers = [("claude-code", "odd", {"command": "something", "args": []})]
+        self.assertEqual(self._audit_mcps_with(servers, [0]), 2)  # sandbox run is SAFE
+
+    def test_audit_installed_block_is_not_lost_behind_no_verdict(self):
+        servers = [("claude-code", "a", {"command": "npx", "args": ["a"]}),
+                   ("claude-code", "b", {"url": "https://x.example/mcp"})]
+        # a: source=1, sandbox=2; b: source=2
+        self.assertEqual(self._audit_mcps_with(servers, [1, 2, 2]), 1)
 
     def test_shipped_text_is_not_double_encoded(self):
         # UTF-8 read as cp1252 and saved again turns "—" into "â€”"; agents

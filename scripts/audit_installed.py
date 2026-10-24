@@ -16,16 +16,24 @@ import sys
 from pathlib import Path
 
 import install_skill
+from _skillspector import combine_verdicts
 from scan_skill import find_skill_dirs
+
+
+class ConfigReadError(Exception):
+    """An existing agent config could not be read; its servers are unknown."""
 
 
 def read_json(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+        raise ConfigReadError(f"cannot read {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigReadError(f"cannot read {path}: top level is not an object")
+    return data
 
 
 def read_codex_mcp_servers(path: Path) -> dict[str, dict]:
@@ -33,7 +41,11 @@ def read_codex_mcp_servers(path: Path) -> dict[str, dict]:
         return {}
     servers: dict[str, dict] = {}
     current: str | None = None
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise ConfigReadError(f"cannot read {path}: {exc}") from exc
+    for line in text.splitlines():
         stripped = line.strip()
         m = re.fullmatch(r"\[mcp_servers\.([^\].]+)\]", stripped)
         if m:
@@ -111,13 +123,30 @@ def mcp_source_scan_command(entry: dict) -> list[str] | None:
             idx = args.index("--from")
             if idx + 1 < len(args) and args[idx + 1].startswith("git+https://github.com/"):
                 return ["python", "scripts/scan_url.py", normalize_git_url(args[idx + 1])]
-        packages = [a for a in args if not a.startswith("-")]
-        if packages:
-            return ["python", "scripts/scan_mcp.py", "pypi", packages[-1]]
+        package = first_positional(args)
+        if package:
+            return ["python", "scripts/scan_mcp.py", "pypi", package]
     if launcher == "npx":
-        packages = [a for a in args if not a.startswith("-")]
-        if packages:
-            return ["python", "scripts/scan_mcp.py", "npm", packages[-1]]
+        package = first_positional(args)
+        if package:
+            return ["python", "scripts/scan_mcp.py", "npm", package]
+    return None
+
+
+# Launcher options whose next argument is their value, not the package.
+OPTIONS_WITH_VALUE = {"--from", "-p", "--package", "--with", "--python",
+                      "--index-url", "--registry"}
+
+
+def first_positional(args: list[str]) -> str | None:
+    skip_value = False
+    for arg in args:
+        if skip_value:
+            skip_value = False
+        elif arg in OPTIONS_WITH_VALUE:
+            skip_value = True
+        elif not arg.startswith("-"):
+            return arg
     return None
 
 
@@ -178,7 +207,8 @@ def mcp_sandbox_command(entry: dict) -> list[str] | None:
 def run(cmd: list[str], execute: bool) -> int:
     print("  " + " ".join(cmd))
     if not execute:
-        return 0
+        print("  NOT EXECUTED -- rerun with --execute for a verdict")
+        return 2
     return subprocess.run(cmd).returncode
 
 
@@ -227,7 +257,7 @@ def audit_download(path: Path, kind: str, execute: bool) -> int:
 
 
 def audit_installed(kind: str, execute: bool, selected: list[str] | None) -> int:
-    worst = 0
+    worst = 0  # SAFE until a stage says otherwise; merged with combine_verdicts
     if kind in {"all", "skills"}:
         print("\n== Installed skills ==")
         skills = installed_skill_dirs(selected)
@@ -235,11 +265,16 @@ def audit_installed(kind: str, execute: bool, selected: list[str] | None) -> int
             print("  none detected")
         for tool, path in skills:
             print(f"- {path} ({tool})")
-            worst = max(worst, run(["python", "scripts/scan_skill.py", str(path)], execute))
+            worst = combine_verdicts(
+                worst, run(["python", "scripts/scan_skill.py", str(path)], execute))
             print(f"  removal: {removal_hint_skill(path)}")
     if kind in {"all", "mcps"}:
         print("\n== Installed MCP servers ==")
-        servers = installed_mcp_servers(selected)
+        try:
+            servers = installed_mcp_servers(selected)
+        except ConfigReadError as exc:
+            print(f"ERROR: {exc}; MCP servers not audited (NO VERDICT)", file=sys.stderr)
+            return combine_verdicts(worst, 2)
         if not servers:
             print("  none detected")
         for tool, name, entry in servers:
@@ -249,12 +284,13 @@ def audit_installed(kind: str, execute: bool, selected: list[str] | None) -> int
                 print(f"- {name} ({tool}): {entry.get('command')} {' '.join(entry.get('args', []))}")
             src_cmd = mcp_source_scan_command(entry)
             if src_cmd:
-                worst = max(worst, run(src_cmd, execute))
+                worst = combine_verdicts(worst, run(src_cmd, execute))
             else:
                 print("  source scan: cannot infer package/source from config")
+                worst = combine_verdicts(worst, 2)
             sandbox_cmd = mcp_sandbox_command(entry)
             if sandbox_cmd:
-                worst = max(worst, run(sandbox_cmd, execute))
+                worst = combine_verdicts(worst, run(sandbox_cmd, execute))
             print(f"  removal: {removal_hint_mcp(tool, name)}")
     return worst
 
