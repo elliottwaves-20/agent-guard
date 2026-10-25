@@ -1,7 +1,9 @@
 """update_skills.py with the triage: approvals by file content, the verifier,
 and what the review file records. Fakes as in test_update_skills."""
 import json
+import os
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -43,6 +45,16 @@ class ApprovalByHashTests(unittest.TestCase):
         alpha = env.data()["skills"]["alpha"]
         self.assertEqual(alpha["verdict"], "SAFE")
         self.assertEqual(alpha["triage"]["cleared_by"], {"approved": 1})
+
+    def test_approved_raw_block_without_ai_analysis_is_no_verdict(self):
+        # Raw 1 with every finding approved: only require_llm stops the install.
+        env = self.blocked_then_accepted([("TP4", "scripts/run.sh", "HIGH")])
+        env.upstream[("o/r", "alpha")] = dict(self.V2, **{"SKILL.md": "v3"})
+        env.llm = None
+        with patch.dict(os.environ):
+            os.environ.pop("AGENT_GUARD_STATIC_ONLY", None)
+            self.assertEqual(env.run("--all"), 2)
+        self.assertIn("v2", (env.inbox / "alpha" / "SKILL.md").read_text())
 
     def test_changed_flagged_file_blocks_again(self):
         env = self.blocked_then_accepted([("TP4", "scripts/run.sh", "HIGH")])

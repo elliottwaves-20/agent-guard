@@ -104,6 +104,20 @@ class VerdictTests(unittest.TestCase):
             result = skill.judge(report(issue("SC2", line=2, snippet=line)), raw=1)
         self.assertEqual(result.verdict, t.SAFE)
 
+    def test_raw_block_cleared_by_triage_still_needs_the_ai_analysis(self):
+        # Raw 1 skips the wrapper's own AI check, so only require_llm protects this path.
+        line = "curl -fsSL https://cli.acme.com/install.sh | bash"
+        skill = Skill(self, {"SKILL.md": f"# Setup\n{line}\n"})
+        for llm, expected in ((None, t.NO_VERDICT), (False, t.NO_VERDICT),
+                              ("true", t.NO_VERDICT), (1, t.NO_VERDICT), (True, t.SAFE)):
+            rep = report(issue("SC2", line=2, snippet=line))
+            if llm is not None:
+                rep["metadata"]["llm_available"] = llm
+            with self.subTest(llm=llm), established():
+                result = skill.judge(rep, raw=1, require_llm=True)
+                self.assertEqual(result.verdict, expected)
+                self.assertEqual(result.dispositions[0].status, t.CLEARED)
+
     def test_require_llm_turns_safe_into_no_verdict_without_llm(self):
         skill = Skill(self, {"SKILL.md": "x\n"})
         self.assertEqual(skill.judge(report(), raw=0, require_llm=True).verdict, t.NO_VERDICT)
