@@ -196,6 +196,11 @@ class InstallTests(unittest.TestCase):
         _out, err = self.install_refused(add)
         self.assertIn("extra.sh", err)
         self.assertIn("Nothing was deleted", err)
+        # the sync has already made the skill live: the message must say where
+        self.assertIn("already in place", err)
+        self.assertIn(str((self.inbox / "demo").resolve()), err)
+        self.assertIn("review it before use or remove it", err)
+        self.assertNotIn("stays in the inbox", err)
         self.assertTrue((self.inbox / "demo" / "extra.sh").is_file())
 
     def test_sync_that_removes_the_skill_from_the_inbox_is_exit_2(self):

@@ -533,7 +533,8 @@ def refuse_extra_files(extra: list, location: Path):
     shown = ", ".join(extra[:10]) + (f" (+{len(extra) - 10} more)" if len(extra) > 10 else "")
     refuse_unverified(
         f"{location} contains {len(extra)} file(s) or folder(s) the scan never saw: {shown}. "
-        "Review that copy by hand or remove it, then re-run. Nothing was deleted.")
+        f"The skill is already in place at {location}: review it before use or remove it by "
+        "hand. Nothing was deleted.")
 
 
 def verify_distributed_copy(scanned: Path, canonical: Path):

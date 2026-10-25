@@ -631,8 +631,9 @@ The sync runs without credentials in its environment, only its output lines
 about the installed skill are shown. A sync that changes a scanned file, adds
 a file the scan never saw, or leaves no skill at the inbox path stops the
 installer, and so does a failing or timed-out sync (exit 2, no `[OK]` line;
-nothing is deleted, review the copy by hand). The skill stays in the inbox, but
-it is not reported as installed. Without a `sync` command the skill is only
+nothing is deleted). After a failed sync the skill stays unsynced in the inbox; after
+extra files in the copy it is already in place, and the message names the location:
+review it before use or remove it by hand. Either way it is not reported as installed. Without a `sync` command the skill is only
 published to the inbox. An invalid section stops the installer (exit 2).
 
 **Keeping skills up to date (`update_skills.py`).** With three more keys in the

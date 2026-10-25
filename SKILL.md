@@ -580,8 +580,10 @@ the installer publishes the SAFE skill into that section's inbox and runs the
 user's own sync command once instead; `--tools` and `--workspace` are then
 refused, so do not ask which agents to target. A failed or timed-out sync, or
 a synced copy with extra or changed files, ends with exit 2 and no `[OK]`
-line; the skill stays in the inbox. Report it, do not retry blindly and do not
-delete anything on your own.
+line. After a failed or timed-out sync the skill waits in the inbox; with extra
+files or changes in the copy the sync has already put the skill in place, and the
+message names where it is. Tell the user it must be reviewed or removed before
+use. Do not retry blindly and do not delete anything on your own.
 
 Updating later: `git -C "$WORKSPACE/<name>" fetch` → **re-scan the new
 commit** → checkout the new SHA.

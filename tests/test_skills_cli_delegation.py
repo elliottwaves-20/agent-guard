@@ -288,6 +288,9 @@ class InstallerIntegrationTests(unittest.TestCase):
                 installer.verify_distributed_copy(scanned, canonical)
             self.assertEqual(ctx.exception.code, 2)      # extra files are unscanned content
             self.assertIn("NOTES.md", err.getvalue())
+            self.assertIn("already in place", err.getvalue())   # the skill is live
+            self.assertIn(str(canonical), err.getvalue())
+            self.assertIn("review it before use or remove it", err.getvalue())
             self.assertTrue((canonical / "NOTES.md").exists())   # nothing is deleted
 
     def test_missing_canonical_copy_is_an_error(self):
