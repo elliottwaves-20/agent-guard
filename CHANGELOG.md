@@ -37,6 +37,10 @@
 - `scan_url.py`: a repo with no skill and no package manifest gives exit 2
   "unsupported repo layout" (no README-only check); so do skill collections
   with non-documentation files outside the skill folders and marketplace
+- Directory hash lookups: an empty Cisco summary is SAFE only if agent-guard
+  itself finds no checkable file. It counts the files Cisco would check
+  without Cisco's path exclusions (dot directories, `__pycache__`, symlinks,
+  no magic-byte library); more than Cisco looked at gives exit 2.
   candidates skipped by `--max-candidates`.
 - Cooldown: a skill branch without activity entries is accepted only if the
   repository creation time proves it older than the cooldown; otherwise the

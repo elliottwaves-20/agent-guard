@@ -303,8 +303,27 @@ if target.is_file():
             summary["clean"] = 1
 elif target.is_dir():
     findings = analyzer.analyze_directory(str(target))
-    # An empty summary means nothing was eligible to scan.
-    summary = analyzer.last_scan_summary or {"total_to_scan": 0}
+    # An empty summary only says Cisco found nothing to scan. Cisco drops files under
+    # dot directories and __pycache__, symlinks that leave the root, and cannot tell
+    # text from a binary without puremagic. Count what it would check without those
+    # exclusions so that the verdict can tell "nothing there" from "nothing looked at".
+    summary = dict(analyzer.last_scan_summary or {"total_to_scan": 0})
+    from mcpscanner.utils import file_magic
+    magic_ok = bool(getattr(file_magic, "_PUREMAGIC_AVAILABLE", False))
+    eligible = 0
+    for entry in target.rglob("*"):
+        try:
+            if entry.is_symlink():
+                eligible += 1  # never followed, so never checked
+            elif entry.is_file():
+                if not magic_ok or analyzer._should_scan_file(str(entry)):
+                    eligible += 1
+                else:
+                    with entry.open("rb") as handle:
+                        handle.read(1)  # an unreadable file cannot be judged
+        except Exception:
+            eligible += 1
+    summary["agent_guard_eligible"] = eligible
 else:
     print(json.dumps({"error": "missing_path"}))
     sys.exit(2)
@@ -742,6 +761,23 @@ def virustotal_verdict(report: dict) -> int:
         if malicious:
             print("\n[BLOCK] VirusTotal counts malicious file(s). Do not install.")
             return 1
+
+    # agent-guard counts the checkable files itself (the helper adds the count to
+    # every directory summary). Cisco must have counted at least as many.
+    eligible = summary.get("agent_guard_eligible")
+    if eligible is not None or total == 0:
+        found = summary.get("total_found", total)
+        if type(eligible) is not int or eligible < 0:
+            print("\n[WARN] NO VERDICT -- the VirusTotal summary has no valid count of "
+                  "checkable files. Re-run the scan.")
+            return 2
+        if type(found) is not int or eligible > found:
+            print(f"\n[WARN] NO VERDICT -- {eligible} file(s) could be checked, but "
+                  f"VirusTotal looked at {found if type(found) is int else 0}. Cisco "
+                  "skips files under dot directories and __pycache__, symlinks and "
+                  "files whose type it cannot tell; those files were not checked. "
+                  "Review them manually.")
+            return 2
 
     if total == 0:
         print("\nNOTE: no file was eligible for a VirusTotal check, so there is "

@@ -1128,8 +1128,20 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                        {"summary": {"total_to_scan": 1, "scanned": "1", "clean": 1,
                                     "malicious": 0}}):
             self.assertEqual(scan_mcp.virustotal_verdict(report), 2, report)
+        # Zero files checked is only clean when agent-guard itself found nothing
+        # checkable (agent_guard_eligible 0); a missing or bad count is no verdict.
         self.assertEqual(scan_mcp.virustotal_verdict(
-            {"summary": {"total_to_scan": 0}, "findings": []}), 0)
+            {"summary": {"total_to_scan": 0, "agent_guard_eligible": 0},
+             "findings": []}), 0)
+        for report in ({"summary": {"total_to_scan": 0}, "findings": []},
+                       {"summary": {"total_to_scan": 0, "agent_guard_eligible": 1}},
+                       {"summary": {"total_to_scan": 0, "agent_guard_eligible": "0"}},
+                       {"summary": {"total_to_scan": 0, "agent_guard_eligible": True}},
+                       {"summary": {"total_to_scan": 0, "agent_guard_eligible": -1}},
+                       {"summary": {"total_found": 1, "total_to_scan": 1, "scanned": 1,
+                                    "clean": 1, "malicious": 0,
+                                    "agent_guard_eligible": 2}}):
+            self.assertEqual(scan_mcp.virustotal_verdict(report), 2, report)
         self.assertEqual(scan_mcp.virustotal_verdict(
             {"summary": {"total_to_scan": 1, "scanned": 1, "clean": 1,
                          "malicious": 0}, "findings": []}), 0)
@@ -1175,8 +1187,13 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         """Execute VT_HELPER's single-file branch against a stub analyzer."""
         return self._run_vt_helper(query_result)
 
-    def _run_vt_helper(self, query_result, directory=False, dir_summary=None):
-        """Execute VT_HELPER against a stub analyzer; return the verdict."""
+    def _run_vt_helper(self, query_result, directory=False, dir_summary=None,
+                       files=None, puremagic=True, symlink=None):
+        """Execute VT_HELPER against a stub analyzer; return the verdict.
+
+        files: relative path -> bytes written instead of tool.exe (directory mode).
+        The stub analyzer treats .exe and .pyc as scannable, like Cisco's list.
+        symlink: (link name, target name) created in the directory, if possible."""
         import contextlib
         import io
         import tempfile
@@ -1207,11 +1224,18 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             def analyze_file(self, path):  # the old, ambiguous entry point
                 return None
 
+            def _should_scan_file(self, path):
+                return str(path).endswith((".exe", ".pyc"))
+
         constants = types.ModuleType("mcpscanner.config.constants")
         constants.MCPScannerConstants = types.SimpleNamespace()
         analyzer_mod = types.ModuleType("mcpscanner.core.analyzers.virustotal_analyzer")
         analyzer_mod.VirusTotalAnalyzer = StubAnalyzer
+        magic_mod = types.ModuleType("mcpscanner.utils.file_magic")
+        magic_mod._PUREMAGIC_AVAILABLE = puremagic
         stubs = {"mcpscanner": types.ModuleType("mcpscanner"),
+                 "mcpscanner.utils": types.ModuleType("mcpscanner.utils"),
+                 "mcpscanner.utils.file_magic": magic_mod,
                  "mcpscanner.config": types.ModuleType("mcpscanner.config"),
                  "mcpscanner.config.constants": constants,
                  "mcpscanner.core": types.ModuleType("mcpscanner.core"),
@@ -1224,6 +1248,16 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             target.write_bytes(b"MZ payload")
             if directory:
                 target = Path(d)
+                if files is not None:
+                    target.joinpath("tool.exe").unlink()
+                    for rel, data in files.items():
+                        (target / rel).parent.mkdir(parents=True, exist_ok=True)
+                        (target / rel).write_bytes(data)
+                if symlink is not None:
+                    try:
+                        (target / symlink[0]).symlink_to(target / symlink[1])
+                    except (OSError, NotImplementedError):
+                        self.skipTest("symlinks are not available here")
             out = io.StringIO()
             try:
                 sys.modules.update(stubs)
@@ -1243,10 +1277,40 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         report = json.loads(out.getvalue().strip().splitlines()[-1])
         return scan_mcp.virustotal_verdict(report)
 
-    def test_vt_helper_empty_directory_summary_means_nothing_to_scan(self):
-        # Nothing scannable: the helper reports total_to_scan 0 (note, not an error).
-        self.assertEqual(self._run_vt_helper((None, False, None), directory=True,
-                                             dir_summary={}), 0)
+    def test_vt_helper_empty_summary_is_safe_only_when_nothing_is_checkable(self):
+        # Nothing scannable at all: the helper reports total_to_scan 0 (note, not an error).
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={},
+            files={"README.md": b"# docs", "src/a.txt": b"text"}), 0)
+
+    def test_vt_helper_empty_summary_with_files_cisco_skipped_is_no_verdict(self):
+        # Cisco drops dot directories and __pycache__ silently; agent-guard counts them.
+        for files in ({".bin/payload.exe": b"MZ"}, {"__pycache__/a.pyc": b"x"},
+                      {".claude/skills/x/tool.exe": b"MZ"}):
+            with self.subTest(files=list(files)):
+                self.assertEqual(self._run_vt_helper(
+                    (None, False, None), directory=True, dir_summary={}, files=files), 2)
+
+    def test_vt_helper_symlink_is_not_followed_and_not_clean(self):
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={},
+            files={"README.md": b"# docs"}, symlink=("link.txt", "README.md")), 2)
+
+    def test_vt_helper_missing_magic_library_is_not_clean(self):
+        # Without puremagic Cisco cannot tell text from a renamed binary.
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={},
+            files={"notes.txt": b"MZ pretending to be text"}, puremagic=False), 2)
+
+    def test_vt_helper_scanned_directory_with_extra_dropped_file_is_no_verdict(self):
+        summary = {"total_found": 1, "total_to_scan": 1, "scanned": 1, "clean": 1,
+                   "malicious": 0}
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary=summary,
+            files={"tool.exe": b"MZ", ".hidden/x.exe": b"MZ"}), 2)
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary=summary,
+            files={"tool.exe": b"MZ", "README.md": b"x"}), 0)
 
     def test_vt_helper_unanalysed_hash_is_not_found_in_both_branches(self):
         # A known hash with no engine results yet (total_engines 0) is not clean.
