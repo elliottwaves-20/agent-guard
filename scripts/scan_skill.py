@@ -9,7 +9,8 @@ cross-platform handling as the MCP wrapper:
   - the LLM layer runs through the configured SKILLSPECTOR_PROVIDER -- by
     default a coding-agent CLI (claude_cli / opencode_cli / gemini_cli) using the
     user's existing login, or any hosted provider with an API key; without a
-    usable provider it runs static-only (patterns, taint, YARA, OSV.dev),
+    usable provider it runs static-only (patterns, taint, YARA, OSV.dev) and
+    ends with exit 2 unless AGENT_GUARD_STATIC_ONLY=1,
   - a fail-closed [SAFE] / [BLOCK] verdict is parsed from JSON, including
     SkillSpector's execution/coverage ledger and LLM-completeness metadata.
 

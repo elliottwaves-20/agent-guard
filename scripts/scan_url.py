@@ -656,7 +656,7 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
 
     if kind == "unknown":
         print("[BLOCK] NO VERDICT -- unsupported repo layout: no skill, no package "
-              "manifest. Nothing but the README could be checked.")
+              "manifest. A README-only check is not a verdict.")
         return 2
 
     if kind in {"catalog", "markdown", "file"}:
@@ -716,7 +716,8 @@ def main() -> None:
                              "(it needs Docker); the result is NO VERDICT "
                              "unless AGENT_GUARD_STATIC_ONLY=1")
     parser.add_argument("--max-candidates", type=int, default=10,
-                        help="maximum marketplace candidates to scan automatically")
+                        help="maximum marketplace candidates to scan automatically; "
+                             "candidates left out give exit 2")
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as d:

@@ -16,7 +16,8 @@ detection:
                        npm / pypi add a dynamic stage by default: the package is
                        installed and imported in OpenSSF's package-analysis
                        sandbox and its file, network and process activity is
-                       judged (_dynamic.py). --no-dynamic skips it knowingly.
+                       judged (_dynamic.py). --no-dynamic skips it and gives exit 2
+                       unless AGENT_GUARD_STATIC_ONLY=1.
   binary <url>      -> download (never executed), SHA256, VirusTotal hash
                        reputation check (reuses the scan_mcp.py stage).
                        --deep adds a malcontent capability scan via Docker.
@@ -32,7 +33,7 @@ detection:
 Exit codes (same contract as scan_skill.py / scan_mcp.py):
   0 = SAFE verdict       (nothing known-bad found -- NOT a guarantee)
   1 = BLOCK verdict      (findings -- this is a verdict, not an error)
-  2 = no verdict         (scanner failed/unparsable -- fail closed)
+  2 = no verdict         (anything unchecked or failed -- fail closed)
 
 Detection limits (documented, not hidden):
   - VirusTotal only knows files it has seen: an unseen hash gives NO VERDICT

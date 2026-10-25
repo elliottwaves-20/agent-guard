@@ -2,7 +2,8 @@
 """Audit already downloaded or installed skills/MCP servers.
 
 Default mode is inventory/dry-run: list what would be scanned and how to remove
-it. Use --execute to run scans. MCP runtime execution is only performed through
+it. The default run is NOT EXECUTED and ends with exit 2 if it lists any scan. Use --execute to
+run scans. MCP runtime execution is only performed through
 scan_mcp.py sandbox.
 """
 
@@ -428,7 +429,8 @@ def audit_installed(kind: str, execute: bool, selected: list[str] | None) -> int
 def main() -> None:
     parser = argparse.ArgumentParser(description="Audit downloaded or already installed skills/MCPs.")
     parser.add_argument("--execute", action="store_true",
-                        help="run scans; default only prints commands/removal guidance")
+                        help="run scans; default only prints commands/removal guidance "
+                             "and ends with exit 2 (NOT EXECUTED) if any scan is listed")
     parser.add_argument("--tool", dest="tools", action="append",
                         choices=list(install_skill.TOOLS), default=None,
                         help="limit to a tool; repeat for multiple tools")

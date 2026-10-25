@@ -14,7 +14,8 @@ This wrapper enforces the safe order:
     (Tool Poisoning, Tool Misuse, Least Privilege) on top of taint tracking,
     credential-access and exfiltration checks.
 
-  Stage 1b (default, needs Docker; --no-dynamic skips it): the package is
+  Stage 1b (default, needs Docker; --no-dynamic skips it and gives exit 2
+    unless AGENT_GUARD_STATIC_ONLY=1): the package is
     installed and imported inside OpenSSF's package-analysis sandbox (gVisor)
     and its file, network and process activity is judged -- install scripts
     run here, never on your machine (see _dynamic.py).
@@ -32,7 +33,8 @@ LLM analysis is optional. Stage 1 uses SkillSpector's provider config
 (SKILLSPECTOR_*; by default a coding-agent CLI such as claude_cli, no API key),
 while Stage 2 / remote uses Cisco mcp-scanner's LiteLLM config
 (MCP_SCANNER_LLM_*, API key required -- Cisco has no CLI-subscription path).
-Without any usable SkillSpector provider, Stage 1 runs static-only (--no-llm).
+Without any usable SkillSpector provider, Stage 1 runs static-only (--no-llm)
+and ends with exit 2 (no verdict) unless AGENT_GUARD_STATIC_ONLY=1 is set.
 
 Usage:
   python scan_mcp.py pypi  <package>[==version]      # fetch sdist, scan source
@@ -303,7 +305,8 @@ if target.is_file():
             summary["clean"] = 1
 elif target.is_dir():
     findings = analyzer.analyze_directory(str(target))
-    # An empty summary only says Cisco found nothing to scan. Cisco drops files under
+    # An empty summary only says Cisco found nothing to scan (Cisco leaves it
+    # empty only when no file is eligible; Cisco is not pinned, so this is an assumption). Cisco drops files under
     # dot directories and __pycache__, symlinks that leave the root, and cannot tell
     # text from a binary without puremagic. Count what it would check without those
     # exclusions so that the verdict can tell "nothing there" from "nothing looked at".
