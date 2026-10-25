@@ -83,6 +83,17 @@
   itself finds no checkable file. It counts the files Cisco would check
   without Cisco's path exclusions (dot directories, `__pycache__`, symlinks,
   no magic-byte library); more than Cisco looked at gives exit 2.
+  A file whose type detection fails (the detection is run again, because Cisco
+  swallows the error and calls the file text), an unreadable file, an unusable
+  Cisco private API (`_should_scan_file` missing or failing) and a
+  `file_magic` module that cannot be imported count every file. The helper
+  marks each summary as `file` or `directory`; a directory summary without the
+  count of checkable files, or a summary of unknown kind, gives exit 2 (it
+  used to pass when `total_to_scan` was above zero).
+- `scan_mcp.py` no longer reads its verdict from the stderr of the Cisco
+  scanner (it is still printed), so a summary line forged there cannot add to
+  or replace the real one. An incomplete or inconsistent hash-lookup summary
+  gives exit 2.
 - GuardDog and malcontent images run with `docker run --pull=always`, so
   their rules stay current. Offline means no verdict (exit 2), never SAFE.
 - `scan_url.py`: a repo with no skill and no package manifest gives exit 2

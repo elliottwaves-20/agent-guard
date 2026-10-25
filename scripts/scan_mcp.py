@@ -266,6 +266,7 @@ if target.is_file():
             h.update(chunk)
     file_hash = h.hexdigest()
     summary = {
+        "kind": "file",
         "total_found": 1,
         "total_to_scan": 1,
         "scanned": 0,
@@ -311,22 +312,33 @@ elif target.is_dir():
     # text from a binary without puremagic. Count what it would check without those
     # exclusions so that the verdict can tell "nothing there" from "nothing looked at".
     summary = dict(analyzer.last_scan_summary or {"total_to_scan": 0})
-    from mcpscanner.utils import file_magic
-    magic_ok = bool(getattr(file_magic, "_PUREMAGIC_AVAILABLE", False))
+    # Any problem with Cisco internals (private API, import) makes every file count.
+    try:
+        from mcpscanner.utils import file_magic
+        magic_ok = bool(getattr(file_magic, "_PUREMAGIC_AVAILABLE", False))
+        magic_file = file_magic.puremagic.magic_file
+    except Exception:
+        magic_ok, magic_file = False, None
+    should_scan = getattr(analyzer, "_should_scan_file", None)
     eligible = 0
     for entry in target.rglob("*"):
         try:
             if entry.is_symlink():
                 eligible += 1  # never followed, so never checked
             elif entry.is_file():
-                if not magic_ok or analyzer._should_scan_file(str(entry)):
+                if not magic_ok or should_scan is None or should_scan(str(entry)):
                     eligible += 1
-                else:
+                elif entry.stat().st_size > 0:
+                    # Cisco swallows a failing type detection and calls the file text.
+                    # Run the detection again: when it fails, the file counts. An empty
+                    # file has nothing to check and cannot be detected.
                     with entry.open("rb") as handle:
                         handle.read(1)  # an unreadable file cannot be judged
+                    magic_file(str(entry))
         except Exception:
             eligible += 1
     summary["agent_guard_eligible"] = eligible
+    summary["kind"] = "directory"
 else:
     print(json.dumps({"error": "missing_path"}))
     sys.exit(2)
@@ -767,10 +779,16 @@ def virustotal_verdict(report: dict) -> int:
             print("\n[BLOCK] VirusTotal counts malicious file(s). Do not install.")
             return 1
 
-    # agent-guard counts the checkable files itself (the helper adds the count to
-    # every directory summary). Cisco must have counted at least as many.
-    eligible = summary.get("agent_guard_eligible")
-    if eligible is not None or total == 0:
+    # The helper marks every summary with its kind. A directory summary must carry
+    # agent-guard's own count of checkable files, which Cisco must have matched; a
+    # summary of unknown kind or without the count cannot be trusted.
+    kind = summary.get("kind")
+    if kind not in ("file", "directory") or (kind == "file" and total != 1):
+        print("\n[WARN] NO VERDICT -- the VirusTotal summary does not say whether it "
+              "covers one file or a directory. Re-run the scan.")
+        return 2
+    if kind == "directory":
+        eligible = summary.get("agent_guard_eligible")
         found = summary.get("total_found", total)
         if type(eligible) is not int or eligible < 0:
             print("\n[WARN] NO VERDICT -- the VirusTotal summary has no valid count of "

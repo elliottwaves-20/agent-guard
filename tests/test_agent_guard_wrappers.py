@@ -724,7 +724,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         class Result:
             returncode = 0
             stdout = (
-                '{"summary": {"total_found": 1, "total_to_scan": 1, "scanned": 1, '
+                '{"summary": {"kind": "file", "total_found": 1, "total_to_scan": 1, "scanned": 1, '
                 '"clean": 1, "malicious": 0, "not_found": 0, "throttled": 0, '
                 '"failed": 0, "skipped_by_limit": 0}, "findings": []}'
             )
@@ -1131,8 +1131,9 @@ class SkillSpectorWrapperTests(unittest.TestCase):
     def test_virustotal_verdict_clean_known_hash_is_safe(self):
         scan_mcp = importlib.import_module("scan_mcp")
         self.assertEqual(scan_mcp.virustotal_verdict({
-            "summary": {"total_to_scan": 1, "scanned": 1, "clean": 1, "not_found": 0,
-                        "failed": 0, "throttled": 0, "skipped_by_limit": 0},
+            "summary": {"kind": "file", "total_to_scan": 1, "scanned": 1, "clean": 1,
+                        "not_found": 0, "failed": 0, "throttled": 0,
+                        "skipped_by_limit": 0},
             "findings": [],
         }), 0)
 
@@ -1155,20 +1156,39 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         # Zero files checked is only clean when agent-guard itself found nothing
         # checkable (agent_guard_eligible 0); a missing or bad count is no verdict.
         self.assertEqual(scan_mcp.virustotal_verdict(
-            {"summary": {"total_to_scan": 0, "agent_guard_eligible": 0},
-             "findings": []}), 0)
-        for report in ({"summary": {"total_to_scan": 0}, "findings": []},
-                       {"summary": {"total_to_scan": 0, "agent_guard_eligible": 1}},
-                       {"summary": {"total_to_scan": 0, "agent_guard_eligible": "0"}},
-                       {"summary": {"total_to_scan": 0, "agent_guard_eligible": True}},
-                       {"summary": {"total_to_scan": 0, "agent_guard_eligible": -1}},
-                       {"summary": {"total_found": 1, "total_to_scan": 1, "scanned": 1,
-                                    "clean": 1, "malicious": 0,
-                                    "agent_guard_eligible": 2}}):
+            {"summary": {"kind": "directory", "total_to_scan": 0,
+                         "agent_guard_eligible": 0}, "findings": []}), 0)
+        directory = {"kind": "directory", "total_to_scan": 0}
+        for report in ({"summary": directory, "findings": []},
+                       {"summary": dict(directory, agent_guard_eligible=1)},
+                       {"summary": dict(directory, agent_guard_eligible="0")},
+                       {"summary": dict(directory, agent_guard_eligible=True)},
+                       {"summary": dict(directory, agent_guard_eligible=-1)},
+                       {"summary": {"kind": "directory", "total_found": 1,
+                                    "total_to_scan": 1, "scanned": 1, "clean": 1,
+                                    "malicious": 0, "agent_guard_eligible": 2}}):
             self.assertEqual(scan_mcp.virustotal_verdict(report), 2, report)
         self.assertEqual(scan_mcp.virustotal_verdict(
-            {"summary": {"total_to_scan": 1, "scanned": 1, "clean": 1,
+            {"summary": {"kind": "file", "total_to_scan": 1, "scanned": 1, "clean": 1,
                          "malicious": 0}, "findings": []}), 0)
+
+    def test_virustotal_verdict_summary_without_a_known_kind_is_never_safe(self):
+        # A directory summary without agent_guard_eligible used to pass whenever
+        # total_to_scan was above zero. The kind decides which proof is required.
+        scan_mcp = importlib.import_module("scan_mcp")
+        counted = {"total_found": 1, "total_to_scan": 1, "scanned": 1, "clean": 1,
+                   "malicious": 0}
+        for report in ({"summary": dict(counted)},                       # no kind
+                       {"summary": dict(counted, kind="folder")},        # unknown kind
+                       {"summary": dict(counted, kind=None)},
+                       {"summary": dict(counted, kind="directory")},     # no count
+                       {"summary": dict(counted, kind="file", total_to_scan=2)},
+                       {"summary": {"kind": "file", "total_to_scan": 0}}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(scan_mcp.virustotal_verdict(report), 2, report)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(scan_mcp.virustotal_verdict({"summary": dict(
+                counted, kind="directory", agent_guard_eligible=1)}), 0)
 
     def test_virustotal_verdict_safe_needs_every_file_clean(self):
         scan_mcp = importlib.import_module("scan_mcp")
@@ -1176,6 +1196,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             "total_to_scan": 3, "scanned": 2, "clean": 2, "malicious": 0},
             "findings": []}), 2)
         self.assertEqual(scan_mcp.virustotal_verdict({"summary": {
+            "kind": "directory", "agent_guard_eligible": 3, "total_found": 3,
             "total_to_scan": 3, "scanned": 3, "clean": 3, "malicious": 0},
             "findings": []}), 0)
 
@@ -1186,6 +1207,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = scan_mcp.virustotal_verdict({"summary": {
+                "kind": "directory", "agent_guard_eligible": 2, "total_found": 2,
                 "total_to_scan": 2, "scanned": 2, "clean": 1, "malicious": 0,
                 "not_found": 1}, "findings": []})
         self.assertEqual(code, 2)
@@ -1212,12 +1234,19 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         return self._run_vt_helper(query_result)
 
     def _run_vt_helper(self, query_result, directory=False, dir_summary=None,
-                       files=None, puremagic=True, symlink=None):
+                       files=None, puremagic=True, symlink=None, magic_file=None,
+                       should_scan="stub", magic_import="ok", fake_symlink=None,
+                       unreadable=None):
         """Execute VT_HELPER against a stub analyzer; return the verdict.
 
         files: relative path -> bytes written instead of tool.exe (directory mode).
         The stub analyzer treats .exe and .pyc as scannable, like Cisco's list.
-        symlink: (link name, target name) created in the directory, if possible."""
+        symlink: (link name, target name) created in the directory, if possible.
+        fake_symlink: file name that Path.is_symlink reports as a link (no link is made).
+        magic_file: replaces puremagic.magic_file (default: identifies every file).
+        should_scan: "stub", "missing" or "raises" for Cisco's private _should_scan_file.
+        magic_import: "ok" or "fails" (the file_magic module cannot be imported).
+        unreadable: file name whose Path.open raises PermissionError."""
         import contextlib
         import io
         import tempfile
@@ -1251,12 +1280,21 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             def _should_scan_file(self, path):
                 return str(path).endswith((".exe", ".pyc"))
 
+        if should_scan == "missing":
+            del StubAnalyzer._should_scan_file
+        elif should_scan == "raises":
+            def _boom(self, path):
+                raise RuntimeError("private API changed")
+            StubAnalyzer._should_scan_file = _boom
+
         constants = types.ModuleType("mcpscanner.config.constants")
         constants.MCPScannerConstants = types.SimpleNamespace()
         analyzer_mod = types.ModuleType("mcpscanner.core.analyzers.virustotal_analyzer")
         analyzer_mod.VirusTotalAnalyzer = StubAnalyzer
         magic_mod = types.ModuleType("mcpscanner.utils.file_magic")
         magic_mod._PUREMAGIC_AVAILABLE = puremagic
+        magic_mod.puremagic = types.SimpleNamespace(
+            magic_file=magic_file or (lambda path: [object()]))
         stubs = {"mcpscanner": types.ModuleType("mcpscanner"),
                  "mcpscanner.utils": types.ModuleType("mcpscanner.utils"),
                  "mcpscanner.utils.file_magic": magic_mod,
@@ -1265,6 +1303,8 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                  "mcpscanner.core": types.ModuleType("mcpscanner.core"),
                  "mcpscanner.core.analyzers": types.ModuleType("mcpscanner.core.analyzers"),
                  "mcpscanner.core.analyzers.virustotal_analyzer": analyzer_mod}
+        if magic_import == "fails":
+            stubs["mcpscanner.utils.file_magic"] = None   # importing it raises ImportError
         old_modules = {k: sys.modules.get(k) for k in stubs}
         old_argv, old_env = sys.argv[:], os.environ.copy()
         with tempfile.TemporaryDirectory() as d:
@@ -1287,7 +1327,23 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 sys.modules.update(stubs)
                 sys.argv = ["-c", str(target), "1"]
                 os.environ["VIRUSTOTAL_API_KEY"] = "vt-test"
-                with contextlib.redirect_stdout(out):
+                real_is_symlink = Path.is_symlink
+
+                def is_symlink(path):
+                    if fake_symlink is not None and path.name == fake_symlink:
+                        return True
+                    return real_is_symlink(path)
+
+                real_open = Path.open
+
+                def open_(path, *args, **kwargs):
+                    if unreadable is not None and path.name == unreadable:
+                        raise PermissionError("denied")
+                    return real_open(path, *args, **kwargs)
+
+                with contextlib.redirect_stdout(out), \
+                        patch.object(Path, "is_symlink", is_symlink), \
+                        patch.object(Path, "open", open_):
                     exec(scan_mcp.VT_HELPER, {"__name__": "__main__"})
             finally:
                 for k, v in old_modules.items():
@@ -1319,6 +1375,50 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertEqual(self._run_vt_helper(
             (None, False, None), directory=True, dir_summary={},
             files={"README.md": b"# docs"}, symlink=("link.txt", "README.md")), 2)
+
+    def test_vt_helper_symlink_check_does_not_need_symlink_rights(self):
+        # Same branch as the real-link test above, without creating a link (Windows
+        # needs a privilege for that).
+        files = {"README.md": b"# docs", "link.txt": b"# docs"}
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={}, files=files,
+            fake_symlink="link.txt"), 2)
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={}, files=files), 0)
+
+    def test_vt_helper_unusable_cisco_private_api_counts_every_file(self):
+        files = {"README.md": b"# docs"}
+        for mode in ("missing", "raises"):
+            with self.subTest(should_scan=mode):
+                self.assertEqual(self._run_vt_helper(
+                    (None, False, None), directory=True, dir_summary={}, files=files,
+                    should_scan=mode), 2)
+        with self.subTest("file_magic cannot be imported"):
+            self.assertEqual(self._run_vt_helper(
+                (None, False, None), directory=True, dir_summary={}, files=files,
+                magic_import="fails"), 2)
+
+    def test_vt_helper_file_whose_type_detection_fails_counts(self):
+        # Cisco swallows a failing detection and calls the file text.
+        def failing(path):
+            raise ValueError("cannot identify")
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={},
+            files={"notes.txt": b"some text"}, magic_file=failing), 2)
+        # An empty file has nothing to detect or check.
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={},
+            files={"__init__.py": b""}, magic_file=failing), 0)
+
+    def test_vt_helper_unreadable_file_counts(self):
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={},
+            files={"README.md": b"# docs", "secret.txt": b"x"}, unreadable="secret.txt"), 2)
+
+    def test_vt_helper_marks_the_kind_of_every_summary(self):
+        scan_mcp = importlib.import_module("scan_mcp")
+        self.assertIn('summary["kind"] = "directory"', scan_mcp.VT_HELPER)
+        self.assertIn('"kind": "file"', scan_mcp.VT_HELPER)
 
     def test_vt_helper_missing_magic_library_is_not_clean(self):
         # Without puremagic Cisco cannot tell text from a renamed binary.

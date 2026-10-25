@@ -287,7 +287,9 @@ class ScanBoundaryTests(unittest.TestCase):
             self.assertEqual(scan_mcp.run_cisco(['mcp-scanner'], 'label'), 2)
 
     def test_virustotal_helper_failures_are_no_verdict(self):
-        clean = json.dumps({'summary': {'total_to_scan': 1, 'scanned': 1, 'clean': 1},
+        clean = json.dumps({'summary': {'kind': 'directory', 'agent_guard_eligible': 1,
+                                        'total_found': 1, 'total_to_scan': 1, 'scanned': 1,
+                                        'clean': 1},
                             'findings': []})
         cases = {
             'no output': subprocess.CompletedProcess([], 0, '', ''),
