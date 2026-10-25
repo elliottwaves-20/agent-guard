@@ -350,7 +350,10 @@ needs `--allow-host HOST[:PORT]` (repeatable, also applies to Stage 1b) or
 `AGENT_GUARD_SANDBOX_ALLOW=h1,h2`. Add a host only when the user confirms it
 belongs to the server's documented purpose — never to turn a BLOCK green.
 `--no-network` runs the target without network (only when nothing must be
-downloaded).
+downloaded). A Docker network with its own resolver needs
+`AGENT_GUARD_DNS_RESOLVERS=ip1,ip2` (UDP queries only; TCP to port 53 stays a
+finding). In the dynamic stage a listed resolver on a public address still
+blocks every package (exit 1), because OpenSSF cannot tell TCP from UDP there.
 
 A clean Stage 1 verdict does not prove runtime safety — use `--sandbox` for
 unfamiliar servers. Only after SAFE: `install_skill.py mcp ...` (see below).
