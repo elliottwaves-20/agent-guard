@@ -233,8 +233,12 @@ def safe_extract_zip(data: bytes, dest: Path) -> None:
 
 
 def first_child_dir(path: Path) -> Path:
-    children = [p for p in path.iterdir() if p.is_dir()]
-    return children[0] if len(children) == 1 else path
+    # Descend only into a lone folder. Files next to it (an install script, say)
+    # would otherwise never be scanned.
+    entries = list(path.iterdir())
+    if len(entries) == 1 and entries[0].is_dir() and not entries[0].is_symlink():
+        return entries[0]
+    return path
 
 
 def github_repo_key(url: str) -> tuple[str, str] | None:
@@ -494,14 +498,27 @@ def resolve_catalog_page(url: str, dest: Path) -> ResolvedSource:
 
 
 def package_from_url(url: str) -> tuple[str, str] | None:
+    """Return (ecosystem, spec). The spec carries the version of the URL
+    (`name==1.2` for PyPI, `name@1.2` for npm) so that exactly that version is
+    scanned; an unrecognised path tail is refused, never ignored."""
     parsed = urllib.parse.urlparse(url)
     host = parsed.netloc.lower()
     parts = [p for p in parsed.path.strip("/").split("/") if p]
     if host == "pypi.org" and len(parts) >= 2 and parts[0] == "project":
-        return "pypi", parts[1]
+        if len(parts) == 2:
+            return "pypi", parts[1]
+        if len(parts) == 3:
+            return "pypi", f"{parts[1]}=={parts[2]}"
+        raise FetchError(f"cannot tell which PyPI version {url} means")
     if host in {"www.npmjs.com", "npmjs.com"} and len(parts) >= 2 and parts[0] == "package":
-        name = "/".join(parts[1:3]) if parts[1].startswith("@") and len(parts) >= 3 else parts[1]
-        return "npm", name
+        scoped = parts[1].startswith("@") and len(parts) >= 3
+        name = "/".join(parts[1:3]) if scoped else parts[1]
+        tail = parts[3:] if scoped else parts[2:]
+        if not tail:
+            return "npm", name
+        if len(tail) == 2 and tail[0] == "v":
+            return "npm", f"{name}@{tail[1]}"
+        raise FetchError(f"cannot tell which npm version {url} means")
     return None
 
 

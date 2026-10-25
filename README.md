@@ -344,6 +344,7 @@ python scripts/scan_url.py "https://github.com/user/repo/tree/main/skills/foo" \
   --keep-source ~/Github/scanned-skill-foo --dry-run
 python scripts/scan_url.py "https://pypi.org/project/some-mcp-server/" --dry-run
 python scripts/scan_url.py "https://www.npmjs.com/package/@scope/server" --dry-run
+# a version in the URL (pypi.org/project/x/1.2.3/, npmjs.com/package/x/v/1.2.3) is scanned exactly
 python scripts/scan_url.py "https://example.com/marketplace/listing" --dry-run
 ```
 
@@ -378,7 +379,9 @@ MCP listings need one more classification step:
 For marketplace pages, `scan_url.py` scans discovered candidates automatically
 by default. `--dry-run` only means "do not install or modify agent configs";
 security scans still run. Use `--no-scan-candidates` only when you explicitly
-want to inspect the listing and candidate plan without following candidates.
+want to inspect the listing and candidate plan without following candidates;
+the exit code is then 2 (the candidates were not scanned), or 1 if the listing
+text itself is blocked.
 Use `--sandbox` to run live Docker-isolated Cisco runtime scans for discovered
 stdio install commands after their source/package scan.
 
@@ -438,7 +441,7 @@ wiring agent-guard into scripts or CI:
 
 - **No completed AI analysis.** A SAFE verdict needs an AI analysis that actually ran (any provider; only the report's `metadata.llm_available` counts). Without it the scan ends `static only` with exit 2, and scheduled updates (`update_skills.py`) quarantine the candidate while the old version stays active. `AGENT_GUARD_STATIC_ONLY=1` states that static checking is deliberately enough: it disables the AI analysis and accepts a dynamic stage you skipped with `--no-dynamic` (exit 0 instead of 2) for a clean static result. It does not skip the dynamic stage by itself.
 - **Skipped dynamic stage.** `--no-dynamic` (`scan_url.py`, `scan_mcp.py`, `scan_cli.py`) gives exit 2 unless `AGENT_GUARD_STATIC_ONLY=1` is set.
-- **Nothing was scanned.** `audit_installed.py` without `--execute` (NOT EXECUTED, for every listed scan), unreadable configs (also an `mcpServers` that is not an object) and entries whose source cannot be inferred: a `uvx`/`npx` entry with `--with`, an index, registry or find-links option, several different `npx -p` packages, an option the tool does not know, or an index or registry variable in `env`. With no skill or MCP server found there is nothing to scan and the exit code is 0. In `scan_url.py`: a repo with neither a skill nor a package manifest (unsupported repo layout), a skill collection with non-documentation files outside the skill folders, and marketplace candidates left out by `--max-candidates`.
+- **Nothing was scanned.** `audit_installed.py` without `--execute` (NOT EXECUTED, for every listed scan), unreadable configs (also an `mcpServers` that is not an object) and entries whose source cannot be inferred: a `uvx`/`npx` entry with `--with`, an index, registry or find-links option, several different `npx -p` packages, an option the tool does not know, or an index or registry variable in `env`. With no skill or MCP server found there is nothing to scan and the exit code is 0. In `scan_url.py`: a repo with neither a skill nor a package manifest (unsupported repo layout), a skill collection with non-documentation files outside the skill folders (prompt and instruction files such as `CLAUDE.md`, `.cursorrules` or `commands/*.md`, and `marketplace.json`/`plugin.json` with anything but metadata keys, are not documentation), and marketplace candidates left out by `--max-candidates` or by `--no-scan-candidates`.
 - **Incomplete hash lookup.** A missing, malformed or inconsistent hash-lookup summary, an unseen hash, a suspicious-only file, a file skipped by the file limit, or a directory in which agent-guard finds more checkable files than Cisco looked at (Cisco silently skips files under dot directories and `__pycache__`, symlinks and files whose type it cannot tell; agent-guard counts them itself, never follows symlinks, and gives exit 2 instead of SAFE).
 - **Stale scanner rules.** GuardDog and malcontent run with `docker run --pull=always`; if the image cannot be pulled (offline) there is no verdict, never SAFE.
 

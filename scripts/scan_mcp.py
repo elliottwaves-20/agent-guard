@@ -447,7 +447,9 @@ def fetch_npm(spec: str, dest: Path) -> str:
     meta = http_json(f"https://registry.npmjs.org/{name}")
     version = version or meta.get("dist-tags", {}).get("latest")
     version = meta.get("dist-tags", {}).get(version, version)
-    ver = meta["versions"][version]
+    ver = meta.get("versions", {}).get(version)
+    if not ver:
+        die(f"{name}@{version} does not exist on npm; refusing a different version.")
     url = ver["dist"]["tarball"]
     print(f"  fetching npm tarball: {url}")
     safe_extract_tar(http_bytes(url), dest)

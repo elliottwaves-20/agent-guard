@@ -63,6 +63,30 @@
   "unsupported repo layout" (no README-only check); so do skill collections
   with non-documentation files outside the skill folders and marketplace
   candidates skipped by `--max-candidates`.
+- `scan_url.py --no-scan-candidates` on a catalog page with candidates gives
+  exit 2 (a BLOCK of the listing text stays exit 1) and lists the candidates
+  that were not scanned.
+- `scan_url.py` skill collections: prompt and instruction files outside the
+  skill folders (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`,
+  `.windsurfrules`, `.github/copilot-instructions.md`, and `.md`/`.txt`/`.rst`
+  files under `commands`, `agents`, `prompts`, `rules`, `hooks`,
+  `output-styles`, `.claude`, `.cursor`, `.codex`, `.gemini`, `.windsurf`,
+  `.github/prompts`, `.github/instructions`) are no longer documentation and
+  give exit 2. SVG stays documentation (agent-guard installs only skill
+  folders, and agents do not execute SVG). `.gitmodules`, `.editorconfig` and
+  extensionless `CHANGELOG`, `CHANGES`, `HISTORY`, `AUTHORS`, `CONTRIBUTORS`
+  count as documentation. `.claude-plugin/marketplace.json` and `plugin.json`
+  count as documentation only when they are valid JSON with metadata keys
+  only; `hooks`, `mcpServers`, `lspServers`, `commands`, `agents`,
+  `outputStyles` or any other key, duplicate keys or wrong types give exit 2,
+  because those keys can make an agent run commands.
+- `scan_url.py` archives and repos: it no longer descends into a lone
+  top-level folder when files sit next to it (an `install.sh` was never
+  scanned).
+- `scan_url.py` PyPI/npm page URLs with a version
+  (`pypi.org/project/x/1.2.3/`, `npmjs.com/package/x/v/1.2.3`, also scoped)
+  scan exactly that version instead of the newest one; a version that does not
+  exist, or a URL tail that is not recognised, gives exit 2.
 - Cooldown: a skill branch without activity entries is accepted only if the
   repository creation time proves it older than the cooldown; otherwise the
   update stops (FAILED).

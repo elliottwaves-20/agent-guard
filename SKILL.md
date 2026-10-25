@@ -193,7 +193,8 @@ classify the listing before trusting anything:
 
 For marketplace URLs, `scan_url.py` follows and scans discovered candidates by
 default. `--dry-run` means no installation/config writes, not "skip security
-scans". Use `--no-scan-candidates` only to inspect the listing/candidate plan,
+scans". Use `--no-scan-candidates` only to inspect the listing/candidate plan
+(exit 2: the candidates are not scanned),
 and use `--sandbox` when discovered stdio install commands should also get a
 live Docker-isolated Cisco runtime scan.
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shlex
 import shutil
 import sys
@@ -37,18 +38,115 @@ def has_skill_manifest(path: Path) -> bool:
 DOC_SUFFIXES = {".md", ".markdown", ".txt", ".rst", ".png", ".jpg", ".jpeg", ".gif",
                 ".svg", ".webp"}
 DOC_NAME_PREFIXES = ("license", "copying", "notice")
-DOC_NAMES = {".gitignore", ".gitattributes"}
+DOC_NAMES = {".gitignore", ".gitattributes", ".gitmodules", ".editorconfig"}
+# Extensionless project files that only carry prose.
+DOC_BARE_NAMES = {"changelog", "changes", "history", "authors", "contributors"}
 DOC_DIRS = {".git", ".github"}
+# Text suffixes under which an agent can still read instructions.
+TEXT_SUFFIXES = {".md", ".markdown", ".txt", ".rst"}
+# Agents load these as instructions or prompts, so they are code for our
+# purposes even though they look like prose. .svg stays documentation: agent-guard
+# installs only skill folders and agents do not execute SVG.
+PROMPT_FILE_NAMES = {"claude.md", "agents.md", "gemini.md", ".cursorrules",
+                     ".windsurfrules", "copilot-instructions.md"}
+PROMPT_DIRS = {"commands", "agents", "prompts", "rules", "hooks", "output-styles",
+               ".claude", ".cursor", ".codex", ".gemini", ".windsurf"}
+# Parts below .github that are agent input (the rest of .github stays docs).
+GITHUB_PROMPT_DIRS = {"prompts", "instructions", "agents"}
+
+# Plugin/marketplace manifests count as documentation only when they hold pure
+# metadata: keys such as hooks, mcpServers, lspServers, commands, agents or
+# outputStyles can make an agent run commands.
+MANIFEST_TOP_KEYS = {"$schema", "name", "owner", "metadata", "description", "version",
+                     "author", "homepage", "repository", "license", "keywords",
+                     "plugins"}
+MANIFEST_PLUGIN_KEYS = {"name", "source", "description", "version", "author", "homepage",
+                        "repository", "license", "keywords", "category", "tags",
+                        "strict", "skills"}
+_STR, _STRS, _DICT, _STR_OR_DICT, _BOOL = "str", "strs", "dict", "str_or_dict", "bool"
+MANIFEST_TYPES = {
+    "$schema": _STR, "name": _STR, "owner": _DICT, "metadata": _DICT,
+    "description": _STR, "version": _STR, "author": _STR_OR_DICT, "homepage": _STR,
+    "repository": _STR_OR_DICT, "license": _STR, "keywords": _STRS, "source": _STR_OR_DICT,
+    "category": _STR, "tags": _STRS, "strict": _BOOL, "skills": "str_or_strs",
+}
 
 
-def is_documentation_file(rel: Path) -> bool:
+def _type_ok(value, kind: str) -> bool:
+    if kind == _STR:
+        return isinstance(value, str)
+    if kind == _STRS:
+        return isinstance(value, list) and all(isinstance(v, str) for v in value)
+    if kind == _DICT:
+        return isinstance(value, dict)
+    if kind == _STR_OR_DICT:
+        return isinstance(value, (str, dict))
+    if kind == _BOOL:
+        return isinstance(value, bool)
+    if kind == "str_or_strs":
+        return isinstance(value, str) or _type_ok(value, _STRS)
+    return False
+
+
+def _no_duplicate_keys(pairs):
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
+def is_pure_manifest_metadata(path: Path) -> bool:
+    """True only for valid JSON that holds nothing but allowed metadata keys."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"),
+                          object_pairs_hook=_no_duplicate_keys)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict) or not set(data) <= MANIFEST_TOP_KEYS:
+        return False
+    for key, value in data.items():
+        if key == "plugins":
+            if not isinstance(value, list):
+                return False
+            for entry in value:
+                if not isinstance(entry, dict) or not set(entry) <= MANIFEST_PLUGIN_KEYS:
+                    return False
+                if not all(_type_ok(v, MANIFEST_TYPES[k]) for k, v in entry.items()):
+                    return False
+        elif not _type_ok(value, MANIFEST_TYPES[key]):
+            return False
+    return True
+
+
+def is_documentation_file(rel: Path, root: Path | None = None) -> bool:
+    """True when `rel` is prose or metadata that no agent loads as instructions.
+
+    `root` is the source tree; without it manifest contents cannot be checked
+    and manifests are never documentation."""
     name = rel.name.lower()
-    if rel.parts and rel.parts[0].lower() in DOC_DIRS:
-        return True
+    suffix = rel.suffix.lower()
+    parts = [p.lower() for p in rel.parts]
+    dirs = parts[:-1]
+    in_github_prompts = (parts[:1] == [".github"] and len(parts) > 2
+                         and parts[1] in GITHUB_PROMPT_DIRS)
+    if name in PROMPT_FILE_NAMES:
+        return False
+    if suffix in TEXT_SUFFIXES and (in_github_prompts
+                                    or any(d in PROMPT_DIRS for d in dirs)):
+        return False
+    if parts[:1] == [".claude-plugin"] and name in {"marketplace.json", "plugin.json"}:
+        if root is None:
+            return False
+        if name == "plugin.json" or len(parts) == 2:
+            return is_pure_manifest_metadata(root / rel)
+        return False
+    if parts and parts[0] in DOC_DIRS:
+        # .github/prompts etc. are agent input, not docs
+        return not in_github_prompts
     if name.startswith(DOC_NAME_PREFIXES):
         # license.sh is code, not a license text
-        return rel.suffix.lower() in {"", ".md", ".markdown", ".txt", ".rst"}
-    return rel.suffix.lower() in DOC_SUFFIXES or name in DOC_NAMES
+        return suffix in {"", *TEXT_SUFFIXES}
+    return suffix in DOC_SUFFIXES or name in DOC_NAMES or name in DOC_BARE_NAMES
 
 
 def files_outside_skills(root: Path, skills: list) -> list[Path]:
@@ -62,7 +160,7 @@ def files_outside_skills(root: Path, skills: list) -> list[Path]:
         if any(sd == resolved.parent or sd in resolved.parents for sd in skill_dirs):
             continue
         rel = p.relative_to(root)
-        if is_documentation_file(rel):
+        if is_documentation_file(rel, root):
             continue
         out.append(rel)
     return out
@@ -502,7 +600,7 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
             rc = run_mcp_static(Path(d))
         rc = combine_verdicts(rc, run_dynamic_stage("npm", pinned, dynamic))
         if rc == 0:
-            offer_mcp_install(source.install_hint, "npx",
+            offer_mcp_install(pinned.rpartition("@")[0], "npx",
                               ["--silent", "-y", pinned], dry_run)
         return rc
 
@@ -576,7 +674,16 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
                     dry_run=dry_run
                 )
                 return combine_verdicts(rc, candidate_rc)
-            return rc
+            print("\n[BLOCK] NO VERDICT -- --no-scan-candidates: the listed candidates "
+                  "were NOT scanned, so only the listing text has a verdict:")
+            for label, items in (
+                ("source", source.source_urls or source.urls or []),
+                ("remote MCP", source.remote_urls or []),
+                ("install command", source.install_commands or []),
+            ):
+                for item in items:
+                    print(f"  - unscanned {label} candidate: {item}")
+            return combine_verdicts(rc, 2)
         return rc
 
     die(f"unsupported detected type: {kind}")
