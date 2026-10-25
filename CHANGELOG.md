@@ -8,6 +8,9 @@
 
 ### Changed
 
+- `llm_scan.py` no longer loses the exit code SkillSpector returns after it
+  wrote its report: a returned 1 or 2 (or anything that is not 0 or None)
+  counts as a scanner error and never as a clean run.
 - `install_skill.py` no longer ends with `[OK]` (exit 0) when the installed
   content is not what was scanned: extra files in the skills CLI copy or the
   synced copy, a changed file, a skill that is gone from the inbox path after

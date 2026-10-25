@@ -363,18 +363,31 @@ class ScanFailureTests(unittest.TestCase):
         with patch.object(self.llm_scan, "Budget", budget),              patch("_llm_adapter.install"),              patch.dict(sys.modules, {"skillspector": fake_pkg, "skillspector.cli": fake_cli}),              patch.dict(os.environ, {}),              contextlib.redirect_stdout(io.StringIO()):
             return self.llm_scan.scan(self.session, self.campaign, preview, POLICY)
 
-    def _app_writing(self, report, exit_code=None):
+    def _app_writing(self, report, exit_code=None, returns=None):
         def app(args, standalone_mode):
             if report is not None:
                 Path(args[args.index("--output") + 1]).write_text(
                     json.dumps(report), encoding="utf-8")
             if exit_code is not None:
                 raise SystemExit(exit_code)
+            return returns   # click returns typer.Exit(code=N) in non-standalone mode
         return app
 
     def test_control_complete_clean_run_is_safe(self):
         with patch("_llm_adapter.live_transport"):
             self.assertEqual(self._scan(self._app_writing(clean_report())), 0)
+
+    def test_returned_exit_code_of_the_scanner_is_never_lost(self):
+        # standalone_mode=False returns the code of typer.Exit instead of raising.
+        with patch("_llm_adapter.live_transport"):
+            for returned in (None, 0):
+                self.assertEqual(self._scan(self._app_writing(clean_report(), returns=returned)), 0)
+            self.assertNotEqual(self._scan(self._app_writing(clean_report(), returns=1)), 0)
+            for returned in (2, 3, -1, True, "0", "1", 1.0, [0]):
+                self.assertEqual(self._scan(self._app_writing(clean_report(), returns=returned)),
+                                 2, returned)
+            # SystemExit codes that are not 0/None get the same treatment.
+            self.assertEqual(self._scan(self._app_writing(clean_report(), exit_code="boom")), 2)
 
     def test_scanner_without_report_is_no_verdict(self):
         with patch("_llm_adapter.live_transport"):
