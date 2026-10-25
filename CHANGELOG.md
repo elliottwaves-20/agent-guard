@@ -5,6 +5,7 @@
 ### Security
 
 - Earlier versions could report unchecked or partly checked cases as SAFE (exit 0). Upgrade recommended.
+- Download names and GitHub subpaths are now confined to the scan directory.
 
 ### Changed
 
@@ -35,8 +36,9 @@
   enough": it disables the AI analysis and accepts a dynamic stage skipped
   with `--no-dynamic` (exit 0 instead of 2). It does not skip that stage by
   itself.
-- `--no-dynamic` gives exit 2 unless `AGENT_GUARD_STATIC_ONLY=1`
-  (`scan_url.py`, `scan_mcp.py`, `scan_cli.py`).
+- `--no-dynamic` gives at least exit 2 unless `AGENT_GUARD_STATIC_ONLY=1`
+  (`scan_url.py`, `scan_mcp.py`, `scan_cli.py`); a BLOCK from the static stage
+  still wins (exit 1).
 - `audit_installed.py` without `--execute` gives exit 2 (NOT EXECUTED) for
   every listed scan (with no skill or MCP server found there is nothing to
   scan, and the exit code is 0). Unreadable configs (including an `mcpServers`
@@ -102,6 +104,27 @@
   (`pypi.org/project/x/1.2.3/`, `npmjs.com/package/x/v/1.2.3`, also scoped)
   scan exactly that version instead of the newest one; a version that does not
   exist, or a URL tail that is not recognised, gives exit 2.
+- The AI verifier never clears E1 to E5 (data exfiltration) or TT1, TT2 and
+  TT4 (taint flows), the same as the P and AR rules: the text it judges comes
+  from the code under review.
+- Triage: a scanner block that rests only on the risk score or the
+  recommendation, with no finding the triage can judge, is `unclear` instead
+  of SAFE. The completeness check also runs when the wrapper exited 0, and a
+  reference that matches several bundled files is settled only through the
+  wrapper's reviewed baseline.
+- With `--deep`, a missing or unknown malcontent risk level for any file gives
+  exit 2 (`scan_cli.py`).
+- `scan_mcp.py`: an `Incomplete items` line that is repeated or unreadable
+  gives exit 2.
+- `scan_url.py --kind catalog|markdown` on a repository or directory gives
+  exit 2 instead of a README-only check; a skill collection without any skill
+  gives exit 2.
+- `SKILL.md` is recognised without regard to case. A raw file URL keeps its
+  sanitized file name and is typed `markdown` (by `.md`/`.markdown`) or `file`,
+  so a script is no longer scanned as README text. A GitHub subpath with `.`,
+  `..`, backslash or colon segments, outside the archive, or missing gives
+  exit 2. A download name that would leave the temp directory in `scan_cli.py`
+  gives exit 2.
 - Cooldown: a skill branch without activity entries is accepted only if the
   repository creation time proves it older than the cooldown; otherwise the
   update stops (FAILED).
