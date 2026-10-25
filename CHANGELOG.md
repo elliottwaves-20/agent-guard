@@ -8,6 +8,9 @@
 
 ### Changed
 
+- A failed YARA recheck or parse-span locator (timeout, crash, bad output) now
+  prints one `[WARN]` line with the reason. The findings still stay hard or
+  open as before; only the silence is gone.
 - `llm_scan.py` no longer loses the exit code SkillSpector returns after it
   wrote its report: a returned 1 or 2 (or anything that is not 0 or None)
   counts as a scanner error and never as a clean run.

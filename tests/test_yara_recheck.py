@@ -5,12 +5,16 @@ SkillSpector's environment against stealer paths that are assembled at run time,
 so this file never carries a signature the self-scan would match.
 """
 import base64
+import contextlib
 import importlib
+import io
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -79,6 +83,40 @@ class AnswerTests(unittest.TestCase):
         for item in ({"original": False, "corrected": False}, {"error": "x"}, None, [],
                      {"original": "yes", "corrected": False}, {"original": True}):
             self.assertIsNone(y.parse_answer(item), item)
+
+
+class FailureWarningTests(unittest.TestCase):
+    """A failed recheck stays unknown (None) and says why on stderr."""
+
+    def run_with(self, returncode=0, stdout=b"[]", exc=None):
+        done = type("Done", (), {"returncode": returncode, "stdout": stdout})()
+        rules = {"info_stealer": {"namespace": "malware", "original_sha256": "x"}}
+        with patch.object(y.subprocess, "run", side_effect=exc, return_value=done), \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            out = y.run_boot("python", [("info_stealer", Path("a.md"))], rules)
+        return out, err.getvalue()
+
+    def test_every_failure_is_unknown_and_warns(self):
+        for kw in ({"returncode": 1}, {"stdout": b"not json"}, {"stdout": b"[] []"},
+                   {"stdout": b"\xff"}, {"stdout": b"[1, 2]"},
+                   {"exc": subprocess.TimeoutExpired("x", 1)}, {"exc": OSError("missing")}):
+            with self.subTest(kw):
+                out, err = self.run_with(**kw)
+                self.assertEqual(out, [None])
+                self.assertIn("[WARN]", err)
+
+    def test_runner_exception_warns_with_its_reason(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        (Path(tmp.name) / "SKILL.md").write_text("x\n", encoding="utf-8")
+
+        def broken(checks, rules):
+            raise OSError("no venv")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            out = y.Rechecker(broken, y.load_corrections())(
+                Path(tmp.name), [("info_stealer", "malware", "SKILL.md")])
+        self.assertEqual(out, {("info_stealer", "malware", "SKILL.md"): None})
+        self.assertIn("no venv", err.getvalue())
 
 
 class RecheckerTests(unittest.TestCase):

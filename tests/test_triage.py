@@ -4,8 +4,10 @@ Reports are built by hand so every case names the one property it depends on.
 The calibration corpus (test_corpus.py) checks the same rules against real
 scanner output.
 """
+import contextlib
 import hashlib
 import importlib
+import io
 import os
 import sys
 import tempfile
@@ -344,6 +346,18 @@ class ParserLimitTests(unittest.TestCase):
             return {rel: spans for rel in rels}
         return skill.judge(report(coverage_issue("ref/crawl.md", **kw), *extra), spans=locate,
                            verifier=verifier, approved=approved)
+
+    def test_locator_failure_stays_open_and_says_why(self):
+        skill = Skill(self, {"SKILL.md": "# Acme\nSee the guide.\n[guide](ref/crawl.md)\n",
+                             "ref/crawl.md": GUIDE})
+
+        def broken(skill_dir, rels):
+            raise RuntimeError("no parser")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            result = skill.judge(report(coverage_issue("ref/crawl.md")), spans=broken)
+        self.assertEqual(result.verdict, t.UNCLEAR)
+        self.assertIn("[WARN]", err.getvalue())
+        self.assertIn("no parser", err.getvalue())
 
     def test_parse_limit_of_another_analyzer_stays_open(self):
         result = self.judge(analyzers=("static_yara",))
@@ -687,8 +701,11 @@ class YaraCorrectionTests(unittest.TestCase):
         class Broken(FakeRecheck):
             def __call__(self, skill_dir, checks):
                 raise RuntimeError("boom")
-        result = self.judge(None, recheck=Broken(None))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            result = self.judge(None, recheck=Broken(None))
         self.assertEqual(result.dispositions[0].status, t.HARD)
+        self.assertIn("[WARN]", err.getvalue())
+        self.assertIn("boom", err.getvalue())
 
     def test_without_rechecker_stays_hard(self):
         skill = Skill(self, {"SKILL.md": "x\n"})

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -467,7 +468,9 @@ def recheck_yara(findings: list, skill_dir: Path, yara, version: str) -> set:
         return set()
     try:
         answers = yara(Path(skill_dir), [(f.yara_rule, f.yara_namespace, f.file) for f in wanted])
-    except Exception:  # a failed recheck leaves the findings hard
+    except Exception as exc:  # a failed recheck leaves the findings hard
+        print(f"[WARN] YARA recheck failed ({type(exc).__name__}: {exc}); "
+              "the findings stay hard evidence.", file=sys.stderr)
         return set()
     if not isinstance(answers, dict):
         return set()
@@ -577,7 +580,9 @@ def locate_spans(findings: list, skill_dir: Path, spans) -> None:
         return
     try:
         found = spans(Path(skill_dir), [f.coverage_target for f in wanted])
-    except Exception:  # a failed locator leaves the findings open, nothing more
+    except Exception as exc:  # a failed locator leaves the findings open, nothing more
+        print(f"[WARN] parse-span locator failed ({type(exc).__name__}: {exc}); "
+              "the findings stay open.", file=sys.stderr)
         return
     for f in wanted:
         located = found.get(f.coverage_target) if isinstance(found, dict) else None
