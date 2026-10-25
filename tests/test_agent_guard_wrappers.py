@@ -2240,6 +2240,21 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertIn("node_modules", out)
 
+    def test_scan_url_collection_with_workflow_steps_outside_skills_is_no_verdict(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n", encoding="utf-8")
+            (src / ".github" / "workflows").mkdir(parents=True)
+            (src / ".github" / "workflows" / "ci.yml").write_text("on: push\n", encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            with patch.object(scan_url, "run_skill_static", return_value=0):
+                rc, out = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+            self.assertEqual(rc, 2)
+            self.assertIn("workflows", out)
+
     def test_scan_url_collection_with_only_docs_outside_skills_is_safe(self):
         from unittest.mock import patch
         scan_url = importlib.import_module("scan_url")
@@ -2249,8 +2264,8 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n", encoding="utf-8")
             (src / "README.md").write_text("# hi\n", encoding="utf-8")
             (src / "LICENSE").write_text("MIT\n", encoding="utf-8")
-            (src / ".github" / "workflows").mkdir(parents=True)
-            (src / ".github" / "workflows" / "ci.yml").write_text("on: push\n", encoding="utf-8")
+            (src / ".github" / "ISSUE_TEMPLATE").mkdir(parents=True)
+            (src / ".github" / "ISSUE_TEMPLATE" / "bug.yml").write_text("name: Bug\n", encoding="utf-8")
             source = scan_url.ResolvedSource(kind="github", source_path=src)
             with patch.object(scan_url, "run_skill_static", return_value=0):
                 rc, _ = self._quiet_scan_resolved(scan_url, source, dry_run=True)

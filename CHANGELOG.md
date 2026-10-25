@@ -116,7 +116,27 @@
   count as documentation only when they are valid JSON with metadata keys
   only; `hooks`, `mcpServers`, `lspServers`, `commands`, `agents`,
   `outputStyles` or any other key, duplicate keys or wrong types give exit 2,
-  because those keys can make an agent run commands.
+  because those keys can make an agent run commands. A plugin `source` counts
+  only as a string that starts with `./` and has no `..` part (a dict, URL,
+  `github:` form or absolute path points at code that is not scanned); the same
+  holds for `skills` entries and `metadata.pluginRoot`. Deeply nested JSON and
+  any other error while checking a manifest mean "not documentation", never a
+  crash with exit 1.
+- `scan_url.py` skill collections, wider block list (no allow list, so normal
+  collections keep their verdict): folders named `prompt(s)`, `command(s)`,
+  `agent(s)`, `rule(s)`, `chatmodes`, `instructions`, `hooks`, `workflows`
+  (any case), every dot folder except `.git`, `.github` except its issue,
+  discussion and pull request templates, funding and similar files, and
+  images; file names `agent.md`, `agents.md`, `claude.md`, `gemini.md`,
+  `copilot-instructions.md`, `.clinerules`, `.cursorrules`, `.windsurfrules`
+  and the suffixes `.prompt.md`, `.chatmode.md`, `.instructions.md` are not
+  documentation. `.github/workflows/*.yml` held executable steps and counted as
+  documentation before; it no longer does. Extensionless `LICENSE`,
+  `CHANGELOG`, `HISTORY` and the like are documentation only when they do not
+  start with `#!`.
+- `scan_url.py` prints `[NO VERDICT]` instead of `[BLOCK]` for the exit-2 lines
+  "no installable source", "candidate fetch failed" and "could not parse the
+  install command".
 - `scan_url.py` archives and repos: it no longer descends into a lone
   top-level folder when files sit next to it (an `install.sh` was never
   scanned).

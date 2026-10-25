@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import shutil
 import sys
@@ -39,24 +40,35 @@ DOC_SUFFIXES = {".md", ".markdown", ".txt", ".rst", ".png", ".jpg", ".jpeg", ".g
                 ".svg", ".webp"}
 DOC_NAME_PREFIXES = ("license", "copying", "notice")
 DOC_NAMES = {".gitignore", ".gitattributes", ".gitmodules", ".editorconfig"}
-# Extensionless project files that only carry prose.
+# Extensionless project files that only carry prose (documentation only when the
+# file does not start with a shebang).
 DOC_BARE_NAMES = {"changelog", "changes", "history", "authors", "contributors"}
-DOC_DIRS = {".git", ".github"}
+# The only dot directory that is documentation; every other dot directory holds
+# tool or agent configuration.
+DOC_DIRS = {".git"}
 # Text suffixes under which an agent can still read instructions.
 TEXT_SUFFIXES = {".md", ".markdown", ".txt", ".rst"}
 # Agents load these as instructions or prompts, so they are code for our
 # purposes even though they look like prose. .svg stays documentation: agent-guard
-# installs only skill folders and agents do not execute SVG.
-PROMPT_FILE_NAMES = {"claude.md", "agents.md", "gemini.md", ".cursorrules",
-                     ".windsurfrules", "copilot-instructions.md"}
-PROMPT_DIRS = {"commands", "agents", "prompts", "rules", "hooks", "output-styles",
-               ".claude", ".cursor", ".codex", ".gemini", ".windsurf"}
-# Parts below .github that are agent input (the rest of .github stays docs).
-GITHUB_PROMPT_DIRS = {"prompts", "instructions", "agents"}
+# installs only skill folders and agents do not execute SVG. This is a block list
+# on purpose: an allow list would send every normal collection to exit 2.
+PROMPT_FILE_NAMES = {"agent.md", "agents.md", "claude.md", "gemini.md",
+                     "copilot-instructions.md", ".clinerules", ".cursorrules",
+                     ".windsurfrules"}
+PROMPT_FILE_SUFFIXES = (".prompt.md", ".chatmode.md", ".instructions.md")
+PROMPT_DIRS = {"prompt", "prompts", "command", "commands", "agent", "agents", "rule",
+               "rules", "chatmodes", "instructions", "hooks", "workflows",
+               "output-styles"}
+# The parts of .github that carry no instructions or steps. .github/workflows
+# holds executable steps and is none of them.
+GITHUB_HARMLESS_DIRS = {"issue_template", "discussion_template", "pull_request_template"}
+GITHUB_HARMLESS_FILES = {"funding.yml", "funding.yaml", "codeowners", "dependabot.yml",
+                         "dependabot.yaml"}
 
 # Plugin/marketplace manifests count as documentation only when they hold pure
 # metadata: keys such as hooks, mcpServers, lspServers, commands, agents or
-# outputStyles can make an agent run commands.
+# outputStyles can make an agent run commands. A plugin whose source is not a
+# relative path inside the repo lives elsewhere, unscanned.
 MANIFEST_TOP_KEYS = {"$schema", "name", "owner", "metadata", "description", "version",
                      "author", "homepage", "repository", "license", "keywords",
                      "plugins"}
@@ -67,7 +79,7 @@ _STR, _STRS, _DICT, _STR_OR_DICT, _BOOL = "str", "strs", "dict", "str_or_dict", 
 MANIFEST_TYPES = {
     "$schema": _STR, "name": _STR, "owner": _DICT, "metadata": _DICT,
     "description": _STR, "version": _STR, "author": _STR_OR_DICT, "homepage": _STR,
-    "repository": _STR_OR_DICT, "license": _STR, "keywords": _STRS, "source": _STR_OR_DICT,
+    "repository": _STR_OR_DICT, "license": _STR, "keywords": _STRS, "source": _STR,
     "category": _STR, "tags": _STRS, "strict": _BOOL, "skills": "str_or_strs",
 }
 
@@ -95,13 +107,35 @@ def _no_duplicate_keys(pairs):
     return dict(pairs)
 
 
-def is_pure_manifest_metadata(path: Path) -> bool:
-    """True only for valid JSON that holds nothing but allowed metadata keys."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"),
-                          object_pairs_hook=_no_duplicate_keys)
-    except (OSError, ValueError):
+def _relative_path_inside(value) -> bool:
+    """A `./` path without `..` parts: it cannot leave the repository."""
+    if not isinstance(value, str) or not value.startswith("./") or "\0" in value:
         return False
+    return ".." not in re.split(r"[\\/]", value)
+
+
+def _plugin_paths_inside(entry: dict) -> bool:
+    if "source" in entry and not _relative_path_inside(entry["source"]):
+        return False
+    skills = entry.get("skills")
+    if skills is None:
+        return True
+    return all(_relative_path_inside(s) for s in ([skills] if isinstance(skills, str) else skills))
+
+
+def is_pure_manifest_metadata(path: Path) -> bool:
+    """True only for valid JSON that holds nothing but allowed metadata keys.
+
+    Any error while checking (also a RecursionError from deeply nested JSON)
+    means the manifest is not documentation."""
+    try:
+        return _is_pure_manifest(json.loads(path.read_text(encoding="utf-8"),
+                                            object_pairs_hook=_no_duplicate_keys))
+    except Exception:
+        return False
+
+
+def _is_pure_manifest(data) -> bool:
     if not isinstance(data, dict) or not set(data) <= MANIFEST_TOP_KEYS:
         return False
     for key, value in data.items():
@@ -113,26 +147,56 @@ def is_pure_manifest_metadata(path: Path) -> bool:
                     return False
                 if not all(_type_ok(v, MANIFEST_TYPES[k]) for k, v in entry.items()):
                     return False
+                if not _plugin_paths_inside(entry):
+                    return False
         elif not _type_ok(value, MANIFEST_TYPES[key]):
             return False
+    root_dir = (data.get("metadata") or {}).get("pluginRoot")
+    if root_dir is not None and not _relative_path_inside(root_dir):
+        return False
     return True
+
+
+def _has_no_shebang(root: Path | None, rel: Path) -> bool:
+    """True when the file is readable and does not start with a shebang."""
+    if root is None:
+        return False
+    try:
+        with (root / rel).open("rb") as handle:
+            return handle.read(2) != b"#!"
+    except OSError:
+        return False
+
+
+def _github_file_is_harmless(parts: list[str], name: str, suffix: str) -> bool:
+    rest = parts[1:]
+    if len(rest) == 1:
+        return suffix in DOC_SUFFIXES or name in GITHUB_HARMLESS_FILES
+    if rest[0] in GITHUB_HARMLESS_DIRS:
+        return suffix in DOC_SUFFIXES or suffix in {".yml", ".yaml"}
+    # images in other folders (screenshots for the README) carry no instructions
+    return suffix in DOC_SUFFIXES - TEXT_SUFFIXES
 
 
 def is_documentation_file(rel: Path, root: Path | None = None) -> bool:
     """True when `rel` is prose or metadata that no agent loads as instructions.
 
-    `root` is the source tree; without it manifest contents cannot be checked
-    and manifests are never documentation."""
+    `root` is the source tree; without it manifest contents and extensionless
+    files cannot be checked and are never documentation."""
+    try:
+        return _is_documentation_file(rel, root)
+    except Exception:
+        return False
+
+
+def _is_documentation_file(rel: Path, root: Path | None) -> bool:
     name = rel.name.lower()
     suffix = rel.suffix.lower()
     parts = [p.lower() for p in rel.parts]
     dirs = parts[:-1]
-    in_github_prompts = (parts[:1] == [".github"] and len(parts) > 2
-                         and parts[1] in GITHUB_PROMPT_DIRS)
-    if name in PROMPT_FILE_NAMES:
+    if name in PROMPT_FILE_NAMES or name.endswith(PROMPT_FILE_SUFFIXES):
         return False
-    if suffix in TEXT_SUFFIXES and (in_github_prompts
-                                    or any(d in PROMPT_DIRS for d in dirs)):
+    if suffix in TEXT_SUFFIXES and any(d in PROMPT_DIRS for d in dirs):
         return False
     if parts[:1] == [".claude-plugin"] and name in {"marketplace.json", "plugin.json"}:
         if root is None:
@@ -140,13 +204,18 @@ def is_documentation_file(rel: Path, root: Path | None = None) -> bool:
         if name == "plugin.json" or len(parts) == 2:
             return is_pure_manifest_metadata(root / rel)
         return False
-    if parts and parts[0] in DOC_DIRS:
-        # .github/prompts etc. are agent input, not docs
-        return not in_github_prompts
+    if parts[:1] == [".github"]:
+        return _github_file_is_harmless(parts, name, suffix)
+    if any(d.startswith(".") and d not in DOC_DIRS for d in dirs):
+        return False   # .claude, .cursor, .roo, .kiro, .clinerules ...
     if name.startswith(DOC_NAME_PREFIXES):
         # license.sh is code, not a license text
-        return suffix in {"", *TEXT_SUFFIXES}
-    return suffix in DOC_SUFFIXES or name in DOC_NAMES or name in DOC_BARE_NAMES
+        if suffix == "":
+            return _has_no_shebang(root, rel)
+        return suffix in TEXT_SUFFIXES
+    if name in DOC_BARE_NAMES:
+        return _has_no_shebang(root, rel)
+    return suffix in DOC_SUFFIXES or name in DOC_NAMES
 
 
 def files_outside_skills(root: Path, skills: list) -> list[Path]:
@@ -404,7 +473,7 @@ def print_marketplace_candidate_summary(source: ResolvedSource) -> bool:
         for command in install_commands[:50]:
             print(f"  - {command}")
     if not has_candidate:
-        print("[BLOCK] NO INSTALLABLE SOURCE -- marketplace/catalog page was "
+        print("[NO VERDICT] NO INSTALLABLE SOURCE -- marketplace/catalog page was "
               "read and scanned as text, but no concrete local package/source, "
               "remote MCP URL, or install command was discovered. This is not a "
               "verdict for the listed skill or MCP. Use a direct "
@@ -482,7 +551,7 @@ def scan_candidate_source_url(url: str) -> int:
         try:
             source = resolve_url(url, Path(d))
         except FetchError as e:
-            print(f"[BLOCK] candidate fetch failed: {e}")
+            print(f"[NO VERDICT] candidate fetch failed: {e}")
             return 2
         return scan_resolved(source, "auto", dry_run=True)
 
@@ -501,7 +570,7 @@ def scan_install_command(command: str, sandbox: bool, dry_run: bool) -> int:
         try:
             args = shlex.split(command, posix=True)
         except ValueError:
-            print("[BLOCK] Could not parse install command for sandbox runtime scan.")
+            print("[NO VERDICT] Could not parse install command for sandbox runtime scan.")
             return combine_verdicts(rc, 2)
         sandbox_rc = run_sandbox(args)
         rc = combine_verdicts(rc, sandbox_rc)
