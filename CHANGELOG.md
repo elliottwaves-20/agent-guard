@@ -22,8 +22,24 @@
   itself.
 - `--no-dynamic` gives exit 2 unless `AGENT_GUARD_STATIC_ONLY=1`
   (`scan_url.py`, `scan_mcp.py`, `scan_cli.py`).
-- `audit_installed.py` without `--execute` gives exit 2 (NOT EXECUTED);
-  unreadable configs and entries whose source cannot be inferred give exit 2.
+- `audit_installed.py` without `--execute` gives exit 2 (NOT EXECUTED) for
+  every listed scan (with no skill or MCP server found there is nothing to
+  scan, and the exit code is 0). Unreadable configs (including an `mcpServers`
+  that is not an object) and entries whose source cannot be inferred give
+  exit 2.
+- `audit_installed.py` reads `uvx` and `npx` entries with one option table per
+  launcher. `uvx -p/--python` is a Python version, never the package; `npx
+  -p/--package` is the package, and two different ones give exit 2. The option
+  check now runs before the `uvx --from git+https://github.com/...` shortcut.
+  An entry is not inferable (exit 2) with `--with`/`-w`, `--with-editable`,
+  `--with-requirements`, an index or find-links option (`--index`,
+  `--default-index`, `-i`/`--index-url`, `--extra-index-url`, `-f`), `uvx`
+  constraint, override, env-file, config-file, project or directory options,
+  `npx --registry`, `--userconfig`, `-c`/`--call`, workspace and prefix
+  options (also in `--opt=value` form), any option the tables do not know, or
+  an index or registry variable in the entry's `env` (`UV_INDEX*`,
+  `UV_FIND_LINKS`, `PIP_*INDEX_URL`, `PIP_FIND_LINKS`, `npm_config_*registry*`,
+  `npm_config_userconfig`). The Codex `[mcp_servers.NAME.env]` table counts too.
 - `AGENT_GUARD_DNS_RESOLVERS` (comma-separated IP addresses) names resolvers
   that count as the sandbox's own resolver on port 53 even when they are
   public addresses (Linux Docker bridges copy the host's DNS servers);

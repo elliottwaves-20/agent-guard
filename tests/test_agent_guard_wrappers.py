@@ -2355,7 +2355,13 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             ({"command": "npx", "args": ["-y", "pkg", "stdio"]}, "npm"),
             ({"command": "uvx", "args": ["pkg", "serve"]}, "pypi"),
             ({"command": "uvx", "args": ["--python", "3.12", "pkg"]}, "pypi"),
+            ({"command": "uvx", "args": ["-p", "3.12", "pkg"]}, "pypi"),
+            ({"command": "uvx", "args": ["-p=3.12", "pkg"]}, "pypi"),
+            ({"command": "uvx", "args": ["--python=3.12", "--from", "pkg", "cmd"]}, "pypi"),
+            ({"command": "uvx", "args": ["pkg", "--port", "3000"]}, "pypi"),
             ({"command": "npx", "args": ["-p", "pkg", "bin"]}, "npm"),
+            ({"command": "npx", "args": ["-y", "pkg", "--registry", "x"]}, "npm"),
+            ({"command": "npx", "args": ["-p", "pkg", "-p", "pkg", "bin"]}, "npm"),
             ({"command": "npx", "args": ["--package=pkg", "bin"]}, "npm"),
             ({"command": "npx", "args": ["--package", "pkg", "bin"]}, "npm"),
             ({"command": "uvx", "args": ["--from", "pkg", "cmd"]}, "pypi"),
@@ -2377,6 +2383,167 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         ]
         for entry in cases:
             self.assertIsNone(audit.mcp_source_scan_command(entry), entry)
+
+    def test_audit_launch_with_index_or_source_options_is_not_inferred(self):
+        audit = importlib.import_module("audit_installed")
+        uv_options = ["--with", "-w", "--with-editable", "--with-requirements", "--index",
+                      "--default-index", "--index-url", "-i", "--extra-index-url",
+                      "--find-links", "-f", "--constraints", "-c", "--overrides",
+                      "--build-constraints", "-b", "--env-file", "--config-file",
+                      "--project", "--directory"]
+        cases = []
+        for opt in uv_options:
+            cases.append({"command": "uvx", "args": [opt, "v", "pkg"]})
+            cases.append({"command": "uvx", "args": [f"{opt}=v", "pkg"]})
+            cases.append({"command": "uvx", "args": [opt, "v", "--from", "pkg", "cmd"]})
+            cases.append({"command": "uvx", "args": [
+                opt, "v", "--from", "git+https://github.com/a/b", "cmd"]})
+            cases.append({"command": "uvx", "args": [
+                "--from=git+https://github.com/a/b", f"{opt}=v", "cmd"]})
+        cases.append({"command": "uvx", "args": ["--no-index", "pkg"]})
+        for opt in ["--registry", "--userconfig", "--globalconfig", "-c", "--call",
+                    "-w", "--workspace", "--prefix"]:
+            cases.append({"command": "npx", "args": [opt, "v", "pkg"]})
+            cases.append({"command": "npx", "args": ["-y", f"{opt}=v", "pkg"]})
+        for entry in cases:
+            self.assertIsNone(audit.mcp_source_scan_command(entry), entry)
+
+    def test_audit_github_shortcut_still_checks_options(self):
+        audit = importlib.import_module("audit_installed")
+        url = "git+https://github.com/example/mcp"
+        expected = ["python", "scripts/scan_url.py", "https://github.com/example/mcp"]
+        self.assertEqual(
+            audit.mcp_source_scan_command({"command": "uvx", "args": ["--from", url, "cmd"]}),
+            expected)
+        self.assertEqual(
+            audit.mcp_source_scan_command({"command": "uvx", "args": [f"--from={url}", "cmd"]}),
+            expected)
+        self.assertIsNone(audit.mcp_source_scan_command(
+            {"command": "uvx", "args": ["--from", url, "--with", "evilpkg", "cmd"]}))
+        self.assertIsNone(audit.mcp_source_scan_command(
+            {"command": "uvx", "args": ["--from", url, "--index-url=https://i.example", "cmd"]}))
+        self.assertIsNone(audit.mcp_source_scan_command(
+            {"command": "uvx", "args": ["--from", "git+https://example.org/a/b", "cmd"]}))
+
+    def test_audit_launch_with_unknown_option_is_not_inferred(self):
+        audit = importlib.import_module("audit_installed")
+        for entry in (
+            {"command": "uvx", "args": ["--frobnicate", "pkg", "cmd"]},
+            {"command": "uvx", "args": ["--frobnicate=1", "pkg"]},
+            {"command": "npx", "args": ["--frobnicate", "pkg", "cmd"]},
+            {"command": "npx", "args": ["-y", "--@scope:registry=https://r.example", "pkg"]},
+            {"command": "uvx", "args": ["--python"]},          # value missing
+            {"command": "uvx", "args": ["--from"]},
+        ):
+            self.assertIsNone(audit.mcp_source_scan_command(entry), entry)
+
+    def test_audit_launcher_option_tables_are_separate(self):
+        audit = importlib.import_module("audit_installed")
+        # -p is the Python version for uvx but the package for npx
+        self.assertEqual(
+            audit.mcp_source_scan_command({"command": "uvx", "args": ["-p", "3.12", "pkg"]}),
+            ["python", "scripts/scan_mcp.py", "pypi", "pkg"])
+        self.assertEqual(
+            audit.mcp_source_scan_command({"command": "npx", "args": ["-p", "pkg", "bin"]}),
+            ["python", "scripts/scan_mcp.py", "npm", "pkg"])
+        # --package exists for npx only, --python for uvx only
+        self.assertIsNone(audit.mcp_source_scan_command(
+            {"command": "uvx", "args": ["--package", "pkg", "cmd"]}))
+        self.assertIsNone(audit.mcp_source_scan_command(
+            {"command": "npx", "args": ["--python", "3.12", "pkg"]}))
+
+    def test_audit_npx_with_several_packages_is_not_inferred(self):
+        audit = importlib.import_module("audit_installed")
+        self.assertIsNone(audit.mcp_source_scan_command(
+            {"command": "npx", "args": ["-p", "pkg1", "-p", "pkg2", "cmd"]}))
+        self.assertIsNone(audit.mcp_source_scan_command(
+            {"command": "npx", "args": ["--package=pkg1", "--package", "pkg2", "cmd"]}))
+
+    def test_audit_index_and_registry_env_makes_launch_not_inferable(self):
+        audit = importlib.import_module("audit_installed")
+        uv_names = ["UV_INDEX", "UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_EXTRA_INDEX_URL",
+                    "UV_FIND_LINKS", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS",
+                    "uv_index_url"]
+        for name in uv_names:
+            entry = {"command": "uvx", "args": ["pkg"], "env": {name: "https://i.example"}}
+            self.assertIsNone(audit.mcp_source_scan_command(entry), name)
+        for name in ["npm_config_registry", "NPM_CONFIG_REGISTRY", "npm_config_@scope:registry",
+                     "NPM_CONFIG_USERCONFIG", "npm_config_userconfig"]:
+            entry = {"command": "npx", "args": ["pkg"], "env": {name: "x"}}
+            self.assertIsNone(audit.mcp_source_scan_command(entry), name)
+        github = {"command": "uvx", "args": ["--from", "git+https://github.com/a/b", "cmd"],
+                  "env": {"UV_INDEX_URL": "https://i.example"}}
+        self.assertIsNone(audit.mcp_source_scan_command(github))
+        # unrelated variables do not matter, nor do the other launcher's
+        entry = {"command": "uvx", "args": ["pkg"], "env": {"API_TOKEN": "x", "PATH": "y"}}
+        self.assertEqual(audit.mcp_source_scan_command(entry),
+                         ["python", "scripts/scan_mcp.py", "pypi", "pkg"])
+        entry = {"command": "npx", "args": ["pkg"], "env": {"UV_INDEX_URL": "x"}}
+        self.assertEqual(audit.mcp_source_scan_command(entry),
+                         ["python", "scripts/scan_mcp.py", "npm", "pkg"])
+
+    def test_audit_codex_env_subsection_reaches_the_index_check(self):
+        audit = importlib.import_module("audit_installed")
+        with tempfile.TemporaryDirectory() as src_dir:
+            cfg = Path(src_dir) / "config.toml"
+            cfg.write_text(
+                "\n".join([
+                    "[mcp_servers.example]",
+                    'command = "uvx"',
+                    'args = ["pkg"]',
+                    "[mcp_servers.example.env]",
+                    'UV_INDEX_URL = "https://i.example"',
+                ]),
+                encoding="utf-8",
+            )
+            servers = audit.read_codex_mcp_servers(cfg)
+            self.assertIn("UV_INDEX_URL", servers["example"]["env"])
+            self.assertIsNone(audit.mcp_source_scan_command(servers["example"]))
+
+    def test_audit_installed_not_inferable_entry_is_never_safe(self):
+        entries = [
+            {"command": "uvx", "args": ["--with", "evil", "pkg"]},
+            {"command": "uvx", "args": ["--from", "git+https://github.com/a/b",
+                                        "--index-url=https://i.example", "cmd"]},
+            {"command": "npx", "args": ["-p", "a", "-p", "b", "cmd"]},
+            {"command": "uvx", "args": ["pkg"], "env": {"UV_INDEX_URL": "https://i.example"}},
+        ]
+        for entry in entries:
+            servers = [("claude-code", "x", entry)]
+            # every scan that does run is SAFE; the unverifiable source still gives 2
+            self.assertEqual(self._audit_mcps_with(servers, [0, 0, 0]), 2, entry)
+
+    def test_audit_installed_mcp_servers_that_are_not_an_object_are_no_verdict(self):
+        audit = importlib.import_module("audit_installed")
+        for bad in ([], ["a"], "text", 5, {"a": "string-entry"}, {"a": ["x"]},
+                    {"a": {"command": "uvx", "args": "pkg"}},
+                    {"a": {"command": "uvx", "args": ["pkg"], "env": ["X"]}}):
+            with tempfile.TemporaryDirectory() as src_dir:
+                cfg = Path(src_dir) / "cfg.json"
+                cfg.write_text(json.dumps({"mcpServers": bad}), encoding="utf-8")
+                err = io.StringIO()
+                with patch.object(audit.install_skill, "CLAUDE_DESKTOP_CONFIG", cfg), \
+                        patch.object(audit.install_skill, "detect_tools",
+                                     return_value={"claude-desktop": True}), \
+                        patch.object(audit, "installed_skill_dirs", return_value=[]), \
+                        patch.object(audit, "run", return_value=0), \
+                        contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(err):
+                    rc = audit.audit_installed("mcps", True, None)
+                self.assertEqual(rc, 2, bad)
+                self.assertIn("NO VERDICT", err.getvalue())
+                self.assertIn("mcpServers", err.getvalue())
+
+    def test_audit_installed_missing_or_null_mcp_servers_is_empty(self):
+        audit = importlib.import_module("audit_installed")
+        for data in ({}, {"mcpServers": None}, {"mcpServers": {}}):
+            with tempfile.TemporaryDirectory() as src_dir:
+                cfg = Path(src_dir) / "cfg.json"
+                cfg.write_text(json.dumps(data), encoding="utf-8")
+                with patch.object(audit.install_skill, "CLAUDE_DESKTOP_CONFIG", cfg), \
+                        patch.object(audit.install_skill, "detect_tools",
+                                     return_value={"claude-desktop": True}):
+                    self.assertEqual(audit.installed_mcp_servers(None), [], data)
 
     def _audit_mcps_with(self, servers, codes):
         audit = importlib.import_module("audit_installed")
