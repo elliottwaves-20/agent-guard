@@ -426,6 +426,14 @@ runtime checks are routed through `scan_mcp.py sandbox`. The audit also prints
 removal guidance for each detected item; review and remove malicious entries
 from the relevant agent config before restarting the affected agent.
 
+Limits of the source inference: the Codex config is read with a TOML parser
+(a file that does not parse, or a `command`, `url`, `args` or `env` of the wrong
+type, is exit 2). Global configuration files that change the package source
+(`.npmrc`, `uv.toml`, `pip.conf`, or a file named by `UV_CONFIG_FILE`,
+`UV_PROJECT` or `UV_ENV_FILE`) are not read: the three variables make an entry
+not inferable (exit 2), the files themselves are a known limit. With `--tool`,
+a chosen tool that is not found on this machine is exit 2, not an empty audit.
+
 Scanner errors or empty output mean **no verdict** — never treat a failed scan as safe. Exit 1 with a report is a real verdict; exit 2 is never one, with or without a report (skill scans exit 0 = SAFE: score <= 50, no HIGH/CRITICAL finding, every file inspected; 1 = BLOCK: score > 50, a DO_NOT_INSTALL recommendation, any single HIGH/CRITICAL finding, or a partial inspection limited to passages the shell parser gave up on; 2 = no verdict: errors, missing AI analysis or any other incomplete inspection).
 
 ### Exit codes

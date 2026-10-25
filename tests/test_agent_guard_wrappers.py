@@ -2396,6 +2396,33 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("NOT EXECUTED -- rerun with --execute for a verdict", buf.getvalue())
 
+    def test_audit_chosen_tool_that_is_not_found_is_no_verdict(self):
+        audit = importlib.import_module("audit_installed")
+        err = io.StringIO()
+        with patch.object(audit, "installed_skill_dirs", return_value=[]), \
+                patch.object(audit, "installed_mcp_servers", return_value=[]), \
+                patch.object(audit.install_skill, "detect_tools",
+                             return_value={"codex": False}), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(audit.audit_installed("all", True, ["codex"]), 2)
+        self.assertIn("codex", err.getvalue())
+
+    def test_audit_chosen_tool_that_is_found_but_empty_is_clean(self):
+        audit = importlib.import_module("audit_installed")
+        with patch.object(audit, "installed_skill_dirs", return_value=[]), \
+                patch.object(audit, "installed_mcp_servers", return_value=[]), \
+                patch.object(audit.install_skill, "detect_tools",
+                             return_value={"codex": True}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(audit.audit_installed("all", True, ["codex"]), 0)
+
+    def test_audit_without_chosen_tool_nothing_installed_stays_clean(self):
+        audit = importlib.import_module("audit_installed")
+        with patch.object(audit, "installed_skill_dirs", return_value=[]), \
+                patch.object(audit, "installed_mcp_servers", return_value=[]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(audit.audit_installed("all", True, None), 0)
+
     def test_audit_read_json_raises_on_broken_file_and_ignores_missing(self):
         audit = importlib.import_module("audit_installed")
         with tempfile.TemporaryDirectory() as src_dir:
@@ -2421,6 +2448,62 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             with patch.object(Path, "read_text", side_effect=OSError("denied")):
                 with self.assertRaises(audit.ConfigReadError):
                     audit.read_codex_mcp_servers(cfg)
+
+    def _codex_servers(self, text):
+        audit = importlib.import_module("audit_installed")
+        with tempfile.TemporaryDirectory() as src_dir:
+            cfg = Path(src_dir) / "config.toml"
+            cfg.write_text(text, encoding="utf-8")
+            return audit.read_codex_mcp_servers(cfg)
+
+    def test_audit_codex_multiline_args_are_read_completely(self):
+        audit = importlib.import_module("audit_installed")
+        servers = self._codex_servers(
+            '[mcp_servers.x]\ncommand = "npx"\nargs = ["-y",\n'
+            '  "--registry=http://evil.example",  # "comment"\n  "pkg"]\n')
+        self.assertEqual(servers["x"]["args"], ["-y", "--registry=http://evil.example", "pkg"])
+        self.assertIsNone(audit.mcp_source_scan_command(servers["x"]))
+        self.assertEqual(audit.mcp_sandbox_command(servers["x"])[-3:],
+                         ["-y", "--registry=http://evil.example", "pkg"])
+
+    def test_audit_codex_env_table_with_several_lines_is_read_completely(self):
+        audit = importlib.import_module("audit_installed")
+        servers = self._codex_servers(
+            '[mcp_servers.x]\ncommand = "uvx"\nargs = ["pkg"]\n'
+            '[mcp_servers.x.env]\nOTHER = "1"\n# note\nUV_INDEX_URL = "http://evil.example"\n')
+        self.assertEqual(set(servers["x"]["env"]), {"UV_INDEX_URL", "OTHER"})
+        self.assertNotIn("http://evil.example", str(servers["x"]["env"]))
+        self.assertIsNone(audit.mcp_source_scan_command(servers["x"]))
+
+    def test_audit_codex_env_table_before_server_table_is_kept(self):
+        audit = importlib.import_module("audit_installed")
+        servers = self._codex_servers(
+            '[mcp_servers.x.env]\nUV_INDEX_URL = "http://evil.example"\n\n'
+            '[mcp_servers.x]\ncommand = "uvx"\nargs = ["pkg"]\n')
+        self.assertIn("UV_INDEX_URL", servers["x"]["env"])
+        self.assertIsNone(audit.mcp_source_scan_command(servers["x"]))
+
+    def test_audit_codex_inline_server_table_is_read(self):
+        servers = self._codex_servers(
+            '[mcp_servers]\nx = { command = "uvx", args = ["pkg"] }\n')
+        self.assertEqual(servers["x"]["command"], "uvx")
+
+    def test_audit_codex_invalid_toml_or_wrong_types_are_config_read_errors(self):
+        audit = importlib.import_module("audit_installed")
+        bad = [
+            '[mcp_servers.x\ncommand = "uvx"',
+            '[mcp_servers.x]\ncommand = "uvx"\nargs = "pkg"\n',
+            '[mcp_servers.x]\ncommand = "uvx"\nargs = ["pkg", 3]\n',
+            '[mcp_servers.x]\ncommand = 5\n',
+            '[mcp_servers.x]\nurl = ["a"]\n',
+            '[mcp_servers.x]\ncommand = "uvx"\nenv = "A=B"\n',
+            'mcp_servers = "x"\n',
+            '[mcp_servers]\nx = 3\n',
+        ]
+        for text in bad:
+            with self.subTest(text=text):
+                with self.assertRaises(audit.ConfigReadError):
+                    self._codex_servers(text)
 
     def test_audit_picks_package_from_first_positional_argument(self):
         audit = importlib.import_module("audit_installed")
@@ -2510,6 +2593,20 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         ):
             self.assertIsNone(audit.mcp_source_scan_command(entry), entry)
 
+    def test_audit_known_uvx_switches_without_a_value_are_harmless(self):
+        audit = importlib.import_module("audit_installed")
+        for flag in ["--no-project", "--isolated", "--offline", "-q", "-qq", "-v", "-vv",
+                     "--refresh", "--no-cache", "--quiet", "--verbose", "--no-progress",
+                     "--no-config", "--no-sources", "--reinstall", "--no-env-file"]:
+            if flag == "--no-project":
+                # not a uvx switch (uv run only): unknown, so it stays unverifiable
+                self.assertIsNone(audit.mcp_source_scan_command(
+                    {"command": "uvx", "args": [flag, "pkg"]}), flag)
+                continue
+            self.assertEqual(
+                audit.mcp_source_scan_command({"command": "uvx", "args": [flag, "pkg"]}),
+                ["python", "scripts/scan_mcp.py", "pypi", "pkg"], flag)
+
     def test_audit_launcher_option_tables_are_separate(self):
         audit = importlib.import_module("audit_installed")
         # -p is the Python version for uvx but the package for npx
@@ -2536,7 +2633,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         audit = importlib.import_module("audit_installed")
         uv_names = ["UV_INDEX", "UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_EXTRA_INDEX_URL",
                     "UV_FIND_LINKS", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS",
-                    "uv_index_url"]
+                    "uv_index_url", "UV_CONFIG_FILE", "UV_PROJECT", "UV_ENV_FILE", "UV_NO_INDEX"]
         for name in uv_names:
             entry = {"command": "uvx", "args": ["pkg"], "env": {name: "https://i.example"}}
             self.assertIsNone(audit.mcp_source_scan_command(entry), name)

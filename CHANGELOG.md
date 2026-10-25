@@ -56,7 +56,16 @@
   options (also in `--opt=value` form), any option the tables do not know, or
   an index or registry variable in the entry's `env` (`UV_INDEX*`,
   `UV_FIND_LINKS`, `PIP_*INDEX_URL`, `PIP_FIND_LINKS`, `npm_config_*registry*`,
-  `npm_config_userconfig`). The Codex `[mcp_servers.NAME.env]` table counts too.
+  `npm_config_userconfig`, `UV_NO_INDEX`, `UV_CONFIG_FILE`, `UV_PROJECT`,
+  `UV_ENV_FILE`). The Codex `[mcp_servers.NAME.env]` table counts too. Repeated
+  `-qq`/`-vv` are known `uvx` switches. Global `.npmrc`/`uv.toml` files are not
+  read (documented limit).
+- `audit_installed.py` reads the Codex config with `tomllib`. The old line
+  parser cut multi-line `args` and `env` after the first line and lost an
+  `[mcp_servers.NAME.env]` table placed before `[mcp_servers.NAME]`. Invalid
+  TOML or a value of the wrong type gives exit 2.
+- `audit_installed.py --tool X` with a tool that is not found on the machine
+  gives exit 2 instead of "none detected" with exit 0.
 - `AGENT_GUARD_DNS_RESOLVERS` (comma-separated IP addresses) names resolvers
   that count as the sandbox's own resolver on port 53 even when they are
   public addresses (Linux Docker bridges copy the host's DNS servers);

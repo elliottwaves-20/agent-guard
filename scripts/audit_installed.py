@@ -14,6 +14,7 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import install_skill
@@ -38,47 +39,44 @@ def read_json(path: Path) -> dict:
 
 
 def read_codex_mcp_servers(path: Path) -> dict[str, dict]:
+    """Servers of the Codex config, read with a real TOML parser.
+
+    Anything that cannot be parsed or has an unexpected type is a ConfigReadError
+    (NO VERDICT), never a guess: a line parser once dropped options that sat on
+    continuation lines. Variable values are never kept, only the names.
+    """
     if not path.exists():
         return {}
-    servers: dict[str, dict] = {}
-    current: str | None = None
-    env_of: str | None = None   # server whose [mcp_servers.NAME.env] table we are in
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError, OSError) as exc:
         raise ConfigReadError(f"cannot read {path}: {exc}") from exc
-    for line in text.splitlines():
-        stripped = line.strip()
-        m = re.fullmatch(r"\[mcp_servers\.([^\].]+)\]", stripped)
-        if m:
-            current = m.group(1).strip('"')
-            env_of = None
-            servers[current] = {}
-            continue
-        m = re.fullmatch(r"\[mcp_servers\.([^\].]+)\.env\]", stripped)
-        if m:
-            current = None
-            env_of = m.group(1).strip('"')
-            servers.setdefault(env_of, {}).setdefault("env", {})
-            continue
-        if stripped.startswith("["):
-            current = None
-            env_of = None
-            continue
-        if env_of and "=" in stripped and not stripped.startswith("#"):
-            key = stripped.split("=", 1)[0].strip().strip('"')
-            servers[env_of]["env"][key] = ""   # values are never kept, only the names
-            continue
-        if current and stripped.startswith("command"):
-            servers[current]["command"] = stripped.split("=", 1)[1].strip().strip('"')
-        if current and stripped.startswith("url"):
-            servers[current]["url"] = stripped.split("=", 1)[1].strip().strip('"')
-        if current and stripped.startswith("args"):
-            servers[current]["args"] = re.findall(r'"([^"]*)"', stripped)
-        if current and re.match(r"env\s*=", stripped):
-            names = re.findall(r'([A-Za-z0-9_@:./"-]+)\s*=', stripped.split("=", 1)[1])
-            servers[current].setdefault("env", {}).update(
-                {n.strip('"'): "" for n in names})
+    table = data.get("mcp_servers")
+    if table is None:
+        return {}
+    if not isinstance(table, dict):
+        raise ConfigReadError(f"cannot read {path}: mcp_servers is not a table")
+    servers: dict[str, dict] = {}
+    for name, entry in table.items():
+        where = f"cannot read {path}: mcp_servers.{name}"
+        if not isinstance(entry, dict):
+            raise ConfigReadError(f"{where} is not a table")
+        server: dict = {}
+        for key in ("command", "url"):
+            if key in entry:
+                if not isinstance(entry[key], str):
+                    raise ConfigReadError(f"{where}.{key} is not a string")
+                server[key] = entry[key]
+        if "args" in entry:
+            args = entry["args"]
+            if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+                raise ConfigReadError(f"{where}.args is not a list of strings")
+            server["args"] = list(args)
+        if "env" in entry:
+            if not isinstance(entry["env"], dict):
+                raise ConfigReadError(f"{where}.env is not a table")
+            server["env"] = {str(key): "" for key in entry["env"]}
+        servers[name] = server
     return servers
 
 
@@ -221,9 +219,10 @@ LAUNCH_OPTIONS = {
     "npx": (NPX_PACKAGE_OPTIONS, NPX_VALUE_OPTIONS, NPX_FLAG_OPTIONS, NPX_UNSCANNABLE_OPTIONS),
 }
 
-# Environment variables that point uvx at another index.
+# Environment variables that point uvx at another index, config file or project.
 UVX_SOURCE_ENV = {"UV_INDEX", "UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_EXTRA_INDEX_URL",
-                  "UV_FIND_LINKS", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS"}
+                  "UV_FIND_LINKS", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS",
+                  "UV_NO_INDEX", "UV_CONFIG_FILE", "UV_PROJECT", "UV_ENV_FILE"}
 
 
 def env_changes_source(launcher: str, env: object) -> bool:
@@ -274,7 +273,8 @@ def parse_launch_args(launcher: str, args: list[str]) -> str | None:
                 i += 1
             if name in package_opts:
                 packages.append(value)
-        elif name not in flag_opts:
+        elif name not in flag_opts and not (
+                launcher == "uvx" and re.fullmatch(r"-(q+|v+)", arg)):
             return None   # unknown option: arity unknown, so the package is unknown
     if len(set(packages)) > 1:
         return None   # only one package would be scanned
@@ -389,6 +389,13 @@ def audit_download(path: Path, kind: str, execute: bool) -> int:
 
 def audit_installed(kind: str, execute: bool, selected: list[str] | None) -> int:
     worst = 0  # SAFE until a stage says otherwise; merged with combine_verdicts
+    if selected:
+        absent = [tid for tid, found in install_skill.detect_tools(selected).items()
+                  if not found]
+        if absent:
+            print(f"ERROR: chosen tool not found on this machine: {', '.join(absent)}; "
+                  "nothing was audited for it (NO VERDICT)", file=sys.stderr)
+            worst = combine_verdicts(worst, 2)
     if kind in {"all", "skills"}:
         print("\n== Installed skills ==")
         skills = installed_skill_dirs(selected)
