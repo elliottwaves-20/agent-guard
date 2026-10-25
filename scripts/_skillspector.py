@@ -803,7 +803,7 @@ def verdict_skillspector(report_path: Path, code: int, runtime_hint: bool = Fals
     sev_set = {str(it.get("severity") or "").upper() for it in issues}
     if max_sev:
         sev_set.add(max_sev)
-    if meta.get("llm_available"):
+    if meta.get("llm_available") is True:
         llm_note = ""
     else:
         llm_note = f"  (static only -- {LLM_REASON})"
@@ -882,7 +882,8 @@ def verdict_skillspector(report_path: Path, code: int, runtime_hint: bool = Fals
     if gap:
         print(_console_text(gap))
         return 2
-    if not llm_confirmed and not meta.get("llm_available") and not _static_only_forced():
+    if (not llm_confirmed and meta.get("llm_available") is not True
+            and not _static_only_forced()):
         print(_console_text(
             f"[BLOCK] NO VERDICT -- static only ({LLM_REASON}); no AI analysis ran. "
             "Set up an LLM provider or set AGENT_GUARD_STATIC_ONLY=1 for an explicit "

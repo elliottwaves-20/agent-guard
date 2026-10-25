@@ -246,6 +246,18 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 "max_issue_severity": "HIGH"})
             self.assertEqual(module.verdict_skillspector(report, 0), 1)
 
+    def test_verdict_needs_llm_available_to_be_exactly_true(self):
+        # The triage compares with `is True`; the wrapper must not be looser.
+        module = importlib.import_module("_skillspector")
+        for value in ("false", "true", 1, [1], {"a": 1}):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as d,                     patch.dict(os.environ):
+                os.environ.pop("AGENT_GUARD_STATIC_ONLY", None)
+                report = Path(d) / "report.json"
+                self._write_report(report, metadata={"llm_requested": False,
+                                                     "llm_available": value})
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(module.verdict_skillspector(report, 0), 2)
+
     def test_verdict_safe_on_complete_clean_report(self):
         module = importlib.import_module("_skillspector")
         with tempfile.TemporaryDirectory() as d:
@@ -896,6 +908,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         original_state = (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
                           module.SKILLSPECTOR, module.run_bounded)
         saved_explicit = module.LLM_EXPLICIT
+        saved_cmd = module.SKILLSPECTOR_CMD
         try:
             module.PROVIDER = ""
             module.LLM_READY = False
@@ -922,6 +935,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
              module.SKILLSPECTOR, module.run_bounded) = original_state
             module.LLM_EXPLICIT = saved_explicit
+            module.SKILLSPECTOR_CMD = saved_cmd
 
         self.assertEqual(len(calls), 1)
         self.assertIn("--no-llm", calls[0])
@@ -1080,6 +1094,16 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             "summary": {"scanned": 1, "failed": 0, "throttled": 0},
             "findings": [{"severity": "HIGH", "summary": "malicious file"}],
         }), 1)
+
+    def test_virustotal_verdict_counted_malicious_without_findings_is_block(self):
+        scan_mcp = importlib.import_module("scan_mcp")
+        for summary in ({"total_to_scan": 1, "scanned": 1, "clean": 0, "malicious": 1},
+                        {"total_to_scan": 3, "scanned": 2, "clean": 1, "malicious": 1},
+                        {"total_to_scan": 2, "scanned": 2, "clean": 1, "malicious": 1,
+                         "not_found": 1}):
+            with self.subTest(summary), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(scan_mcp.virustotal_verdict(
+                    {"summary": summary, "findings": []}), 1)
 
     def test_virustotal_verdict_unknown_hash_is_no_verdict(self):
         # A hash VirusTotal has never seen is exactly what a new payload looks
@@ -1931,6 +1955,23 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertTrue(dry)
         self.assertEqual(selected, ["codex"])
 
+    def test_scan_url_remote_candidate_without_sandbox_is_no_verdict_but_not_a_block_loss(self):
+        scan_url = importlib.import_module("scan_url")
+        source = scan_url.ResolvedSource(
+            kind="catalog", remote_urls=["https://api.example.com/mcp"])
+        with patch.object(scan_url, "run_remote",
+                          side_effect=AssertionError("remote must not be contacted")),                 contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(scan_url.scan_marketplace_candidates(
+                source, sandbox=False, max_candidates=10, dry_run=True), 2)
+        # A BLOCK found earlier is not hidden behind the skipped endpoint.
+        source = scan_url.ResolvedSource(
+            kind="catalog", source_urls=["https://github.com/o/r"],
+            remote_urls=["https://api.example.com/mcp"])
+        with patch.object(scan_url, "scan_candidate_source_url", return_value=1),                 patch.object(scan_url, "run_remote",
+                             side_effect=AssertionError("remote must not be contacted")),                 contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(scan_url.scan_marketplace_candidates(
+                source, sandbox=False, max_candidates=10, dry_run=True), 1)
+
     def test_scan_url_safe_remote_candidate_offers_remote_install(self):
         scan_url = importlib.import_module("scan_url")
         calls = []
@@ -2557,6 +2598,24 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         servers = [("claude-code", "odd", {"command": "something", "args": []})]
         self.assertEqual(self._audit_mcps_with(servers, [0]), 2)  # sandbox run is SAFE
 
+    def test_audit_installed_skill_block_is_not_lost_behind_no_verdict(self):
+        audit = importlib.import_module("audit_installed")
+        skills = [("claude-code", Path("skills/a")), ("codex", Path("skills/b"))]
+        for codes in ([1, 2], [2, 1]):
+            with self.subTest(codes=codes),                     patch.object(audit, "installed_skill_dirs", return_value=skills),                     patch.object(audit, "run", side_effect=codes),                     contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(audit.audit_installed("skills", True, None), 1)
+
+    def test_audit_installed_unreadable_config_file_is_no_verdict_end_to_end(self):
+        audit = importlib.import_module("audit_installed")
+        installer = importlib.import_module("install_skill")
+        for text in ("{broken", "[]", '"text"'):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                config = Path(d) / "claude_desktop_config.json"
+                config.write_text(text, encoding="utf-8")
+                with patch.object(installer, "CLAUDE_DESKTOP_CONFIG", config),                         patch.object(audit.install_skill, "detect_tools",
+                                     return_value={"claude-desktop": True}),                         patch.object(audit, "installed_skill_dirs", return_value=[]),                         patch.object(audit, "run", return_value=0),                         contextlib.redirect_stdout(io.StringIO()),                         contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(audit.audit_installed("mcps", True, None), 2)
+
     def test_audit_installed_block_is_not_lost_behind_no_verdict(self):
         servers = [("claude-code", "a", {"command": "npx", "args": ["a"]}),
                    ("claude-code", "b", {"url": "https://x.example/mcp"})]
@@ -2896,6 +2955,32 @@ class ScanCliRouterTests(unittest.TestCase):
         self.assertEqual(seen["dest"].name, "evil.exe")
         self.assertEqual(seen["dest"].parent.parent.resolve(),
                          Path(tempfile.gettempdir()).resolve())
+
+    def test_run_script_keeps_download_inside_temp_dir(self):
+        seen = {}
+
+        def fake_download(url, dest):
+            seen["dest"] = Path(dest)
+            Path(dest).write_bytes(b"x")
+            return Path(dest)
+
+        with patch.object(self.scan_cli, "_download", fake_download),                 patch.object(self.scan_cli, "run_skillspector", lambda path, **kw: 0),                 contextlib.redirect_stdout(io.StringIO()):
+            rc = self.scan_cli.run_script("https://example.com/a/..%5C..%5Cevil.ps1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["dest"].name, "evil.ps1")
+        self.assertEqual(seen["dest"].parent.parent.resolve(),
+                         Path(tempfile.gettempdir()).resolve())
+        # A name without a dot gets .sh and stays inside the temp directory too.
+        with patch.object(self.scan_cli, "_download", fake_download),                 patch.object(self.scan_cli, "run_skillspector", lambda path, **kw: 0),                 contextlib.redirect_stdout(io.StringIO()):
+            self.scan_cli.run_script("https://example.com/a/..%5C..%5Cevil")
+        self.assertEqual(seen["dest"].name, "evil.sh")
+        self.assertEqual(seen["dest"].parent.parent.resolve(),
+                         Path(tempfile.gettempdir()).resolve())
+
+    def test_run_script_refuses_a_download_name_that_leaves_the_temp_dir(self):
+        with patch.object(self.scan_cli, "safe_basename", lambda url, default: "../escape.sh"),                 patch.object(self.scan_cli, "_download",
+                             side_effect=AssertionError("must not download")),                 contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.scan_cli.run_script("https://example.com/x.sh"), 2)
 
     def test_run_binary_deep_combines_verdicts_fail_closed(self):
         original_download = self.scan_cli._download

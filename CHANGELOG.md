@@ -8,6 +8,9 @@
 
 ### Changed
 
+- The skill verdict accepts `metadata.llm_available` only when it is exactly
+  `true`, as the triage already did. A string or number there (for example
+  `"false"` or `1`) used to count as a completed AI analysis.
 - A failed YARA recheck or parse-span locator (timeout, crash, bad output) now
   prints one `[WARN]` line with the reason. The findings still stay hard or
   open as before; only the silence is gone.
