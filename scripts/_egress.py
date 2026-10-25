@@ -185,9 +185,10 @@ def analyse(lines, local_ips, allow: set) -> Report:
             continue  # replies and anything addressed to the target
 
         if dport == 53:
-            exempt = resolver_address(dst, resolvers)  # only the sandbox's own resolver
+            exempt = resolver_address(dst, resolvers)  # only the resolver of the sandbox itself
             if not exempt:
-                finding(f"DNS traffic to a public address: {dst}")
+                finding(f"DNS traffic to a public address: {dst} "
+                        "(not listed in AGENT_GUARD_DNS_RESOLVERS)")
             query = _QUERY.match(payload)
             if query:
                 name = query.group(3).rstrip(".").lower()

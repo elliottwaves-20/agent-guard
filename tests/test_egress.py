@@ -99,7 +99,7 @@ class AnalysisTests(unittest.TestCase):
 
     def _dns_query_to_a_public_resolver_is_a_finding(self):
         report = analyse(["17:35:18.258128 IP 172.17.0.2.50928 > 1.1.1.1.53: 41011+ A? pypi.org. (45)"])
-        self.assertEqual(report.findings, ["DNS traffic to a public address: 1.1.1.1"])
+        self.assertEqual(report.findings, ["DNS traffic to a public address: 1.1.1.1 (not listed in AGENT_GUARD_DNS_RESOLVERS)"])
 
     def test_configured_resolver_address_counts_as_the_resolver(self):
         packets = ["17:35:18.258128 IP 172.17.0.2.50928 > 1.1.1.1.53: 41011+ A? pypi.org. (45)"]
@@ -107,11 +107,11 @@ class AnalysisTests(unittest.TestCase):
             self.assertEqual(analyse(packets).findings, [])
         with patch.dict(os.environ, {"AGENT_GUARD_DNS_RESOLVERS": "9.9.9.9"}):
             self.assertEqual(analyse(packets).findings,
-                             ["DNS traffic to a public address: 1.1.1.1"])
+                             ["DNS traffic to a public address: 1.1.1.1 (not listed in AGENT_GUARD_DNS_RESOLVERS)"])
         env = {k: v for k, v in os.environ.items() if k != "AGENT_GUARD_DNS_RESOLVERS"}
         with patch.dict(os.environ, env, clear=True):
             self.assertEqual(analyse(packets).findings,
-                             ["DNS traffic to a public address: 1.1.1.1"])
+                             ["DNS traffic to a public address: 1.1.1.1 (not listed in AGENT_GUARD_DNS_RESOLVERS)"])
 
     def test_invalid_resolver_entries_are_ignored_with_a_warning(self):
         err = io.StringIO()
@@ -125,7 +125,7 @@ class AnalysisTests(unittest.TestCase):
             os.environ.pop("AGENT_GUARD_DNS_RESOLVERS", None)
             report = analyse(["17:35:18.358137 IP 172.17.0.2.44712 > 8.8.8.8.53: Flags [S], "
                               "seq 1, win 64240, length 0"])
-        self.assertEqual(report.findings, ["DNS traffic to a public address: 8.8.8.8"])
+        self.assertEqual(report.findings, ["DNS traffic to a public address: 8.8.8.8 (not listed in AGENT_GUARD_DNS_RESOLVERS)"])
 
     def test_tcp_to_port_53_of_a_configured_resolver_is_still_a_finding(self):
         # The configured resolver is exempt for UDP queries whose name is checked;

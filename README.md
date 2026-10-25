@@ -502,6 +502,16 @@ list it in `AGENT_GUARD_DNS_RESOLVERS=ip1,ip2` (UDP queries only: their names ar
 sandbox uv may not download Python builds and npm skips its update check, so
 neither reaches for hosts outside the list.
 
+The dynamic stage (`--no-dynamic` turns it off, the result is then exit 2) treats
+`AGENT_GUARD_DNS_RESOLVERS` differently: OpenSSF records sockets without a
+protocol, so DNS over TCP cannot be told from UDP. A connection to port 53 of a
+public resolver is therefore a finding there (exit 1) even when the address is
+listed; only port 53 on a private address is exempt. UDP lookups are judged by
+name from the DNS record. A resolver on a public address that is set in
+`AGENT_GUARD_DNS_RESOLVERS` thus blocks the dynamic stage for every package.
+The egress finding of the sandbox run now says "not listed in
+AGENT_GUARD_DNS_RESOLVERS" for a public address that is not on the list.
+
 ```bash
 python scripts/scan_mcp.py pypi mcp-server-name==1.2.3 --sandbox -- uvx mcp-server-name==1.2.3
 # a server that legitimately calls its own API:

@@ -780,8 +780,8 @@ def virustotal_verdict(report: dict) -> int:
             return 1
 
     # The helper marks every summary with its kind. A directory summary must carry
-    # agent-guard's own count of checkable files, which Cisco must have matched; a
-    # summary of unknown kind or without the count cannot be trusted.
+    # the count of checkable files made by agent-guard itself, which Cisco must have
+    # matched; a summary of unknown kind or without the count cannot be trusted.
     kind = summary.get("kind")
     if kind not in ("file", "directory") or (kind == "file" and total != 1):
         print("\n[WARN] NO VERDICT -- the VirusTotal summary does not say whether it "

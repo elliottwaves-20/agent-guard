@@ -266,6 +266,49 @@ class CompletenessTests(unittest.TestCase):
         self.assertEqual(analyse(result).findings,
                          ["execute: reads sensitive file /root/.ssh/id_rsa"])
 
+    def test_crashed_execute_harness_record_lists_must_have_the_right_type(self):
+        for key, bad in (("Files", "oops"), ("DNS", 5), ("Sockets", {"a": 1}),
+                         ("Commands", "x")):
+            result = npm_clean()
+            result["Analysis"]["execute"] = phase(status="error_analysis")
+            result["Analysis"]["execute"][key] = bad
+            report = analyse(result)
+            self.assertFalse(report.complete, key)
+            self.assertIn(key, report.problem)
+        # what a crashed harness may legitimately leave: null, empty or absent lists
+        result = npm_clean()
+        result["Analysis"]["execute"] = {"Status": "error_analysis", "Files": None}
+        self.assertTrue(analyse(result).complete)
+
+    def test_unexpected_result_shapes_are_incomplete_not_a_crash(self):
+        shapes = []
+        result = npm_clean()
+        result["Analysis"]["install"]["Files"] = ["/etc/passwd"]       # entry is no object
+        shapes.append(result)
+        result = npm_clean()
+        result["Analysis"]["install"]["Sockets"] = [5]
+        shapes.append(result)
+        result = npm_clean()
+        result["Analysis"]["install"]["Commands"] = [{"Command": 5}]
+        shapes.append(result)
+        result = npm_clean()
+        result["Analysis"]["install"]["DNS"] = ["x"]
+        shapes.append(result)
+        result = npm_clean()
+        result["Analysis"]["import"] = 5
+        shapes.append(result)
+        result = npm_clean()
+        result["Analysis"] = ["install"]
+        shapes.append(result)
+        shapes.extend([[], None, "x"])
+        for result in shapes:
+            with self.subTest(result=str(result)[:60]):
+                report = analyse(result)
+                self.assertFalse(report.complete)
+                self.assertIn("could not be evaluated", report.problem)
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(dyn.verdict(report), 2)
+
     def test_only_execute_may_end_in_a_harness_error(self):
         for phase_name, status in [("execute", "error_timeout"), ("install", "error_analysis"),
                                    ("import", "error_analysis")]:

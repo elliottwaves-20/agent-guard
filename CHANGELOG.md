@@ -76,7 +76,20 @@
   is a finding, and the OpenSSF stage exempts private addresses only (its
   socket records carry no protocol).
 - OpenSSF package-analysis results: a completed phase without `Files`, `DNS`,
-  `Sockets` or `Commands` (or with one of the wrong type) gives exit 2.
+  `Sockets` or `Commands` (or with one of the wrong type) gives exit 2. The
+  `execute` phase that ended in `error_analysis` is checked for the types of
+  the lists it carries. An unexpected shape (an entry that is not an object,
+  a changed schema) gives exit 2 with "could not be evaluated" instead of a
+  crash with exit 1.
+- `llm_scan.py`: click errors and any unexpected exception end with exit 2
+  (`INCOMPLETE`), not with Python's exit 1. The dynamic-stage behaviour of
+  `AGENT_GUARD_DNS_RESOLVERS` (a public resolver on port 53 is a finding there)
+  is described in the README.
+- The egress finding for a public DNS address says "(not listed in
+  AGENT_GUARD_DNS_RESOLVERS)".
+- Summary lines of `scan_skill.py --all` and `scan_url.py` (skill collection,
+  marketplace candidates, catalog scan) print `NO VERDICT` instead of `BLOCK`
+  when the worst exit code is 2.
 - Hash-lookup results: an unseen hash, a suspicious-only file, a file skipped
   by the file limit, API errors and a missing, malformed or inconsistent
   summary give exit 2 instead of SAFE. Single-file checks in

@@ -382,12 +382,57 @@ class ScanFailureTests(unittest.TestCase):
         with patch("_llm_adapter.live_transport"):
             for returned in (None, 0):
                 self.assertEqual(self._scan(self._app_writing(clean_report(), returns=returned)), 0)
-            self.assertNotEqual(self._scan(self._app_writing(clean_report(), returns=1)), 0)
+            # A clean report next to a returned 1 contradicts itself: no verdict.
+            self.assertEqual(self._scan(self._app_writing(clean_report(), returns=1)), 2)
             for returned in (2, 3, -1, True, "0", "1", 1.0, [0]):
                 self.assertEqual(self._scan(self._app_writing(clean_report(), returns=returned)),
                                  2, returned)
             # SystemExit codes that are not 0/None get the same treatment.
             self.assertEqual(self._scan(self._app_writing(clean_report(), exit_code="boom")), 2)
+
+    def test_scanner_exit_code_values(self):
+        for value, expected in ((None, 0), (0, 0), (1, 1), (2, 2), (3, 2), (-1, 2),
+                                (True, 2), (False, 2), ("0", 2), ("1", 2), (1.0, 2),
+                                ([0], 2)):
+            self.assertEqual(self.llm_scan.scanner_exit_code(value), expected, value)
+
+    def test_high_finding_with_a_returned_exit_code_stays_a_block(self):
+        # The lost exit code was the bug: a report with a HIGH finding must come back
+        # as 1 (BLOCK), whatever the scanner returned or raised.
+        report = clean_report()
+        report["risk_assessment"] = {"score": 80, "severity": "HIGH",
+                                     "recommendation": "DO_NOT_INSTALL",
+                                     "max_issue_severity": "HIGH"}
+        report["issues"] = [{"id": "X", "severity": "HIGH", "title": "t",
+                             "description": "d",
+                             "location": {"file": "SKILL.md", "start_line": 1}}]
+        with patch("_llm_adapter.live_transport"):
+            for returned in (None, 0, 1):
+                self.assertEqual(
+                    self._scan(self._app_writing(report, returns=returned)), 1, returned)
+            self.assertEqual(self._scan(self._app_writing(report, exit_code=1)), 1)
+
+    def test_run_turns_every_failure_that_is_not_a_verdict_into_exit_2(self):
+        import subprocess
+        class Abort(RuntimeError):            # click.Abort, click.ClickException ...
+            pass
+
+        failures = (self.llm_scan.Paused("paused"), OSError("disk"), ValueError("bad"),
+                    subprocess.TimeoutExpired("x", 5), Abort(), Abort("usage"),
+                    RuntimeError("boom"), KeyError("k"), AttributeError("a"))
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__), \
+                 patch.object(self.llm_scan, "main", side_effect=failure), \
+                 contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(self.llm_scan.run(), 2)
+                self.assertIn("INCOMPLETE", err.getvalue())
+        with patch.object(self.llm_scan, "main", return_value=1):
+            self.assertEqual(self.llm_scan.run(), 1)
+        with patch.object(self.llm_scan, "main", side_effect=SystemExit(3)), \
+             self.assertRaises(SystemExit):
+            self.llm_scan.run()      # an explicit exit is not swallowed
+        source = Path(self.llm_scan.__file__).read_text(encoding="utf-8")
+        self.assertIn("sys.exit(run())", source)
 
     def test_scanner_without_report_is_no_verdict(self):
         with patch("_llm_adapter.live_transport"):

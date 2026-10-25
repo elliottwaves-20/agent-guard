@@ -117,6 +117,19 @@ def _planted_values(phase: dict) -> set:
 
 
 def analyse(result: dict, ecosystem: str, allow_hosts=(), expect_name: str | None = None) -> Report:
+    """Judge an OpenSSF result. A shape this code did not expect (an entry that is
+    no object, a changed schema) is an incomplete analysis, never a crash with a
+    BLOCK-looking exit code."""
+    try:
+        return _analyse(result, ecosystem, allow_hosts, expect_name)
+    except Exception as exc:
+        report = Report()
+        report.complete = False
+        report.problem = f"the result could not be evaluated ({type(exc).__name__}: {exc})"
+        return report
+
+
+def _analyse(result: dict, ecosystem: str, allow_hosts, expect_name: str | None) -> Report:
     package = result.get("Package") or {}
     report = Report(name=package.get("Name", ""), version=package.get("Version", ""))
     analysis = result.get("Analysis") or {}
@@ -148,6 +161,13 @@ def analyse(result: dict, ecosystem: str, allow_hosts=(), expect_name: str | Non
                   for key in PHASE_KEYS
                   if key not in result_phase
                   or not (result_phase[key] is None or isinstance(result_phase[key], list))]
+    # The execute phase may end in error_analysis (see above). Whatever record lists it
+    # still carries are read as "nothing found" below, so their types are checked too.
+    crashed = analysis.get("execute") or {}
+    if crashed.get("Status") == "error_analysis":
+        unreadable += [f"execute: {key}" for key in PHASE_KEYS
+                       if key in crashed
+                       and not (crashed[key] is None or isinstance(crashed[key], list))]
     if unreadable:
         report.complete = False
         report.problem = "; ".join(filter(None, [

@@ -209,12 +209,23 @@ def main():
         return scan(session, campaign, args.command == "plan", policy)
 
 
+def run() -> int:
+    """main() with every failure that is not a verdict turned into exit 2.
+
+    Python ends an uncaught exception with exit 1, which reads as BLOCK. An
+    explicit SystemExit is left alone."""
+    try:
+        return main()
+    except (Paused, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        print(f"INCOMPLETE: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:   # click errors, a changed SkillSpector API, bugs
+        print(f"INCOMPLETE: unexpected {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
     import _console
 
     _console.utf8_stdio()
-    try:
-        sys.exit(main())
-    except (Paused, OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        print(f"INCOMPLETE: {exc}", file=sys.stderr)
-        sys.exit(2)
+    sys.exit(run())
