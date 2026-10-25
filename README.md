@@ -161,12 +161,14 @@ bash setup.sh                       # Windows PowerShell: .\setup.ps1
 Prefer environment variables for provider settings and API keys. This keeps
 credentials outside the project directory. See the configuration section below.
 
-**No API keys? None needed.** If `claude` or `opencode` is on PATH and
+**No API keys needed if you are logged in to a coding-agent CLI.** If `claude` or `opencode` is on PATH and
 logged in, the wrapper auto-detects it and runs SkillSpector's LLM layer through
 that CLI — your existing subscription, in a separate tool-less process. Without
-any of those (or with `AGENT_GUARD_STATIC_ONLY=1`), SkillSpector runs its full
-static layer (71 patterns, AST taint tracking, YARA, live OSV.dev CVE lookup);
-only the optional Cisco runtime check strictly needs an API key.
+any of those, SkillSpector still runs its full static layer (71 patterns, AST
+taint tracking, YARA, live OSV.dev CVE lookup), but the scan ends with exit 2
+(no verdict, never SAFE) because no AI analysis ran. Set
+`AGENT_GUARD_STATIC_ONLY=1` to accept a static-only result deliberately; only
+the optional Cisco runtime check strictly needs an API key.
 
 **Option B — clone and install manually:**
 
@@ -401,7 +403,7 @@ you want to install the exact source that was scanned after a SAFE verdict.
 If you already downloaded a skill or MCP source but did not install it yet:
 
 ```bash
-# Dry-run: print the scan command only
+# Dry-run: print the scan command only (NOT EXECUTED, exit 2)
 python scripts/audit_installed.py download ./downloaded-source
 
 # Execute the safe scan against the local path
@@ -424,7 +426,7 @@ runtime checks are routed through `scan_mcp.py sandbox`. The audit also prints
 removal guidance for each detected item; review and remove malicious entries
 from the relevant agent config before restarting the affected agent.
 
-Scanner errors or empty output mean **no verdict** — never treat a failed scan as safe. A non-zero exit *with* a report is a real verdict (skill scans exit 0 = SAFE: score <= 50, no HIGH/CRITICAL finding, complete inspection; 1 = BLOCK: score > 50, a DO_NOT_INSTALL recommendation or any single HIGH/CRITICAL finding; 2 = no verdict: errors, missing AI analysis or partial inspection).
+Scanner errors or empty output mean **no verdict** — never treat a failed scan as safe. Exit 1 with a report is a real verdict; exit 2 is never one, with or without a report (skill scans exit 0 = SAFE: score <= 50, no HIGH/CRITICAL finding, every file inspected; 1 = BLOCK: score > 50, a DO_NOT_INSTALL recommendation, any single HIGH/CRITICAL finding, or a partial inspection limited to passages the shell parser gave up on; 2 = no verdict: errors, missing AI analysis or any other incomplete inspection).
 
 ### Exit codes
 
@@ -435,12 +437,12 @@ wiring agent-guard into scripts or CI:
 |-----------|---------|--------|
 | `0` | SAFE verdict | Install is reasonable |
 | `1` | BLOCK/REVIEW verdict — real findings, or a partial inspection limited to passages the shell parser gave up on | Read the findings (or the listed passages), decide deliberately |
-| `2` | **No verdict** — scanner/LLM/config error, fail-closed | Fix the cause and re-run; no automatic installation. Managed updates also support explicit manual review below. |
+| `2` | **No verdict** — scanner/LLM/config error, or anything not fully checked; fail-closed | Fix the cause and re-run; no automatic installation. Managed updates also support explicit manual review below. |
 
 **Decide by the exit code, not the text.** Exit `2` may print as `[WARN] NO VERDICT`, `[WARN] INCONCLUSIVE` or `[BLOCK] NO VERDICT`; treat it as "do not install". Cases that give `2` instead of `0`:
 
 - **No completed AI analysis.** A SAFE verdict needs an AI analysis that actually ran (any provider; only the report's `metadata.llm_available` counts). Without it the scan ends `static only` with exit 2, and scheduled updates (`update_skills.py`) quarantine the candidate while the old version stays active. `AGENT_GUARD_STATIC_ONLY=1` states that static checking is deliberately enough: it disables the AI analysis and accepts a dynamic stage you skipped with `--no-dynamic` (exit 0 instead of 2) for a clean static result. It does not skip the dynamic stage by itself.
-- **Skipped dynamic stage.** `--no-dynamic` (`scan_url.py`, `scan_mcp.py`, `scan_cli.py`) gives exit 2 unless `AGENT_GUARD_STATIC_ONLY=1` is set.
+- **Skipped dynamic stage.** `--no-dynamic` (`scan_url.py`, `scan_mcp.py`, `scan_cli.py`) gives at least exit 2 unless `AGENT_GUARD_STATIC_ONLY=1` is set (a BLOCK from the static stage still wins, exit 1).
 - **Nothing was scanned.** `audit_installed.py` without `--execute` (NOT EXECUTED, for every listed scan), unreadable configs (also an `mcpServers` that is not an object) and entries whose source cannot be inferred: a `uvx`/`npx` entry with `--with`, an index, registry or find-links option, several different `npx -p` packages, an option the tool does not know, or an index or registry variable in `env`. With no skill or MCP server found there is nothing to scan and the exit code is 0. In `scan_url.py`: a repo with neither a skill nor a package manifest (unsupported repo layout), a skill collection with non-documentation files outside the skill folders (prompt and instruction files such as `CLAUDE.md`, `.cursorrules` or `commands/*.md`, and `marketplace.json`/`plugin.json` with anything but metadata keys, are not documentation), and marketplace candidates left out by `--max-candidates` or by `--no-scan-candidates`.
 - **Incomplete hash lookup.** A missing, malformed or inconsistent hash-lookup summary, an unseen hash, a suspicious-only file, a file skipped by the file limit, or a directory in which agent-guard finds more checkable files than Cisco looked at (Cisco silently skips files under dot directories and `__pycache__`, symlinks and files whose type it cannot tell; agent-guard counts them itself, never follows symlinks, and gives exit 2 instead of SAFE).
 - **Stale scanner rules.** GuardDog and malcontent run with `docker run --pull=always`; if the image cannot be pulled (offline) there is no verdict, never SAFE.
@@ -465,7 +467,7 @@ python scripts/scan_mcp.py local ./path/to/mcp-source
 python scripts/scan_mcp.py remote https://example.com/mcp
 ```
 
-**Stage 1b (default for `pypi` / `npm` — needs Docker):** the package is installed and imported inside OpenSSF package-analysis, a gVisor sandbox with nothing worth stealing, and its recorded behaviour is judged (see [Dynamic install analysis](#dynamic-install-analysis)). `--no-dynamic` skips this stage knowingly.
+**Stage 1b (default for `pypi` / `npm` — needs Docker):** the package is installed and imported inside OpenSSF package-analysis, a gVisor sandbox with nothing worth stealing, and its recorded behaviour is judged (see [Dynamic install analysis](#dynamic-install-analysis)). `--no-dynamic` skips this stage and gives exit 2 unless `AGENT_GUARD_STATIC_ONLY=1` is set.
 
 **Stage 2 (optional — live runtime check):** start the server inside a throwaway **Docker container with no access to your filesystem**, then scan the tools and prompts it registers at runtime — the gap a static scan cannot cover (powered by cisco-ai-mcp-scanner).
 
@@ -818,7 +820,7 @@ No scanner — not agent-guard, not the professional tools it wraps — can guar
 | GuardDog (`npm`/`pypi`/`go`/`cargo`) | Heuristics + YARA over known attack patterns. A clean result is not proof of harmlessness. `capability-*` findings are printed as informational and do **not** block (exception: `capability-process-hooks` — install-time code execution — blocks) — a malicious package whose only tell is an implausible remaining capability needs your judgment on that list. |
 | cargo | GuardDog's crates support is new (3.2.0) and its metadata rules are thinner than for npm/PyPI; the second pass (SkillSpector) is static. `sfw cargo install <crate>` remains a good install-time net. |
 | `script` scan | **Static.** A second-stage payload the installer downloads at runtime is invisible; scan those URLs separately. |
-| SkillSpector static scans | Cannot see behavior that only appears at runtime (MCP: use `--sandbox`). Static-only mode (no LLM configured) misses semantic attacks that pattern rules don't encode. |
+| SkillSpector static scans | Cannot see behavior that only appears at runtime (MCP: use `--sandbox`). Static-only mode (`AGENT_GUARD_STATIC_ONLY=1`) misses semantic attacks that pattern rules don't encode. |
 | Live MCP sandbox scan | Contains host-filesystem access and **records** every network destination, but does not stop the traffic while it happens: the registries stay reachable, and payloads inside an allowed TLS connection are not inspected. The LLM-based analysis is itself probabilistic. |
 | Dynamic install analysis (`npm`/`pypi`) | Sees only what the package does during install, import and a short execution in the sandbox; code that waits for a date, a specific host or a user action stays silent. File accesses carry no process, so a file the package manager itself reads is excused in the install phase for every process. |
 

@@ -253,7 +253,7 @@ Locate the skill directories and scan (stderr stays visible — rule 2):
 find "$WORKDIR/src" -name "SKILL.md" -not -path "*/node_modules/*"
 
 python "$SKILL_DIR/scripts/scan_skill.py" "$WORKDIR/src/<skill-dir>"
-echo "scanner exit code: $?"   # 0 = SAFE (score<=50, no HIGH/CRITICAL, complete inspection), 1 = BLOCK (score>50, DO_NOT_INSTALL or any single HIGH/CRITICAL), 2 = no verdict
+echo "scanner exit code: $?"   # 0 = SAFE (score<=50, no HIGH/CRITICAL, every file inspected), 1 = BLOCK (score>50, DO_NOT_INSTALL, any single HIGH/CRITICAL, or a partial inspection limited to shell-parser gaps), 2 = no verdict
 ```
 
 (Provider and model come from `.env` or auto-detection — a logged-in `claude` or
@@ -456,7 +456,7 @@ SkillSpector reports a **risk score (0–100)**, an overall **severity**, a
 
 ### Recommendation meaning
 
-- `Recommendation: SAFE` with no HIGH/CRITICAL findings → installing is reasonable
+- `Recommendation: SAFE` with no HIGH/CRITICAL findings and a completed AI analysis (or `AGENT_GUARD_STATIC_ONLY=1`) → installing is reasonable
 - `Recommendation: DO NOT INSTALL`, or any HIGH/CRITICAL finding → manual source review required
 - Scanner error / empty / unparsable output → **no verdict** (rule 2), re-scan
 
