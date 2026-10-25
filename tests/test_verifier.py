@@ -127,6 +127,10 @@ class FailClosedTests(unittest.TestCase):
                 self.assertEqual(case.judge(runner).verdict, t.DANGEROUS)
                 self.assertEqual(runner.prompts, [])
 
+    def test_exfiltration_and_taint_findings_are_never_sent(self):
+        for rule in ("E1", "E2", "E3", "E5", "TT1", "TT2", "TT4"):
+            self.assertIn(rule, v.NEVER_CLEARED)
+
     def test_hard_evidence_skips_the_verifier(self):
         case = Case(self)
         case.report["issues"].append({"id": "AST8", "severity": "CRITICAL",

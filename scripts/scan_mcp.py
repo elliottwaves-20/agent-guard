@@ -14,7 +14,8 @@ This wrapper enforces the safe order:
     (Tool Poisoning, Tool Misuse, Least Privilege) on top of taint tracking,
     credential-access and exfiltration checks.
 
-  Stage 1b (default, needs Docker; --no-dynamic skips it): the package is
+  Stage 1b (default, needs Docker; --no-dynamic skips it and gives exit 2
+    unless AGENT_GUARD_STATIC_ONLY=1): the package is
     installed and imported inside OpenSSF's package-analysis sandbox (gVisor)
     and its file, network and process activity is judged -- install scripts
     run here, never on your machine (see _dynamic.py).
@@ -32,7 +33,8 @@ LLM analysis is optional. Stage 1 uses SkillSpector's provider config
 (SKILLSPECTOR_*; by default a coding-agent CLI such as claude_cli, no API key),
 while Stage 2 / remote uses Cisco mcp-scanner's LiteLLM config
 (MCP_SCANNER_LLM_*, API key required -- Cisco has no CLI-subscription path).
-Without any usable SkillSpector provider, Stage 1 runs static-only (--no-llm).
+Without any usable SkillSpector provider, Stage 1 runs static-only (--no-llm)
+and ends with exit 2 (no verdict) unless AGENT_GUARD_STATIC_ONLY=1 is set.
 
 Usage:
   python scan_mcp.py pypi  <package>[==version]      # fetch sdist, scan source
@@ -73,6 +75,7 @@ from _skillspector import (
     die,
     run_bounded,
     run_skillspector as shared_run_skillspector,
+    skipped_dynamic_verdict,
 )
 
 MCP_SCANNER = shutil.which("mcp-scanner")      # Stage 2 / remote: runtime (Cisco)
@@ -204,6 +207,8 @@ SANDBOX_DOCKERFILE = (
 # (pandas, numpy, ...) inside a fresh container.
 STDIO_TIMEOUT = int(os.environ.get("SCAN_MCP_STDIO_TIMEOUT", "240"))
 VT_MAX_FILES = int(os.environ.get("MCP_SCANNER_VT_MAX_FILES", "10"))
+# A VirusTotal report older than this was made with outdated engine signatures.
+VT_STALE_DAYS = 30
 
 VT_HELPER = r"""
 import json
@@ -230,23 +235,110 @@ analyzer = VirusTotalAnalyzer(
     exclusion_extensions=getattr(CONSTANTS, "VIRUSTOTAL_EXCLUSION_EXTENSIONS", set()),
 )
 
+# VirusTotal answers 200 with empty engine stats for a hash it knows but has not
+# analysed yet; the analyzer then reports 0 engines and the file looks clean.
+# Treat such a result as "not found" (unknown is not clean) in both branches below.
+# A positive verdict is never downgraded.
+_query_original = analyzer._query_virustotal_cached
+
+
+def _query_with_engines(file_hash):
+    result = _query_original(file_hash)
+    vt_result, hash_found, error_reason = result
+    if hash_found and not error_reason and isinstance(vt_result, dict):
+        engines = vt_result.get("total_engines")
+        positive = vt_result.get("malicious", 0) or vt_result.get("suspicious", 0)
+        if not positive and (type(engines) is not int or engines <= 0):
+            return None, False, None
+    return result
+
+
+analyzer._query_virustotal_cached = _query_with_engines
+
 if target.is_file():
-    finding = analyzer.analyze_file(str(target))
-    findings = [finding] if finding else []
+    # analyze_file() returns None for a clean file, an unknown hash and a failed
+    # lookup alike. Query the hash directly so those outcomes stay apart --
+    # "VirusTotal could not tell" must never read as "clean".
+    import hashlib
+    h = hashlib.sha256()
+    with target.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    file_hash = h.hexdigest()
     summary = {
+        "kind": "file",
         "total_found": 1,
         "total_to_scan": 1,
-        "scanned": 1,
-        "clean": 0 if finding else 1,
-        "malicious": 1 if finding else 0,
+        "scanned": 0,
+        "clean": 0,
+        "malicious": 0,
+        "suspicious": 0,
         "not_found": 0,
         "throttled": 0,
         "failed": 0,
         "skipped_by_limit": 0,
     }
+    findings = []
+    try:
+        vt_result, hash_found, error_reason = analyzer._query_virustotal_cached(file_hash)
+        if not error_reason and not hash_found and analyzer.upload_files:
+            vt_result = analyzer._upload_and_scan(target, file_hash)
+            hash_found = vt_result is not None
+            error_reason = None if hash_found else "upload_failed"
+    except Exception as exc:  # fail closed, including a changed private API
+        vt_result, hash_found, error_reason = None, False, f"exception: {exc}"
+    if error_reason in ("rate_limit", "quota_exceeded", "daily_cap_reached", "auth_error"):
+        summary["throttled"] = 1
+    elif error_reason:
+        summary["failed"] = 1
+    elif not hash_found:
+        summary["not_found"] = 1
+    else:
+        summary["scanned"] = 1
+        summary["scan_date"] = vt_result.get("scan_date")
+        if vt_result.get("malicious", 0) > 0:
+            summary["malicious"] = 1
+            findings = [analyzer._create_finding(
+                file_path=str(target), file_hash=file_hash, vt_result=vt_result)]
+        elif vt_result.get("suspicious", 0) > 0:
+            summary["suspicious"] = 1
+        else:
+            summary["clean"] = 1
 elif target.is_dir():
     findings = analyzer.analyze_directory(str(target))
-    summary = analyzer.last_scan_summary
+    # An empty summary only says Cisco found nothing to scan (Cisco leaves it
+    # empty only when no file is eligible; Cisco is not pinned, so this is an assumption). Cisco drops files under
+    # dot directories and __pycache__, symlinks that leave the root, and cannot tell
+    # text from a binary without puremagic. Count what it would check without those
+    # exclusions so that the verdict can tell "nothing there" from "nothing looked at".
+    summary = dict(analyzer.last_scan_summary or {"total_to_scan": 0})
+    # Any problem with Cisco internals (private API, import) makes every file count.
+    try:
+        from mcpscanner.utils import file_magic
+        magic_ok = bool(getattr(file_magic, "_PUREMAGIC_AVAILABLE", False))
+        magic_file = file_magic.puremagic.magic_file
+    except Exception:
+        magic_ok, magic_file = False, None
+    should_scan = getattr(analyzer, "_should_scan_file", None)
+    eligible = 0
+    for entry in target.rglob("*"):
+        try:
+            if entry.is_symlink():
+                eligible += 1  # never followed, so never checked
+            elif entry.is_file():
+                if not magic_ok or should_scan is None or should_scan(str(entry)):
+                    eligible += 1
+                elif entry.stat().st_size > 0:
+                    # Cisco swallows a failing type detection and calls the file text.
+                    # Run the detection again: when it fails, the file counts. An empty
+                    # file has nothing to check and cannot be detected.
+                    with entry.open("rb") as handle:
+                        handle.read(1)  # an unreadable file cannot be judged
+                    magic_file(str(entry))
+        except Exception:
+            eligible += 1
+    summary["agent_guard_eligible"] = eligible
+    summary["kind"] = "directory"
 else:
     print(json.dumps({"error": "missing_path"}))
     sys.exit(2)
@@ -370,7 +462,9 @@ def fetch_npm(spec: str, dest: Path) -> str:
     meta = http_json(f"https://registry.npmjs.org/{name}")
     version = version or meta.get("dist-tags", {}).get("latest")
     version = meta.get("dist-tags", {}).get(version, version)
-    ver = meta["versions"][version]
+    ver = meta.get("versions", {}).get(version)
+    if not ver:
+        die(f"{name}@{version} does not exist on npm; refusing a different version.")
     url = ver["dist"]["tarball"]
     print(f"  fetching npm tarball: {url}")
     safe_extract_tar(http_bytes(url), dest)
@@ -399,8 +493,9 @@ def run_cisco(cmd: list, label: str, env: dict = None) -> int:
               "install. The server may hang on start, or its dependencies are too "
               "slow to fetch. Raise SCAN_MCP_TIMEOUT or review manually.")
         return 2
-    out = (r.stdout or "") + (r.stderr or "")
-    print(out)
+    out = r.stdout or ""
+    # stderr is shown for the user but never parsed: it could carry a forged summary.
+    print(out + (r.stderr or ""))
     return verdict(out, r.returncode)
 
 
@@ -517,8 +612,14 @@ def run_sandbox(command: list, *, allow_hosts=(), network: bool = True) -> int:
     finally:
         # A timed-out analyzer may leave its child alive. Remove only this
         # invocation's uniquely named container, including on failed handshakes.
-        subprocess.run(["docker", "rm", "--force", container],
-                       capture_output=True, text=True, timeout=30)
+        # A failed cleanup must not replace the scan result or leave the capture
+        # container behind; say so instead.
+        try:
+            subprocess.run(["docker", "rm", "--force", container],
+                           capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"[WARN] could not remove sandbox container {container}: {exc}. "
+                  "Remove it manually (docker rm --force).", file=sys.stderr)
         if capture is not None and not finished:
             capture.remove()
     if capture is not None:
@@ -554,14 +655,20 @@ def _shquote(s: str) -> str:
 
 def _summary_int(output: str, key: str):
     """Pull an integer that follows `key:` in the scanner summary, or None."""
+    found = []
     for line in output.splitlines():
         low = line.lower().strip()
         if low.startswith(key):
             try:
-                return int(line.split(":", 1)[1])
+                found.append(int(line.split(":", 1)[1]))
             except (ValueError, IndexError):
                 return None
-    return None
+    # A repeated line is ambiguous: no value rather than the first one.
+    return found[0] if len(found) == 1 else None
+
+
+def _summary_line_count(output: str, key: str) -> int:
+    return sum(1 for line in output.splitlines() if line.lower().strip().startswith(key))
 
 
 def verdict(output: str, code: int) -> int:
@@ -606,6 +713,10 @@ def verdict(output: str, code: int) -> int:
     # Since 4.8.5 an analyzer that crashed leaves its item at is_safe=None,
     # listed as "Incomplete items: N". Unchecked is not clean.
     incomplete = _summary_int(output, "incomplete items:")
+    if unsafe == 0 and incomplete is None and _summary_line_count(output, "incomplete items:"):
+        print("[BLOCK] NO VERDICT -- the 'Incomplete items' line is unreadable or "
+              "repeated. Do NOT install. Re-run the scan.")
+        return 2
     if unsafe == 0 and incomplete:
         print(f"[BLOCK] NO VERDICT -- {incomplete} item(s) not fully analyzed (an "
               "analyzer failed, see above). Do NOT install. Re-run the scan.")
@@ -620,14 +731,26 @@ def verdict(output: str, code: int) -> int:
 
 
 def virustotal_verdict(report: dict) -> int:
-    summary = report.get("summary") or {}
+    summary = report.get("summary")
+    if not isinstance(summary, dict):
+        summary = {}
     findings = report.get("findings") or []
     print("\n" + "=" * 60)
     print("VirusTotal summary:")
     for key in ("total_found", "total_to_scan", "scanned", "clean", "malicious",
-                "not_found", "throttled", "failed", "skipped_by_limit"):
+                "suspicious", "not_found", "throttled", "failed", "skipped_by_limit"):
         if key in summary:
             print(f"  {key}: {summary[key]}")
+    scan_date = summary.get("scan_date")
+    if isinstance(scan_date, (int, float)):
+        import time
+        age_days = (time.time() - scan_date) / 86400
+        print(f"  last VirusTotal analysis: {time.strftime('%Y-%m-%d', time.gmtime(scan_date))} "
+              f"({age_days:.0f} days ago)")
+        if age_days > VT_STALE_DAYS:
+            print(f"  NOTE: that report is older than {VT_STALE_DAYS} days -- engines "
+                  "updated since then were not applied. Re-analyse on virustotal.com "
+                  "if in doubt.")
 
     if findings:
         for finding in findings:
@@ -638,8 +761,74 @@ def virustotal_verdict(report: dict) -> int:
         print("\n[BLOCK] VirusTotal flagged one or more files. Do not install.")
         return 1
 
+    # An absent or malformed summary is not a clean report (bool is not an int here).
+    total = summary.get("total_to_scan")
+    if not summary or type(total) is not int or total < 0:
+        print("\n[WARN] NO VERDICT -- the VirusTotal summary is missing or malformed. "
+              "Re-run the scan.")
+        return 2
+    if total > 0:
+        # Absent "malicious" has always meant none; the other counts must be present.
+        counts = [summary.get("scanned"), summary.get("clean"), summary.get("malicious", 0)]
+        scanned, clean, malicious = counts
+        if any(type(c) is not int or c < 0 for c in counts):
+            print("\n[WARN] NO VERDICT -- the VirusTotal summary is incomplete or has "
+                  "invalid counts. Re-run the scan.")
+            return 2
+        if malicious:
+            print("\n[BLOCK] VirusTotal counts malicious file(s). Do not install.")
+            return 1
+
+    # The helper marks every summary with its kind. A directory summary must carry
+    # the count of checkable files made by agent-guard itself, which Cisco must have
+    # matched; a summary of unknown kind or without the count cannot be trusted.
+    kind = summary.get("kind")
+    if kind not in ("file", "directory") or (kind == "file" and total != 1):
+        print("\n[WARN] NO VERDICT -- the VirusTotal summary does not say whether it "
+              "covers one file or a directory. Re-run the scan.")
+        return 2
+    if kind == "directory":
+        eligible = summary.get("agent_guard_eligible")
+        found = summary.get("total_found", total)
+        if type(eligible) is not int or eligible < 0:
+            print("\n[WARN] NO VERDICT -- the VirusTotal summary has no valid count of "
+                  "checkable files. Re-run the scan.")
+            return 2
+        if type(found) is not int or eligible > found:
+            print(f"\n[WARN] NO VERDICT -- {eligible} file(s) could be checked, but "
+                  f"VirusTotal looked at {found if type(found) is int else 0}. Cisco "
+                  "skips files under dot directories and __pycache__, symlinks and "
+                  "files whose type it cannot tell; those files were not checked. "
+                  "Review them manually.")
+            return 2
+
+    if total == 0:
+        print("\nNOTE: no file was eligible for a VirusTotal check, so there is "
+              "nothing to report.")
+
     if summary.get("failed", 0) or summary.get("throttled", 0):
         print("\n[WARN] INCONCLUSIVE -- some VirusTotal lookups failed or were throttled.")
+        return 2
+    if summary.get("not_found", 0):
+        print(f"\n[WARN] NO VERDICT -- VirusTotal has never seen {summary['not_found']} "
+              "file(s). Unknown is not clean: a new or targeted payload looks exactly "
+              "like this. Review manually.")
+        return 2
+    if summary.get("suspicious", 0):
+        print("\n[WARN] NO VERDICT -- VirusTotal engines rate a file suspicious. "
+              "Review the report manually.")
+        return 2
+    # Cisco's directory scan counts a suspicious-only file as scanned but neither
+    # clean nor malicious; any such gap is an unexplained result.
+    if total > 0 and (summary["scanned"] < 1
+                      or summary["clean"] + summary.get("malicious", 0) != summary["scanned"]
+                      or summary["clean"] != total):
+        print("\n[WARN] NO VERDICT -- the VirusTotal counts do not add up (not every "
+              "checked file came back clean). Review manually.")
+        return 2
+    if summary.get("skipped_by_limit", 0):
+        print(f"\n[WARN] NO VERDICT -- {summary['skipped_by_limit']} file(s) were not "
+              "checked (file limit). Raise MCP_SCANNER_VT_MAX_FILES or review manually.")
         return 2
 
     print("\n[SAFE] VirusTotal found no known-malicious files in the checked set.")
@@ -688,7 +877,8 @@ def main():
                              "scan, e.g. -- uvx package-name")
         _add_network_options(sp)
         sp.add_argument("--no-dynamic", action="store_true",
-                        help="skip the dynamic install analysis (Stage 1b, needs Docker)")
+                        help="skip the dynamic install analysis (Stage 1b, needs Docker); "
+                             "the result is NO VERDICT unless AGENT_GUARD_STATIC_ONLY=1")
 
     sp = sub.add_parser("local", help="scan a local MCP source directory")
     sp.add_argument("path")
@@ -717,7 +907,7 @@ def main():
             (fetch_pypi if args.mode == "pypi" else fetch_npm)(args.package, dest)
             rc = run_skillspector(dest)
         if args.no_dynamic:
-            print("[WARN] Dynamic install analysis skipped by --no-dynamic.")
+            rc = combine_verdicts(rc, skipped_dynamic_verdict())
         else:
             print("\n-- Stage 1b: dynamic install analysis (OpenSSF sandbox) --")
             rc = combine_verdicts(rc, _dynamic.run(args.mode, args.package, allow_hosts=args.allow_host))

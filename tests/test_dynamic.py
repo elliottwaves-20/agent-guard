@@ -66,7 +66,7 @@ def npm_clean():
                 names=["registry.npmjs.org"],
                 sockets=[("104.16.0.34", 0, ["registry.npmjs.org"]),
                          ("104.16.0.34", 443, ["registry.npmjs.org"]),
-                         ("8.8.8.8", 53, [])],
+                         ("10.0.0.2", 53, [])],
                 commands=[cmd("node", "/usr/bin/npm", "install", "is-number@7.0.0"),
                           cmd("sh", "-c", "node install.js"), cmd("node", "install.js")]),
         },
@@ -86,7 +86,7 @@ def pypi_clean():
                        write("/tmp/pip-unpack-abc"), write("/dev/null")],
                 names=["pypi.org", "files.pythonhosted.org"],
                 sockets=[("151.101.0.223", 443, ["files.pythonhosted.org", "pypi.org"]),
-                         ("2a04:4e42::223", 443, ["pypi.org"]), ("8.8.8.8", 53, [])],
+                         ("2a04:4e42::223", 443, ["pypi.org"]), ("10.0.0.2", 53, [])],
                 commands=[cmd("/app/.pyenv/bin/python3", "-m", "pip", "install", "six==1.17.0"),
                           cmd("uname", "-rs"), cmd("lsb_release", "-a"), cmd("rustc", "--version")]),
         },
@@ -155,6 +155,52 @@ class FindingTests(unittest.TestCase):
             "install: connection to 104.20.23.154:443 (example.com)",
             "install: connection to 203.0.113.7:4444 (no DNS name)"])
 
+    def test_port_53_counts_as_the_resolver_only_on_private_addresses(self):
+        with patch.dict(os.environ):
+            os.environ.pop("AGENT_GUARD_DNS_RESOLVERS", None)
+            self._port_53_only_on_private_addresses()
+
+    def _port_53_only_on_private_addresses(self):
+        result = npm_clean()
+        result["Analysis"]["install"]["Sockets"].append(
+            {"Address": "8.8.8.8", "Port": 53, "Hostnames": []})
+        self.assertEqual(analyse(result).findings,
+                         ["install: connection to 8.8.8.8:53 (no DNS name)"])
+        result = npm_clean()
+        result["Analysis"]["install"]["Sockets"].append(
+            {"Address": "10.0.0.2", "Port": 53, "Hostnames": []})
+        self.assertEqual(analyse(result).findings, [])
+
+    def test_configured_resolver_on_port_53_is_still_a_finding(self):
+        # OpenSSF sockets carry no protocol, so DNS over TCP cannot be told from UDP.
+        # The lookups are judged from the DNS block; the socket stays a finding.
+        result = npm_clean()
+        result["Analysis"]["install"]["Sockets"].append(
+            {"Address": "1.1.1.1", "Port": 53, "Hostnames": []})
+        with patch.dict(os.environ, {"AGENT_GUARD_DNS_RESOLVERS": "1.1.1.1"}):
+            self.assertEqual(analyse(result).findings,
+                             ["install: connection to 1.1.1.1:53 (no DNS name)"])
+
+    def test_missing_or_mistyped_result_key_is_no_verdict(self):
+        # A completed phase without Files/DNS/Sockets/Commands says nothing, it is
+        # not a clean phase. null is how the recorded output spells "none".
+        for key in ("Files", "DNS", "Sockets", "Commands"):
+            for broken in ("missing", "string", "dict", "number"):
+                with self.subTest(key=key, broken=broken):
+                    result = npm_clean()
+                    if broken == "missing":
+                        del result["Analysis"]["install"][key]
+                    else:
+                        result["Analysis"]["install"][key] = {
+                            "string": "x", "dict": {}, "number": 3}[broken]
+                    report = analyse(result)
+                    self.assertFalse(report.complete)
+                    self.assertIn(key, report.problem)
+                    self.assertIn("install", report.problem)
+        result = npm_clean()
+        result["Analysis"]["install"]["Sockets"] = None
+        self.assertTrue(analyse(result).complete)
+
     def test_registry_of_the_other_ecosystem_is_not_allowed(self):
         result = npm_clean()
         result["Analysis"]["install"]["DNS"][0]["Queries"].append(
@@ -219,6 +265,49 @@ class CompletenessTests(unittest.TestCase):
         result["Analysis"]["execute"]["Files"].append(read("/root/.ssh/id_rsa"))
         self.assertEqual(analyse(result).findings,
                          ["execute: reads sensitive file /root/.ssh/id_rsa"])
+
+    def test_crashed_execute_harness_record_lists_must_have_the_right_type(self):
+        for key, bad in (("Files", "oops"), ("DNS", 5), ("Sockets", {"a": 1}),
+                         ("Commands", "x")):
+            result = npm_clean()
+            result["Analysis"]["execute"] = phase(status="error_analysis")
+            result["Analysis"]["execute"][key] = bad
+            report = analyse(result)
+            self.assertFalse(report.complete, key)
+            self.assertIn(key, report.problem)
+        # what a crashed harness may legitimately leave: null, empty or absent lists
+        result = npm_clean()
+        result["Analysis"]["execute"] = {"Status": "error_analysis", "Files": None}
+        self.assertTrue(analyse(result).complete)
+
+    def test_unexpected_result_shapes_are_incomplete_not_a_crash(self):
+        shapes = []
+        result = npm_clean()
+        result["Analysis"]["install"]["Files"] = ["/etc/passwd"]       # entry is no object
+        shapes.append(result)
+        result = npm_clean()
+        result["Analysis"]["install"]["Sockets"] = [5]
+        shapes.append(result)
+        result = npm_clean()
+        result["Analysis"]["install"]["Commands"] = [{"Command": 5}]
+        shapes.append(result)
+        result = npm_clean()
+        result["Analysis"]["install"]["DNS"] = ["x"]
+        shapes.append(result)
+        result = npm_clean()
+        result["Analysis"]["import"] = 5
+        shapes.append(result)
+        result = npm_clean()
+        result["Analysis"] = ["install"]
+        shapes.append(result)
+        shapes.extend([[], None, "x"])
+        for result in shapes:
+            with self.subTest(result=str(result)[:60]):
+                report = analyse(result)
+                self.assertFalse(report.complete)
+                self.assertIn("could not be evaluated", report.problem)
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(dyn.verdict(report), 2)
 
     def test_only_execute_may_end_in_a_harness_error(self):
         for phase_name, status in [("execute", "error_timeout"), ("install", "error_analysis"),
@@ -367,11 +456,33 @@ class WiringTests(unittest.TestCase):
              patch.object(cli._dynamic, "run", return_value=0):
             self.assertEqual(self.main(cli, ["scan_cli.py", "pypi", "six"]), 1)
 
-    def test_scan_cli_no_dynamic_skips_the_stage(self):
+    @staticmethod
+    def env(static_only):
+        """Environment with AGENT_GUARD_STATIC_ONLY set or removed."""
+        e = {k: v for k, v in os.environ.items() if k != "AGENT_GUARD_STATIC_ONLY"}
+        if static_only:
+            e["AGENT_GUARD_STATIC_ONLY"] = "1"
+        return patch.dict(os.environ, e, clear=True)
+
+    def test_scan_cli_no_dynamic_is_no_verdict(self):
         cli = importlib.import_module("scan_cli")
-        with patch.object(cli, "run_guarddog", return_value=0), \
+        with self.env(False), patch.object(cli, "run_guarddog", return_value=0), \
+             patch.object(cli._dynamic, "run") as run:
+            self.assertEqual(self.main(cli, ["scan_cli.py", "pypi", "six", "--no-dynamic"]), 2)
+        run.assert_not_called()
+
+    def test_scan_cli_no_dynamic_with_static_only_is_safe(self):
+        cli = importlib.import_module("scan_cli")
+        with self.env(True), patch.object(cli, "run_guarddog", return_value=0), \
              patch.object(cli._dynamic, "run") as run:
             self.assertEqual(self.main(cli, ["scan_cli.py", "pypi", "six", "--no-dynamic"]), 0)
+        run.assert_not_called()
+
+    def test_scan_cli_no_dynamic_keeps_a_static_block(self):
+        cli = importlib.import_module("scan_cli")
+        with self.env(False), patch.object(cli, "run_guarddog", return_value=1), \
+             patch.object(cli._dynamic, "run") as run:
+            self.assertEqual(self.main(cli, ["scan_cli.py", "pypi", "six", "--no-dynamic"]), 1)
         run.assert_not_called()
 
     def test_scan_cli_go_has_no_dynamic_stage(self):
@@ -390,13 +501,37 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(code, 1)
         run.assert_called_once_with("pypi", "mcp-server-time", allow_hosts=[])
 
-    def test_scan_mcp_no_dynamic(self):
+    def test_scan_mcp_no_dynamic_is_no_verdict(self):
         sm = importlib.import_module("scan_mcp")
-        with patch.object(sm, "fetch_npm"), \
+        with self.env(False), patch.object(sm, "fetch_npm"), \
+             patch.object(sm, "run_skillspector", return_value=0), \
+             patch.object(sm._dynamic, "run") as run:
+            self.assertEqual(self.main(sm, ["scan_mcp.py", "npm", "x", "--no-dynamic"]), 2)
+        run.assert_not_called()
+
+    def test_scan_mcp_no_dynamic_with_static_only_is_safe(self):
+        sm = importlib.import_module("scan_mcp")
+        with self.env(True), patch.object(sm, "fetch_npm"), \
              patch.object(sm, "run_skillspector", return_value=0), \
              patch.object(sm._dynamic, "run") as run:
             self.assertEqual(self.main(sm, ["scan_mcp.py", "npm", "x", "--no-dynamic"]), 0)
         run.assert_not_called()
+
+    def test_scan_mcp_no_dynamic_keeps_a_static_block(self):
+        sm = importlib.import_module("scan_mcp")
+        with self.env(False), patch.object(sm, "fetch_pypi"), \
+             patch.object(sm, "run_skillspector", return_value=1), \
+             patch.object(sm._dynamic, "run") as run:
+            self.assertEqual(self.main(sm, ["scan_mcp.py", "pypi", "x", "--no-dynamic"]), 1)
+        run.assert_not_called()
+
+    def test_run_dynamic_stage_disabled_is_no_verdict(self):
+        su = importlib.import_module("scan_url")
+        with self.env(False), redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(su.run_dynamic_stage("pypi", "x==1", enabled=False), 2)
+        self.assertIn("NO VERDICT", out.getvalue())
+        with self.env(True), redirect_stdout(io.StringIO()):
+            self.assertEqual(su.run_dynamic_stage("pypi", "x==1", enabled=False), 0)
 
 
 class UrlScanTests(unittest.TestCase):
@@ -427,8 +562,16 @@ class UrlScanTests(unittest.TestCase):
         run.assert_called_once_with("npm", "some-mcp@2.0.0")
         offer.assert_not_called()
 
-    def test_no_dynamic_is_honoured(self):
-        code, run, offer = self.scan("npm", "some-mcp", "some-mcp@2.0.0", 1, dynamic=False)
+    def test_no_dynamic_is_no_verdict_and_no_install_offer(self):
+        with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": ""}):
+            code, run, offer = self.scan("npm", "some-mcp", "some-mcp@2.0.0", 1, dynamic=False)
+        self.assertEqual(code, 2)
+        run.assert_not_called()
+        offer.assert_not_called()
+
+    def test_no_dynamic_with_static_only_is_honoured(self):
+        with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}):
+            code, run, offer = self.scan("npm", "some-mcp", "some-mcp@2.0.0", 1, dynamic=False)
         self.assertEqual(code, 0)
         run.assert_not_called()
         offer.assert_called_once()

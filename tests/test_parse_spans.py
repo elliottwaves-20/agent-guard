@@ -40,6 +40,14 @@ class RunBootTests(unittest.TestCase):
             with self.subTest(kw):
                 self.assertEqual(self.run_with(**kw), [None, None])
 
+    def test_every_failure_says_why_on_stderr(self):
+        import contextlib, io, subprocess
+        for kw in ({"returncode": 1}, {"stdout": b"not json"}, {"stdout": b'[{"spans": []}]'},
+                   {"exc": subprocess.TimeoutExpired("x", 1)}, {"exc": OSError("missing")}):
+            with self.subTest(kw), contextlib.redirect_stderr(io.StringIO()) as err:
+                self.run_with(**kw)
+            self.assertIn("[WARN]", err.getvalue())
+
     def test_answers_are_matched_to_files(self):
         out = self.run_with(stdout=b'[{"spans": [[2, 2]]}, {"error": "x"}]')
         self.assertEqual(out, [[(2, 2)], None])

@@ -54,6 +54,7 @@ class Env:
         self.verdicts = {}          # name -> exit code
         self.findings = {}          # name -> [(rule, file, severity)]
         self.reports = {}           # optional raw report bytes; None means no report
+        self.llm = True             # metadata.llm_available of the fake report; None omits it
         self.scanned = []
         self.verifier = None        # stage d of the triage; off unless a test sets it
         self.head = REF             # the branch head ls-remote reports
@@ -88,7 +89,10 @@ class Env:
         if report_output is not None:
             issues = [{"id": r, "severity": v, "location": {"file": f, "start_line": 1}}
                       for r, f, v in findings]
-            content = self.reports.get(name, json.dumps({"issues": issues}).encode("utf-8"))
+            report = {"issues": issues}
+            if self.llm is not None:
+                report["metadata"] = {"llm_available": self.llm}
+            content = self.reports.get(name, json.dumps(report).encode("utf-8"))
             if content is not None:
                 Path(report_output).write_bytes(content)
         return code
@@ -224,6 +228,29 @@ class UpdateFlowTests(unittest.TestCase):
         env.verdicts["alpha"] = 2
         self.assertEqual(env.run("--all"), 2)
         self.assertIn("v1", (env.inbox / "alpha" / "SKILL.md").read_text())
+
+    def test_clean_scan_without_ai_analysis_is_quarantined(self):
+        # Whatever provider was meant to run: no AI analysis, no install.
+        for llm in (None, False):
+            with self.subTest(llm=llm), patch.dict(os.environ):
+                os.environ.pop("AGENT_GUARD_STATIC_ONLY", None)
+                env = Env(self)
+                write_skill(env.inbox / "alpha", "v1")
+                env.upstream[("o/r", "alpha")] = "v2"
+                env.origins({"alpha": "o/r"})
+                env.llm = llm
+                self.assertEqual(env.run("--all"), 2)
+                self.assertIn("v1", (env.inbox / "alpha" / "SKILL.md").read_text())
+
+    def test_static_only_policy_installs_without_ai_analysis(self):
+        env = Env(self)
+        write_skill(env.inbox / "alpha", "v1")
+        env.upstream[("o/r", "alpha")] = "v2"
+        env.origins({"alpha": "o/r"})
+        env.llm = None
+        with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}):
+            self.assertEqual(env.run("--all"), 0)
+        self.assertIn("v2", (env.inbox / "alpha" / "SKILL.md").read_text())
 
     def test_dry_run_changes_nothing(self):
         env = Env(self)

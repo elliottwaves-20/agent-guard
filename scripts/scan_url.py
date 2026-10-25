@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import shlex
 import shutil
 import sys
@@ -11,7 +13,7 @@ import tempfile
 import urllib.parse
 from pathlib import Path
 
-from _skillspector import combine_verdicts, die
+from _skillspector import combine_verdicts, die, skipped_dynamic_verdict as _skipped_dynamic_verdict
 from _url_resolver import FetchError, ResolvedSource, resolve_url
 from install_skill import (
     TOOLS,
@@ -29,7 +31,208 @@ from scan_skill import run_skillspector as run_skill_static
 
 
 def has_skill_manifest(path: Path) -> bool:
-    return path.is_dir() and ((path / "SKILL.md").is_file() or (path / "skill.md").is_file())
+    return path.is_dir() and any(
+        p.is_file() and p.name.lower() == "skill.md" for p in path.iterdir()
+    )
+
+
+DOC_SUFFIXES = {".md", ".markdown", ".txt", ".rst", ".png", ".jpg", ".jpeg", ".gif",
+                ".svg", ".webp"}
+DOC_NAME_PREFIXES = ("license", "copying", "notice")
+DOC_NAMES = {".gitignore", ".gitattributes", ".gitmodules", ".editorconfig"}
+# Extensionless project files that only carry prose (documentation only when the
+# file does not start with a shebang).
+DOC_BARE_NAMES = {"changelog", "changes", "history", "authors", "contributors"}
+# The only dot directory that is documentation; every other dot directory holds
+# tool or agent configuration.
+DOC_DIRS = {".git"}
+# Text suffixes under which an agent can still read instructions.
+TEXT_SUFFIXES = {".md", ".markdown", ".txt", ".rst"}
+# Agents load these as instructions or prompts, so they are code for our
+# purposes even though they look like prose. .svg stays documentation: agent-guard
+# installs only skill folders and agents do not execute SVG. This is a block list
+# on purpose: an allow list would send every normal collection to exit 2.
+PROMPT_FILE_NAMES = {"agent.md", "agents.md", "claude.md", "gemini.md",
+                     "copilot-instructions.md", ".clinerules", ".cursorrules",
+                     ".windsurfrules"}
+PROMPT_FILE_SUFFIXES = (".prompt.md", ".chatmode.md", ".instructions.md")
+PROMPT_DIRS = {"prompt", "prompts", "command", "commands", "agent", "agents", "rule",
+               "rules", "chatmodes", "instructions", "hooks", "workflows",
+               "output-styles"}
+# The parts of .github that carry no instructions or steps. .github/workflows
+# holds executable steps and is none of them.
+GITHUB_HARMLESS_DIRS = {"issue_template", "discussion_template", "pull_request_template"}
+GITHUB_HARMLESS_FILES = {"funding.yml", "funding.yaml", "codeowners", "dependabot.yml",
+                         "dependabot.yaml"}
+
+# Plugin/marketplace manifests count as documentation only when they hold pure
+# metadata: keys such as hooks, mcpServers, lspServers, commands, agents or
+# outputStyles can make an agent run commands. A plugin whose source is not a
+# relative path inside the repo lives elsewhere, unscanned.
+MANIFEST_TOP_KEYS = {"$schema", "name", "owner", "metadata", "description", "version",
+                     "author", "homepage", "repository", "license", "keywords",
+                     "plugins"}
+MANIFEST_PLUGIN_KEYS = {"name", "source", "description", "version", "author", "homepage",
+                        "repository", "license", "keywords", "category", "tags",
+                        "strict", "skills"}
+_STR, _STRS, _DICT, _STR_OR_DICT, _BOOL = "str", "strs", "dict", "str_or_dict", "bool"
+MANIFEST_TYPES = {
+    "$schema": _STR, "name": _STR, "owner": _DICT, "metadata": _DICT,
+    "description": _STR, "version": _STR, "author": _STR_OR_DICT, "homepage": _STR,
+    "repository": _STR_OR_DICT, "license": _STR, "keywords": _STRS, "source": _STR,
+    "category": _STR, "tags": _STRS, "strict": _BOOL, "skills": "str_or_strs",
+}
+
+
+def _type_ok(value, kind: str) -> bool:
+    if kind == _STR:
+        return isinstance(value, str)
+    if kind == _STRS:
+        return isinstance(value, list) and all(isinstance(v, str) for v in value)
+    if kind == _DICT:
+        return isinstance(value, dict)
+    if kind == _STR_OR_DICT:
+        return isinstance(value, (str, dict))
+    if kind == _BOOL:
+        return isinstance(value, bool)
+    if kind == "str_or_strs":
+        return isinstance(value, str) or _type_ok(value, _STRS)
+    return False
+
+
+def _no_duplicate_keys(pairs):
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
+def _relative_path_inside(value) -> bool:
+    """A `./` path without `..` parts: it cannot leave the repository."""
+    if not isinstance(value, str) or not value.startswith("./") or "\0" in value:
+        return False
+    return ".." not in re.split(r"[\\/]", value)
+
+
+def _plugin_paths_inside(entry: dict) -> bool:
+    if "source" in entry and not _relative_path_inside(entry["source"]):
+        return False
+    skills = entry.get("skills")
+    if skills is None:
+        return True
+    return all(_relative_path_inside(s) for s in ([skills] if isinstance(skills, str) else skills))
+
+
+def is_pure_manifest_metadata(path: Path) -> bool:
+    """True only for valid JSON that holds nothing but allowed metadata keys.
+
+    Any error while checking (also a RecursionError from deeply nested JSON)
+    means the manifest is not documentation."""
+    try:
+        return _is_pure_manifest(json.loads(path.read_text(encoding="utf-8"),
+                                            object_pairs_hook=_no_duplicate_keys))
+    except Exception:
+        return False
+
+
+def _is_pure_manifest(data) -> bool:
+    if not isinstance(data, dict) or not set(data) <= MANIFEST_TOP_KEYS:
+        return False
+    for key, value in data.items():
+        if key == "plugins":
+            if not isinstance(value, list):
+                return False
+            for entry in value:
+                if not isinstance(entry, dict) or not set(entry) <= MANIFEST_PLUGIN_KEYS:
+                    return False
+                if not all(_type_ok(v, MANIFEST_TYPES[k]) for k, v in entry.items()):
+                    return False
+                if not _plugin_paths_inside(entry):
+                    return False
+        elif not _type_ok(value, MANIFEST_TYPES[key]):
+            return False
+    root_dir = (data.get("metadata") or {}).get("pluginRoot")
+    if root_dir is not None and not _relative_path_inside(root_dir):
+        return False
+    return True
+
+
+def _has_no_shebang(root: Path | None, rel: Path) -> bool:
+    """True when the file is readable and does not start with a shebang."""
+    if root is None:
+        return False
+    try:
+        with (root / rel).open("rb") as handle:
+            return handle.read(2) != b"#!"
+    except OSError:
+        return False
+
+
+def _github_file_is_harmless(parts: list[str], name: str, suffix: str) -> bool:
+    rest = parts[1:]
+    if len(rest) == 1:
+        return suffix in DOC_SUFFIXES or name in GITHUB_HARMLESS_FILES
+    if rest[0] in GITHUB_HARMLESS_DIRS:
+        return suffix in DOC_SUFFIXES or suffix in {".yml", ".yaml"}
+    # images in other folders (screenshots for the README) carry no instructions
+    return suffix in DOC_SUFFIXES - TEXT_SUFFIXES
+
+
+def is_documentation_file(rel: Path, root: Path | None = None) -> bool:
+    """True when `rel` is prose or metadata that no agent loads as instructions.
+
+    `root` is the source tree; without it manifest contents and extensionless
+    files cannot be checked and are never documentation."""
+    try:
+        return _is_documentation_file(rel, root)
+    except Exception:
+        return False
+
+
+def _is_documentation_file(rel: Path, root: Path | None) -> bool:
+    name = rel.name.lower()
+    suffix = rel.suffix.lower()
+    parts = [p.lower() for p in rel.parts]
+    dirs = parts[:-1]
+    if name in PROMPT_FILE_NAMES or name.endswith(PROMPT_FILE_SUFFIXES):
+        return False
+    if suffix in TEXT_SUFFIXES and any(d in PROMPT_DIRS for d in dirs):
+        return False
+    if parts[:1] == [".claude-plugin"] and name in {"marketplace.json", "plugin.json"}:
+        if root is None:
+            return False
+        if name == "plugin.json" or len(parts) == 2:
+            return is_pure_manifest_metadata(root / rel)
+        return False
+    if parts[:1] == [".github"]:
+        return _github_file_is_harmless(parts, name, suffix)
+    if any(d.startswith(".") and d not in DOC_DIRS for d in dirs):
+        return False   # .claude, .cursor, .roo, .kiro, .clinerules ...
+    if name.startswith(DOC_NAME_PREFIXES):
+        # license.sh is code, not a license text
+        if suffix == "":
+            return _has_no_shebang(root, rel)
+        return suffix in TEXT_SUFFIXES
+    if name in DOC_BARE_NAMES:
+        return _has_no_shebang(root, rel)
+    return suffix in DOC_SUFFIXES or name in DOC_NAMES
+
+
+def files_outside_skills(root: Path, skills: list) -> list[Path]:
+    """Non-documentation files that no skill scan covers (relative to root)."""
+    skill_dirs = [Path(s).resolve() for s in skills]
+    out = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() and not p.is_symlink():
+            continue
+        resolved = p.resolve()
+        if any(sd == resolved.parent or sd in resolved.parents for sd in skill_dirs):
+            continue
+        rel = p.relative_to(root)
+        if is_documentation_file(rel, root):
+            continue
+        out.append(rel)
+    return out
 
 
 def classify_source(source: ResolvedSource) -> str:
@@ -52,7 +255,7 @@ def classify_source(source: ResolvedSource) -> str:
     # static-source signal, but runtime verification still needs explicit command.
     if (path / "pyproject.toml").is_file() or (path / "package.json").is_file():
         return "mcp-source"
-    return "catalog"
+    return "unknown"
 
 
 def print_skill_install_hint(path: Path, dry_run: bool) -> None:
@@ -270,7 +473,7 @@ def print_marketplace_candidate_summary(source: ResolvedSource) -> bool:
         for command in install_commands[:50]:
             print(f"  - {command}")
     if not has_candidate:
-        print("[BLOCK] NO INSTALLABLE SOURCE -- marketplace/catalog page was "
+        print("[NO VERDICT] NO INSTALLABLE SOURCE -- marketplace/catalog page was "
               "read and scanned as text, but no concrete local package/source, "
               "remote MCP URL, or install command was discovered. This is not a "
               "verdict for the listed skill or MCP. Use a direct "
@@ -320,20 +523,25 @@ def scan_marketplace_candidates(source: ResolvedSource, sandbox: bool,
             if not sandbox:
                 print("[BLOCK] NO VERDICT -- discovered remote endpoint was not contacted. "
                       "Use --sandbox for explicit runtime inspection or scan the chosen remote URL directly.")
-                worst = max(worst, 2)
+                worst = combine_verdicts(worst, 2)
                 continue
             rc = run_remote(item)
             if rc == 0:
                 offer_remote_mcp_install(mcp_name_from_url(item), item, dry_run=dry_run)
         else:
             rc = scan_install_command(item, sandbox=sandbox, dry_run=dry_run)
-        worst = max(worst, rc)
+        worst = combine_verdicts(worst, rc)
+
+    left_out = len(candidates) - scanned
+    if left_out:
+        worst = combine_verdicts(worst, 2)
 
     print("\n" + "=" * 60)
     if worst == 0:
         print("[SAFE] Marketplace candidate scan completed without blocking findings.")
     else:
-        print(f"[BLOCK] One or more marketplace candidates failed or were incomplete "
+        tag = "BLOCK" if worst == 1 else "NO VERDICT"
+        print(f"[{tag}] One or more marketplace candidates failed or were incomplete "
               f"(worst exit {worst}).")
     return worst
 
@@ -343,7 +551,7 @@ def scan_candidate_source_url(url: str) -> int:
         try:
             source = resolve_url(url, Path(d))
         except FetchError as e:
-            print(f"[BLOCK] candidate fetch failed: {e}")
+            print(f"[NO VERDICT] candidate fetch failed: {e}")
             return 2
         return scan_resolved(source, "auto", dry_run=True)
 
@@ -362,7 +570,7 @@ def scan_install_command(command: str, sandbox: bool, dry_run: bool) -> int:
         try:
             args = shlex.split(command, posix=True)
         except ValueError:
-            print("[BLOCK] Could not parse install command for sandbox runtime scan.")
+            print("[NO VERDICT] Could not parse install command for sandbox runtime scan.")
             return combine_verdicts(rc, 2)
         sandbox_rc = run_sandbox(args)
         rc = combine_verdicts(rc, sandbox_rc)
@@ -421,8 +629,7 @@ def persist_source(source: ResolvedSource, keep_source: Path | None) -> Path | N
 def run_dynamic_stage(ecosystem: str, pinned: str, enabled: bool) -> int:
     """Install analysis of exactly the version the static scan fetched."""
     if not enabled:
-        print("[WARN] Dynamic install analysis skipped by --no-dynamic.")
-        return 0
+        return _skipped_dynamic_verdict()
     print("\n-- Dynamic install analysis (OpenSSF sandbox) --")
     return _dynamic.run(ecosystem, pinned)
 
@@ -431,6 +638,13 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
                   keep_source: Path | None = None, sandbox: bool = False,
                   scan_candidates: bool = True, max_candidates: int = 10,
                   dynamic: bool = True) -> int:
+    if kind in {"catalog", "markdown"}:
+        # An explicit kind must not shrink a repo or directory to a README check.
+        detected = classify_source(source)
+        if detected not in {"catalog", "markdown", "file"}:
+            print(f"[BLOCK] NO VERDICT -- --kind {kind} would check only the README "
+                  f"of a {detected} source.")
+            return 2
     if kind == "auto":
         kind = classify_source(source)
     stable_path = persist_source(source, keep_source)
@@ -456,7 +670,7 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
             rc = run_mcp_static(Path(d))
         rc = combine_verdicts(rc, run_dynamic_stage("npm", pinned, dynamic))
         if rc == 0:
-            offer_mcp_install(source.install_hint, "npx",
+            offer_mcp_install(pinned.rpartition("@")[0], "npx",
                               ["--silent", "-y", pinned], dry_run)
         return rc
 
@@ -473,12 +687,23 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
     if kind == "skill-collection":
         worst = 0
         skills = find_skill_dirs(path)
+        if not skills:
+            print("[BLOCK] NO VERDICT -- no skill found in the skill collection.")
+            return 2
         for d in skills:
             print(f"\n== {d} ==")
-            worst = max(worst, run_skill_static(d))
+            worst = combine_verdicts(worst, run_skill_static(d))
+        unscanned = files_outside_skills(path, skills)
+        if unscanned:
+            print("\n[BLOCK] NO VERDICT -- files outside the skill folders were not scanned:")
+            for rel in unscanned[:20]:
+                print(f"  {rel}")
+            if len(unscanned) > 20:
+                print(f"  ... and {len(unscanned) - 20} more")
+            worst = combine_verdicts(worst, 2)
         print("\n" + "=" * 60)
         print(f"Scanned {len(skills)} skill(s). Worst verdict -> exit {worst} "
-              f"({'BLOCK' if worst else 'all SAFE'}).")
+              f"({'all SAFE' if worst == 0 else 'BLOCK' if worst == 1 else 'NO VERDICT'}).")
         if worst == 0:
             print("Install concrete SAFE skill directories individually, for example:")
             if dry_run:
@@ -498,6 +723,11 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
             offer_git_mcp_install(source, dry_run)
         return rc
 
+    if kind == "unknown":
+        print("[BLOCK] NO VERDICT -- unsupported repo layout: no skill, no package "
+              "manifest. A README-only check is not a verdict.")
+        return 2
+
     if kind in {"catalog", "markdown", "file"}:
         rc = scan_catalog(path)
         if source.kind == "catalog":
@@ -505,7 +735,8 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
             if not has_candidate:
                 return 2
             if rc != 0:
-                print("[BLOCK] Catalog scan produced a blocking verdict; candidate "
+                tag = "BLOCK" if rc == 1 else "NO VERDICT"
+                print(f"[{tag}] Catalog scan did not end SAFE; candidate "
                       "scans and install prompts are skipped.")
                 return rc
             if scan_candidates:
@@ -514,7 +745,16 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
                     dry_run=dry_run
                 )
                 return combine_verdicts(rc, candidate_rc)
-            return rc
+            print("\n[BLOCK] NO VERDICT -- --no-scan-candidates: the listed candidates "
+                  "were NOT scanned, so only the listing text has a verdict:")
+            for label, items in (
+                ("source", source.source_urls or source.urls or []),
+                ("remote MCP", source.remote_urls or []),
+                ("install command", source.install_commands or []),
+            ):
+                for item in items:
+                    print(f"  - unscanned {label} candidate: {item}")
+            return combine_verdicts(rc, 2)
         return rc
 
     die(f"unsupported detected type: {kind}")
@@ -542,9 +782,11 @@ def main() -> None:
                              "live Cisco stdio scans in Docker for install commands")
     parser.add_argument("--no-dynamic", action="store_true",
                         help="skip the dynamic install analysis of PyPI/npm packages "
-                             "(it needs Docker)")
+                             "(it needs Docker); the result is NO VERDICT "
+                             "unless AGENT_GUARD_STATIC_ONLY=1")
     parser.add_argument("--max-candidates", type=int, default=10,
-                        help="maximum marketplace candidates to scan automatically")
+                        help="maximum marketplace candidates to scan automatically; "
+                             "candidates left out give exit 2")
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as d:

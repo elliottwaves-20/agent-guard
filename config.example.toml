@@ -123,7 +123,10 @@ key_env = "ANTHROPIC_API_KEY"
 # With it, install_skill.py publishes the SAFE skill into `inbox`, runs `sync`
 # once and prints the sync's lines that mention the skill; --tools and
 # --workspace are refused. The sync must not change scanned files (checked).
-# A missing, failing or slow sync leaves the skill in the inbox with a warning.
+# A failing or slow sync, a synced copy with changed or extra files, or a skill
+# missing at the inbox path ends the installer with exit 2 (no [OK] line; extra
+# files mean the skill is already in place and must be reviewed or removed by
+# hand). Only "no sync command configured" is a plain note.
 # The sync runs without credentials in its environment.
 [distribution]
 mode = "sync"

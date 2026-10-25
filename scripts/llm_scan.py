@@ -117,6 +117,16 @@ def campaign_policy(env=None) -> dict:
         raise Paused(str(exc)) from None
 
 
+def scanner_exit_code(value) -> int:
+    """Exit code of a SkillSpector run: None or 0 is success, 1 stays 1, all else is 2.
+
+    With standalone_mode=False click returns the code of typer.Exit instead of
+    raising SystemExit, so a returned 1 or 2 must not be read as success."""
+    if value is None or (type(value) is int and value == 0):
+        return 0
+    return 1 if type(value) is int and value == 1 else 2
+
+
 def scan(session, campaign, preview, policy):
     info = validate_session(session, campaign, policy)
     from _llm_adapter import ProviderError, install, live_transport
@@ -141,11 +151,11 @@ def scan(session, campaign, preview, policy):
         report.unlink()  # Previous partial report is not evidence for this pass.
     exit_code = 2
     try:
-        app(args=["scan", str(session / "snapshot"), "--format", "json", "--output", str(report)],
-            standalone_mode=False)
-        exit_code = 0
+        returned = app(args=["scan", str(session / "snapshot"), "--format", "json",
+                             "--output", str(report)], standalone_mode=False)
+        exit_code = scanner_exit_code(returned)
     except SystemExit as exc:
-        exit_code = exc.code
+        exit_code = scanner_exit_code(exc.code)
     finally:
         summary = budget.summary()
         summary["snapshot_intact"] = manifest(session / "snapshot") == info["files"]
@@ -199,12 +209,23 @@ def main():
         return scan(session, campaign, args.command == "plan", policy)
 
 
+def run() -> int:
+    """main() with every failure that is not a verdict turned into exit 2.
+
+    Python ends an uncaught exception with exit 1, which reads as BLOCK. An
+    explicit SystemExit is left alone."""
+    try:
+        return main()
+    except (Paused, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        print(f"INCOMPLETE: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:   # click errors, a changed SkillSpector API, bugs
+        print(f"INCOMPLETE: unexpected {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
     import _console
 
     _console.utf8_stdio()
-    try:
-        sys.exit(main())
-    except (Paused, OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        print(f"INCOMPLETE: {exc}", file=sys.stderr)
-        sys.exit(2)
+    sys.exit(run())

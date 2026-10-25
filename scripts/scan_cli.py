@@ -16,7 +16,8 @@ detection:
                        npm / pypi add a dynamic stage by default: the package is
                        installed and imported in OpenSSF's package-analysis
                        sandbox and its file, network and process activity is
-                       judged (_dynamic.py). --no-dynamic skips it knowingly.
+                       judged (_dynamic.py). --no-dynamic skips it and gives exit 2
+                       unless AGENT_GUARD_STATIC_ONLY=1.
   binary <url>      -> download (never executed), SHA256, VirusTotal hash
                        reputation check (reuses the scan_mcp.py stage).
                        --deep adds a malcontent capability scan via Docker.
@@ -32,11 +33,12 @@ detection:
 Exit codes (same contract as scan_skill.py / scan_mcp.py):
   0 = SAFE verdict       (nothing known-bad found -- NOT a guarantee)
   1 = BLOCK verdict      (findings -- this is a verdict, not an error)
-  2 = no verdict         (scanner failed/unparsable -- fail closed)
+  2 = no verdict         (anything unchecked or failed -- fail closed)
 
 Detection limits (documented, not hidden):
-  - VirusTotal only recognises KNOWN malware hashes; novel or targeted
-    binaries pass unnoticed.
+  - VirusTotal only knows files it has seen: an unseen hash gives NO VERDICT
+    (exit 2), never SAFE. A known-and-clean hash can still be a targeted
+    payload that no engine detects yet; prefer signed releases.
   - malcontent's Windows PE analysis is weaker than its ELF analysis.
   - GuardDog is heuristic; a clean result is not proof of harmlessness.
   - A static script scan cannot see second-stage payloads fetched at runtime.
@@ -62,7 +64,15 @@ import urllib.request
 from pathlib import Path
 
 import _dynamic
-from _skillspector import SCAN_TIMEOUT, combine_verdicts, die, run_bounded, run_skillspector
+from _skillspector import (
+    SCAN_TIMEOUT,
+    combine_verdicts,
+    die,
+    run_bounded,
+    run_skillspector,
+    skipped_dynamic_verdict,
+)
+from _url_resolver import safe_basename
 from scan_mcp import http_bytes, http_json, run_virustotal, safe_extract_tar
 
 GUARDDOG_IMAGE = os.environ.get(
@@ -154,7 +164,10 @@ def guarddog_command(ecosystem: str, package: str, version: str = None) -> list:
         die("GuardDog is not on PATH and Docker was not found. On Windows, "
             "GuardDog only runs via Docker -- start Docker Desktop, or install "
             "GuardDog natively (Linux/macOS: pipx install guarddog).")
-    return ["docker", "run", "--rm", GUARDDOG_IMAGE] + args
+    # --pull=always: `docker run` reuses a cached :latest image forever, so the
+    # heuristics would freeze at the first pull. Offline, the pull fails and the
+    # run produces no report -> NO VERDICT.
+    return ["docker", "run", "--rm", "--pull=always", GUARDDOG_IMAGE] + args
 
 
 # GuardDog 3.0 ships two kinds of rules. `capability-*` rules are transparency
@@ -259,7 +272,7 @@ def run_guarddog(ecosystem: str, spec: str) -> int:
     shown = version or "latest"
     print(f"  GuardDog scan ({ecosystem}): {package} {shown}")
     if cmd[0] == "docker":
-        print(f"  via Docker image {GUARDDOG_IMAGE} (first run pulls the image)")
+        print(f"  via Docker image {GUARDDOG_IMAGE} (pulled fresh on every run)")
     try:
         r = run_bounded(cmd, timeout=SCAN_TIMEOUT)
     except subprocess.TimeoutExpired:
@@ -289,12 +302,20 @@ def malcontent_verdict(report: dict) -> int:
     """Judge a malcontent JSON report: CRITICAL/HIGH risk -> BLOCK."""
     print("\n" + "=" * 60)
     files = report.get("Files") or {}
+    if not isinstance(files, dict):
+        print("[BLOCK] NO VERDICT -- malcontent report has an unexpected format "
+              "(Files is not an object). Review manually before installing.")
+        return 2
     worst = ""
+    unknown = False
     order = ["NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
     for name, info in files.items():
-        level = str((info or {}).get("RiskLevel") or "NONE").upper()
-        print(f"  {name}: risk {level}")
-        if order.index(level) > order.index(worst or "NONE"):
+        raw = info.get("RiskLevel") if isinstance(info, dict) else None
+        level = str(raw).upper() if raw else ""
+        print(f"  {name}: risk {level or 'MISSING'}")
+        if level not in order:
+            unknown = True
+        elif order.index(level) > order.index(worst or "NONE"):
             worst = level
     if not files:
         print("[WARN] NO VERDICT -- malcontent reported no analyzed files. "
@@ -304,6 +325,10 @@ def malcontent_verdict(report: dict) -> int:
         print(f"[BLOCK] malcontent rates the binary {worst} risk -- review its "
               "behavior report before installing.")
         return 1
+    if unknown:
+        print("[BLOCK] NO VERDICT -- malcontent gave a missing or unknown risk "
+              "level for at least one file. Review manually before installing.")
+        return 2
     print(f"[SAFE] malcontent risk level {worst or 'NONE'}. Capability analysis "
           "only -- Windows PE coverage is weaker than ELF; not a guarantee.")
     return 0
@@ -320,7 +345,7 @@ def run_malcontent(path: Path) -> int:
     print(f"  malcontent capability scan via {MALCONTENT_IMAGE}")
     print("  NOTE: malcontent's Windows PE analysis is weaker than ELF -- "
           "treat a clean result on .exe files with extra care.")
-    cmd = ["docker", "run", "--rm",
+    cmd = ["docker", "run", "--rm", "--pull=always",
            "-v", f"{path.parent}:/scan:ro",
            MALCONTENT_IMAGE,
            "--format=json", "analyze", f"/scan/{path.name}"]
@@ -348,15 +373,20 @@ def run_malcontent(path: Path) -> int:
 
 def run_binary(url: str, deep: bool) -> int:
     with tempfile.TemporaryDirectory() as d:
-        dest = Path(d) / (url.rstrip("/").rsplit("/", 1)[-1] or "download.bin")
+        dest = Path(d) / safe_basename(url, "download.bin")
+        if dest.resolve().parent != Path(d).resolve():
+            print("[BLOCK] NO VERDICT -- the download name would leave the "
+                  "temp directory. Do NOT install.")
+            return 2
         print(f"  downloading (never executed): {url}")
         _download(url, dest)
         digest = _sha256(dest)
         print(f"  SHA256: {digest}")
         print(f"  size:   {dest.stat().st_size} bytes")
-        print("  LIMIT: VirusTotal only recognises KNOWN malware hashes. A "
-              "novel or targeted binary passes this check unnoticed. Prefer "
-              "binaries from signed releases of well-known projects.")
+        print("  LIMIT: VirusTotal only knows files it has seen. An unseen hash "
+              "gives NO VERDICT (exit 2), never SAFE. A known-and-clean hash "
+              "can still be a targeted payload that no engine detects yet. "
+              "Prefer signed releases of well-known projects.")
         rc = run_virustotal(dest, max_files=1)
         if deep:
             print("\n-- deep: malcontent capability analysis --")
@@ -368,10 +398,14 @@ def run_binary(url: str, deep: bool) -> int:
 
 def run_script(url: str) -> int:
     with tempfile.TemporaryDirectory() as d:
-        name = url.rstrip("/").rsplit("/", 1)[-1] or "installer"
+        name = safe_basename(url, "installer")
         if "." not in name:
             name += ".sh"
         dest = Path(d) / name
+        if dest.resolve().parent != Path(d).resolve():
+            print("[BLOCK] NO VERDICT -- the download name would leave the "
+                  "temp directory. Do NOT install.")
+            return 2
         print(f"  downloading installer (never executed): {url}")
         _download(url, dest)
         print(f"  SHA256: {_sha256(dest)}")
@@ -424,7 +458,8 @@ def run_cargo(spec: str) -> int:
 
 def _add_dynamic_options(sp):
     sp.add_argument("--no-dynamic", action="store_true",
-                    help="skip the dynamic install analysis (it needs Docker)")
+                    help="skip the dynamic install analysis (it needs Docker); the result is "
+                         "NO VERDICT unless AGENT_GUARD_STATIC_ONLY=1")
     sp.add_argument("--allow-host", action="append", default=[], metavar="HOST[:PORT]",
                     help="dynamic analysis: also allow this destination (default port 443; the "
                          "package registry is always allowed). Repeatable")
@@ -462,8 +497,7 @@ def main():
     if args.mode in _dynamic.ECOSYSTEMS:
         rc = run_guarddog(args.mode, args.package)
         if args.no_dynamic:
-            print("[WARN] Dynamic install analysis skipped by --no-dynamic.")
-            sys.exit(rc)
+            sys.exit(combine_verdicts(rc, skipped_dynamic_verdict()))
         print("\n-- Dynamic install analysis (OpenSSF sandbox) --")
         sys.exit(combine_verdicts(rc, _dynamic.run(args.mode, args.package,
                                                    allow_hosts=args.allow_host)))

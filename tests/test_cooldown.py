@@ -36,8 +36,13 @@ class Pages:
         return self.pages.pop(0) if self.pages else []
 
 
-def settled(fetch, head=HEAD):
-    return staging.settled_ref("o/r", "main", head, now=NOW, fetch=fetch)
+def repo_created(days_ago):
+    ts = (NOW - dt.timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return lambda url: {"created_at": ts}
+
+
+def settled(fetch, head=HEAD, repo=None):
+    return staging.settled_ref("o/r", "main", head, now=NOW, fetch=fetch, fetch_repo=repo)
 
 
 class SettledRefTests(unittest.TestCase):
@@ -49,8 +54,37 @@ class SettledRefTests(unittest.TestCase):
     def test_head_older_than_seven_days_is_used(self):
         self.assertEqual(settled(Pages([activity(HEAD, 8)]))[0], HEAD)
 
-    def test_no_branch_activity_means_head_is_old(self):
-        self.assertEqual(settled(Pages([]))[0], HEAD)
+    def test_no_activity_in_an_old_repo_means_head_is_old(self):
+        self.assertEqual(settled(Pages([]), repo=repo_created(30)), (HEAD, None))
+
+    def test_no_activity_in_a_young_repo_stops(self):
+        with self.assertRaises(staging.StageError):
+            settled(Pages([]), repo=repo_created(2))
+
+    def test_no_activity_without_repo_age_stops(self):
+        def fail(url):
+            raise url_resolver.FetchError("boom")
+
+        for repo in (fail, lambda url: {}, lambda url: {"created_at": "yesterday"},
+                     lambda url: {"created_at": "2026-10-01T00:00:00"}, lambda url: ["x"]):
+            with self.subTest(repo=repo), self.assertRaises(staging.StageError):
+                settled(Pages([]), repo=repo)
+
+    def test_repo_age_is_read_from_the_repository_endpoint(self):
+        urls = []
+
+        def repo(url):
+            urls.append(url)
+            return {"created_at": "2026-09-01T00:00:00Z"}
+
+        settled(Pages([]), repo=repo)
+        self.assertEqual(urls, ["https://api.github.com/repos/o/r"])
+
+    def test_repo_age_is_not_asked_when_there_is_branch_activity(self):
+        def repo(url):
+            raise AssertionError("repository age must not be fetched")
+
+        self.assertEqual(settled(Pages([activity(HEAD, 8)]), repo=repo)[0], HEAD)
 
     def test_all_recent_falls_back_to_the_state_before_the_oldest(self):
         fetch = Pages([activity(HEAD, 1, before=MID), activity(MID, 3, before=OLD)])
@@ -130,6 +164,40 @@ class RemoteHeadTests(unittest.TestCase):
                        SimpleNamespace(returncode=0, stdout="garbage\n", stderr="")):
             with self.assertRaises(staging.StageError):
                 staging.remote_head("o/r", run=lambda argv, r=result, **kw: r)
+
+
+class FetchFailureTests(unittest.TestCase):
+    """A bad answer or a timeout is a FetchError, so settled_ref ends in StageError."""
+
+    def _urlopen(self, body=None, error=None):
+        import io
+        from unittest.mock import MagicMock
+        if error is not None:
+            return MagicMock(side_effect=error)
+        resp = MagicMock()
+        resp.__enter__.return_value = resp
+        resp.headers.get.return_value = ""
+        resp.read.return_value = body
+        resp.fp = io.BytesIO(body)
+        return MagicMock(return_value=resp)
+
+    def test_invalid_json_and_timeouts_become_fetch_errors(self):
+        import socket
+        from unittest.mock import patch
+        cases = [{"body": b"<html>not json"}, {"error": TimeoutError("slow")},
+                 {"error": socket.timeout("slow")}]
+        for case in cases:
+            for fetcher in (staging._fetch_activity_page, staging._fetch_repo):
+                with self.subTest(case=case, fetcher=fetcher.__name__):
+                    with patch("urllib.request.urlopen", self._urlopen(**case)):
+                        with self.assertRaises(url_resolver.FetchError):
+                            fetcher("https://api.github.com/repos/o/r")
+
+    def test_settled_ref_reports_a_bad_answer_as_stage_error(self):
+        from unittest.mock import patch
+        with patch("urllib.request.urlopen", self._urlopen(body=b"{broken")):
+            with self.assertRaises(staging.StageError):
+                staging.settled_ref("o/r", "main", HEAD, now=NOW)
 
 
 if __name__ == "__main__":

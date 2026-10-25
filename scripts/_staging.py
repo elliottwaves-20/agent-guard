@@ -142,16 +142,37 @@ def _fetch_activity_page(url: str) -> tuple:
         raise _url_resolver.FetchError(_url_resolver.format_fetch_error(url, exc.code, body)) from exc
     except urllib.error.URLError as exc:
         raise _url_resolver.FetchError(f"could not fetch {url}: {exc.reason}") from exc
+    except (ValueError, TimeoutError) as exc:   # invalid JSON, or a timeout while reading
+        raise _url_resolver.FetchError(f"could not fetch {url}: {exc}") from exc
+
+
+def _fetch_repo(url: str) -> dict:
+    import urllib.error
+    import urllib.request
+    import _url_resolver
+    req = urllib.request.Request(url, headers={**_url_resolver.DEFAULT_HEADERS, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise _url_resolver.FetchError(_url_resolver.format_fetch_error(url, exc.code, body)) from exc
+    except urllib.error.URLError as exc:
+        raise _url_resolver.FetchError(f"could not fetch {url}: {exc.reason}") from exc
+    except (ValueError, TimeoutError) as exc:   # invalid JSON, or a timeout while reading
+        raise _url_resolver.FetchError(f"could not fetch {url}: {exc}") from exc
 
 
 def settled_ref(source: str, branch: str, head: str, *, now=None,
-                days: int = COOLDOWN_DAYS, fetch=None) -> tuple:
+                days: int = COOLDOWN_DAYS, fetch=None, fetch_repo=None) -> tuple:
     """(commit, time) of the newest state of `branch` that is at least `days` old.
 
     The times come from GitHub's repository activity (push, merge, force push):
     GitHub sets them when the branch moves, so unlike a commit's own date they
     cannot be backdated by whoever writes the commit. No activity at all means
-    the head itself is old (time None). Any doubt stops with StageError."""
+    the branch has not moved since the repository was created (GitHub sets
+    `created_at`), so the head counts as old (time None) only if the repository
+    itself is older than `days`. Any doubt stops with StageError."""
     import urllib.parse
     import _url_resolver
     fetch = fetch or _fetch_activity_page
@@ -196,6 +217,18 @@ def settled_ref(source: str, branch: str, head: str, *, now=None,
         raise StageError(f"{source}: more than {ACTIVITY_PAGE * ACTIVITY_MAX_PAGES} branch changes "
                          f"in {days} days; not choosing a version")
     if oldest is None:
+        repo_url = f"https://api.github.com/repos/{check_source(source)}"
+        try:
+            repo = (fetch_repo or _fetch_repo)(repo_url)
+        except _url_resolver.FetchError as exc:
+            raise StageError(f"{source}: repository age unavailable ({exc})") from exc
+        if not isinstance(repo, dict):
+            raise StageError(f"{source}: unexpected repository answer")
+        created = repo.get("created_at")
+        if not created:
+            raise StageError(f"{source}: repository creation time missing; not choosing a version")
+        if _timestamp(created) > cutoff:
+            raise StageError(f"{source}: no branch activity and the repository is younger than {days} days")
         return head, None
     before = oldest[2]
     if not SHA.fullmatch(before) or before == NULL_SHA:

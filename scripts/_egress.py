@@ -25,7 +25,9 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import re
+import os
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -81,6 +83,41 @@ def parse_allow(entries) -> set:
     return allowed
 
 
+def private_address(address: str) -> bool:
+    """True for loopback, RFC 1918 and other private addresses; False if not an address."""
+    try:
+        return ipaddress.ip_address(address).is_private
+    except ValueError:
+        return False
+
+
+def dns_resolvers() -> set:
+    """Extra resolver addresses from AGENT_GUARD_DNS_RESOLVERS (comma-separated IPs).
+
+    On Linux the Docker bridge copies the host's DNS servers into the container,
+    so the resolver may be a public address. Invalid entries are ignored."""
+    found = set()
+    for entry in os.environ.get("AGENT_GUARD_DNS_RESOLVERS", "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            found.add(str(ipaddress.ip_address(entry)))
+        except ValueError:
+            print(f"[WARN] AGENT_GUARD_DNS_RESOLVERS: ignoring invalid address {entry!r}",
+                  file=sys.stderr)
+    return found
+
+
+def resolver_address(address: str, resolvers: set) -> bool:
+    """The sandbox's own resolver: a private address or one named in `resolvers`."""
+    try:
+        normal = str(ipaddress.ip_address(address))
+    except ValueError:
+        return False
+    return private_address(address) or normal in resolvers
+
+
 def _endpoint(text: str, v6: bool) -> tuple:
     if v6:
         host, dot, port = text.rpartition(".")
@@ -120,6 +157,7 @@ def analyse(lines, local_ips, allow: set) -> Report:
         via = ", ".join(sorted(names)) or "no DNS lookup"
         finding(f"{kind} {ip}:{port} ({via})")
 
+    resolvers = dns_resolvers()
     for raw in lines:
         line = raw.strip()
         if line.startswith("listening on"):
@@ -147,6 +185,10 @@ def analyse(lines, local_ips, allow: set) -> Report:
             continue  # replies and anything addressed to the target
 
         if dport == 53:
+            exempt = resolver_address(dst, resolvers)  # only the resolver of the sandbox itself
+            if not exempt:
+                finding(f"DNS traffic to a public address: {dst} "
+                        "(not listed in AGENT_GUARD_DNS_RESOLVERS)")
             query = _QUERY.match(payload)
             if query:
                 name = query.group(3).rstrip(".").lower()
@@ -157,6 +199,10 @@ def analyse(lines, local_ips, allow: set) -> Report:
                     finding(f"DNS lookup of a host that is not allowed: {name}")
             elif "Flags [" not in payload:
                 finding(f"unrecognised traffic: {line}")
+            elif exempt and not private_address(dst):
+                # A configured public resolver is exempt for UDP queries, whose names
+                # are judged above; DNS over TCP is not parsed, so it stays a finding.
+                finding(f"TCP traffic to port 53 of a configured resolver: {dst}")
             continue
         if payload.startswith("Flags [S]"):
             destination("TCP connection to", dst, dport)

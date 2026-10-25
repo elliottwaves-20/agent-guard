@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 BOOT = Path(__file__).resolve().parent / "_parse_spans_boot.py"
@@ -40,6 +41,13 @@ def parse_answer(item) -> list | None:
     return out
 
 
+def failed(count: int, reason: str) -> list:
+    """Unknown for every item; say why, so UNCLEAR/BLOCK is not a silent helper failure."""
+    print(f"[WARN] parse-span locator helper failed: {reason}; the findings stay as they are.",
+          file=sys.stderr)
+    return [None] * count
+
+
 def run_boot(python: str, paths: list) -> list:
     request = json.dumps({"files": [str(p) for p in paths], "max_spans": MAX_SPANS,
                           "seconds": SECONDS_PER_FILE})
@@ -47,16 +55,16 @@ def run_boot(python: str, paths: list) -> list:
         done = subprocess.run([python, str(BOOT)], input=request.encode("utf-8"),
                               capture_output=True,
                               timeout=SECONDS_PER_FILE * len(paths) + 60)
-    except (OSError, subprocess.TimeoutExpired):
-        return [None] * len(paths)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return failed(len(paths), f"could not run ({type(exc).__name__}: {exc})")
     if done.returncode != 0:
-        return [None] * len(paths)
+        return failed(len(paths), f"exited with {done.returncode}")
     try:
         out = json.loads(done.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return [None] * len(paths)
+        return failed(len(paths), "printed no valid JSON")
     if not isinstance(out, list) or len(out) != len(paths):
-        return [None] * len(paths)
+        return failed(len(paths), "answered a different number of items than asked")
     return [parse_answer(item) for item in out]
 
 

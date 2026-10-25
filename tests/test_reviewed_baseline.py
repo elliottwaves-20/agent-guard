@@ -182,7 +182,9 @@ class InstalledScannerBaselineTests(unittest.TestCase):
             result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                                     env=ss.skillspector_env(), timeout=120)
             self.assertEqual(result.returncode, 0, result.stderr)
-            with patch.object(ss, "skillspector_llm_usable", return_value=False):
+            # Without AI analysis only an explicit static-only policy may end SAFE.
+            with patch.object(ss, "skillspector_llm_usable", return_value=False), \
+                    patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}):
                 self.assertEqual(ss.run_skillspector(target), 1)
                 self.assertEqual(ss.run_skillspector(target, baseline=policy), 0)
                 skill.write_text(original + "\nChanged content.\n", encoding="utf-8")

@@ -1,12 +1,195 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 - 2026-10-25
 
-- `update_skills.py` now blocks only the affected skill when an update scan
+### Security
+
+- Earlier versions could report unchecked or partly checked cases as SAFE (exit 0). Upgrade recommended.
+- Download names and GitHub subpaths are now confined to the scan directory.
+
+### Changed
+
+- The skill verdict accepts `metadata.llm_available` only when it is exactly
+  `true`, as the triage already did. A string or number there (for example
+  `"false"` or `1`) used to count as a completed AI analysis.
+- A failed YARA recheck or parse-span locator (timeout, crash, bad output) now
+  prints one `[WARN]` line with the reason. The findings still stay hard or
+  open as before; only the silence is gone.
+- `llm_scan.py` no longer loses the exit code SkillSpector returns after it
+  wrote its report: a returned 1 or 2 (or anything that is not 0 or None)
+  counts as a scanner error and never as a clean run.
+- `install_skill.py` no longer ends with `[OK]` (exit 0) when the installed
+  content is not what was scanned: extra files in the skills CLI copy or the
+  synced copy, a changed file, a skill that is gone from the inbox path after
+  the sync, and a failed or timed-out sync all give exit 2 and list the files.
+  Nothing is deleted. The message says that the skill is already in place at
+  the named location and must be reviewed or removed by hand (the sync, or the
+  skills CLI, has made it live before the check runs). Without a `sync` command
+  the skill is only published to the inbox, as before.
+- Exit codes: 0 SAFE, 1 BLOCK, 2 NO VERDICT. Decide by the exit code, not the
+  text: exit 2 may print as `[WARN]` or `[BLOCK]`. The skill-scan exit codes
+  are documented correctly now: a single HIGH or CRITICAL finding alone gives
+  exit 1.
+- No SAFE without a completed AI analysis (any provider; only
+  `metadata.llm_available` counts): the scan ends exit 2 "static only".
+  Scheduled updates (`update_skills.py`) quarantine such cases and keep the
+  old version active.
+- `AGENT_GUARD_STATIC_ONLY=1` now means "static checking is deliberately
+  enough": it disables the AI analysis and accepts a dynamic stage skipped
+  with `--no-dynamic` (exit 0 instead of 2). It does not skip that stage by
+  itself.
+- `--no-dynamic` gives at least exit 2 unless `AGENT_GUARD_STATIC_ONLY=1`
+  (`scan_url.py`, `scan_mcp.py`, `scan_cli.py`); a BLOCK from the static stage
+  still wins (exit 1).
+- `audit_installed.py` without `--execute` gives exit 2 (NOT EXECUTED) for
+  every listed scan (with no skill or MCP server found there is nothing to
+  scan, and the exit code is 0). Unreadable configs (including an `mcpServers`
+  that is not an object) and entries whose source cannot be inferred give
+  exit 2.
+- `audit_installed.py` reads `uvx` and `npx` entries with one option table per
+  launcher. `uvx -p/--python` is a Python version, never the package; `npx
+  -p/--package` is the package, and two different ones give exit 2. The option
+  check now runs before the `uvx --from git+https://github.com/...` shortcut.
+  An entry is not inferable (exit 2) with `--with`/`-w`, `--with-editable`,
+  `--with-requirements`, an index or find-links option (`--index`,
+  `--default-index`, `-i`/`--index-url`, `--extra-index-url`, `-f`), `uvx`
+  constraint, override, env-file, config-file, project or directory options,
+  `npx --registry`, `--userconfig`, `-c`/`--call`, workspace and prefix
+  options (also in `--opt=value` form), any option the tables do not know, or
+  an index or registry variable in the entry's `env` (`UV_INDEX*`,
+  `UV_FIND_LINKS`, `PIP_*INDEX_URL`, `PIP_FIND_LINKS`, `npm_config_*registry*`,
+  `npm_config_userconfig`, `UV_NO_INDEX`, `UV_CONFIG_FILE`, `UV_PROJECT`,
+  `UV_ENV_FILE`). The Codex `[mcp_servers.NAME.env]` table counts too. Repeated
+  `-qq`/`-vv` are known `uvx` switches. Global `.npmrc`/`uv.toml` files are not
+  read (documented limit).
+- `audit_installed.py` reads the Codex config with `tomllib`. The old line
+  parser cut multi-line `args` and `env` after the first line and lost an
+  `[mcp_servers.NAME.env]` table placed before `[mcp_servers.NAME]`. Invalid
+  TOML or a value of the wrong type gives exit 2.
+- `audit_installed.py --tool X` with a tool that is not found on the machine
+  gives exit 2 instead of "none detected" with exit 0.
+- `AGENT_GUARD_DNS_RESOLVERS` (comma-separated IP addresses) names resolvers
+  that count as the sandbox's own resolver on port 53 even when they are
+  public addresses (Linux Docker bridges copy the host's DNS servers);
+  otherwise only private resolver addresses are exempt. The exemption covers
+  UDP queries, whose names are still judged. TCP to port 53 of such an address
+  is a finding, and the OpenSSF stage exempts private addresses only (its
+  socket records carry no protocol).
+- OpenSSF package-analysis results: a completed phase without `Files`, `DNS`,
+  `Sockets` or `Commands` (or with one of the wrong type) gives exit 2. The
+  `execute` phase that ended in `error_analysis` is checked for the types of
+  the lists it carries. An unexpected shape (an entry that is not an object,
+  a changed schema) gives exit 2 with "could not be evaluated" instead of a
+  crash with exit 1.
+- `llm_scan.py`: click errors and any unexpected exception end with exit 2
+  (`INCOMPLETE`), not with Python's exit 1. The dynamic-stage behaviour of
+  `AGENT_GUARD_DNS_RESOLVERS` (a public resolver on port 53 is a finding there)
+  is described in the README.
+- The egress finding for a public DNS address says "(not listed in
+  AGENT_GUARD_DNS_RESOLVERS)".
+- Summary lines of `scan_skill.py --all` and `scan_url.py` (skill collection,
+  marketplace candidates, catalog scan) print `NO VERDICT` instead of `BLOCK`
+  when the worst exit code is 2.
+- Hash-lookup results: an unseen hash, a suspicious-only file, a file skipped
+  by the file limit, API errors and a missing, malformed or inconsistent
+  summary give exit 2 instead of SAFE. Single-file checks in
+  `scan_cli.py binary` no longer treat errors as clean.
+- Directory hash lookups: an empty Cisco summary is SAFE only if agent-guard
+  itself finds no checkable file. It counts the files Cisco would check
+  without Cisco's path exclusions (dot directories, `__pycache__`, symlinks,
+  no magic-byte library); more than Cisco looked at gives exit 2.
+  A file whose type detection fails (the detection is run again, because Cisco
+  swallows the error and calls the file text), an unreadable file, an unusable
+  Cisco private API (`_should_scan_file` missing or failing) and a
+  `file_magic` module that cannot be imported count every file. The helper
+  marks each summary as `file` or `directory`; a directory summary without the
+  count of checkable files, or a summary of unknown kind, gives exit 2 (it
+  used to pass when `total_to_scan` was above zero).
+- `scan_mcp.py` no longer reads its verdict from the stderr of the Cisco
+  scanner (it is still printed), so a summary line forged there cannot add to
+  or replace the real one. An incomplete or inconsistent hash-lookup summary
+  gives exit 2.
+- GuardDog and malcontent images run with `docker run --pull=always`, so
+  their rules stay current. Offline means no verdict (exit 2), never SAFE.
+- `scan_url.py`: a repo with no skill and no package manifest gives exit 2
+  "unsupported repo layout" (no README-only check); so do skill collections
+  with non-documentation files outside the skill folders and marketplace
+  candidates skipped by `--max-candidates`.
+- `scan_url.py --no-scan-candidates` on a catalog page with candidates gives
+  exit 2 (a BLOCK of the listing text stays exit 1) and lists the candidates
+  that were not scanned.
+- `scan_url.py` skill collections: prompt and instruction files outside the
+  skill folders (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`,
+  `.windsurfrules`, `.github/copilot-instructions.md`, and `.md`/`.txt`/`.rst`
+  files under `commands`, `agents`, `prompts`, `rules`, `hooks`,
+  `output-styles`, `.claude`, `.cursor`, `.codex`, `.gemini`, `.windsurf`,
+  `.github/prompts`, `.github/instructions`) are no longer documentation and
+  give exit 2. SVG stays documentation (agent-guard installs only skill
+  folders, and agents do not execute SVG). `.gitmodules`, `.editorconfig` and
+  extensionless `CHANGELOG`, `CHANGES`, `HISTORY`, `AUTHORS`, `CONTRIBUTORS`
+  count as documentation. `.claude-plugin/marketplace.json` and `plugin.json`
+  count as documentation only when they are valid JSON with metadata keys
+  only; `hooks`, `mcpServers`, `lspServers`, `commands`, `agents`,
+  `outputStyles` or any other key, duplicate keys or wrong types give exit 2,
+  because those keys can make an agent run commands. A plugin `source` counts
+  only as a string that starts with `./` and has no `..` part (a dict, URL,
+  `github:` form or absolute path points at code that is not scanned); the same
+  holds for `skills` entries and `metadata.pluginRoot`. Deeply nested JSON and
+  any other error while checking a manifest mean "not documentation", never a
+  crash with exit 1.
+- `scan_url.py` skill collections, wider block list (no allow list, so normal
+  collections keep their verdict): folders named `prompt(s)`, `command(s)`,
+  `agent(s)`, `rule(s)`, `chatmodes`, `instructions`, `hooks`, `workflows`
+  (any case), every dot folder except `.git`, `.github` except its issue,
+  discussion and pull request templates, funding and similar files, and
+  images; file names `agent.md`, `agents.md`, `claude.md`, `gemini.md`,
+  `copilot-instructions.md`, `.clinerules`, `.cursorrules`, `.windsurfrules`
+  and the suffixes `.prompt.md`, `.chatmode.md`, `.instructions.md` are not
+  documentation. `.github/workflows/*.yml` held executable steps and counted as
+  documentation before; it no longer does. Extensionless `LICENSE`,
+  `CHANGELOG`, `HISTORY` and the like are documentation only when they do not
+  start with `#!`.
+- `scan_url.py` prints `[NO VERDICT]` instead of `[BLOCK]` for the exit-2 lines
+  "no installable source", "candidate fetch failed" and "could not parse the
+  install command".
+- `scan_url.py` archives and repos: it no longer descends into a lone
+  top-level folder when files sit next to it (an `install.sh` was never
+  scanned).
+- `scan_url.py` PyPI/npm page URLs with a version
+  (`pypi.org/project/x/1.2.3/`, `npmjs.com/package/x/v/1.2.3`, also scoped)
+  scan exactly that version instead of the newest one; a version that does not
+  exist, or a URL tail that is not recognised, gives exit 2.
+- The AI verifier never clears E1 to E5 (data exfiltration) or TT1, TT2 and
+  TT4 (taint flows), the same as the P and AR rules: the text it judges comes
+  from the code under review.
+- Triage: a scanner block that rests only on the risk score or the
+  recommendation, with no finding the triage can judge, is `unclear` instead
+  of SAFE. The completeness check also runs when the wrapper exited 0, and a
+  reference that matches several bundled files is settled only through the
+  wrapper's reviewed baseline.
+- With `--deep`, a missing or unknown malcontent risk level for any file gives
+  exit 2 (`scan_cli.py`).
+- `scan_mcp.py`: an `Incomplete items` line that is repeated or unreadable
+  gives exit 2.
+- `scan_url.py --kind catalog|markdown` on a repository or directory gives
+  exit 2 instead of a README-only check; a skill collection without any skill
+  gives exit 2.
+- `SKILL.md` is recognised without regard to case. A raw file URL keeps its
+  sanitized file name and is typed `markdown` (by `.md`/`.markdown`) or `file`,
+  so a script is no longer scanned as README text. A GitHub subpath with `.`,
+  `..`, backslash or colon segments, outside the archive, or missing gives
+  exit 2. A download name that would leave the temp directory in `scan_cli.py`
+  gives exit 2.
+- Cooldown: a skill branch without activity entries is accepted only if the
+  repository creation time proves it older than the cooldown; otherwise the
+  update stops (FAILED).
+- The `scan_cli.py` documentation no longer says a new or unknown binary
+  passes unnoticed; it gives no verdict.
+- `update_skills.py` blocks only the affected skill when an update scan
   returns `dangerous` or `unclear`, instead of automatically pausing every
   other skill from the same GitHub source; manual source pauses in
   `origins["sources"][source]["paused"]` remain supported.
-- `_staging.settled_ref` now follows GitHub's `Link` cursor (`after=...`) on
+- `_staging.settled_ref` follows GitHub's `Link` cursor (`after=...`) on
   `/repos/{owner}/{repo}/activity` instead of repeating page 1 with `&page=N`
   (#31).
 

@@ -195,6 +195,16 @@ def format_fetch_error(url: str, code: int, body: str) -> str:
     return f"could not fetch {url}: HTTP {code}"
 
 
+def safe_basename(url: str, fallback: str) -> str:
+    """Last path segment of a URL as a bare file name, never a path.
+    Returns `fallback` when the segment is empty, "." / "..", or has a drive colon."""
+    path = urllib.parse.unquote(urllib.parse.urlsplit(url).path)
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    if name in ("", ".", "..") or ":" in name:
+        return fallback
+    return name
+
+
 def safe_extract_tar(data: bytes, dest: Path) -> None:
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tf:
         try:
@@ -223,8 +233,12 @@ def safe_extract_zip(data: bytes, dest: Path) -> None:
 
 
 def first_child_dir(path: Path) -> Path:
-    children = [p for p in path.iterdir() if p.is_dir()]
-    return children[0] if len(children) == 1 else path
+    # Descend only into a lone folder. Files next to it (an install script, say)
+    # would otherwise never be scanned.
+    entries = list(path.iterdir())
+    if len(entries) == 1 and entries[0].is_dir() and not entries[0].is_symlink():
+        return entries[0]
+    return path
 
 
 def github_repo_key(url: str) -> tuple[str, str] | None:
@@ -249,7 +263,10 @@ def github_parts(url: str) -> tuple[str, str, str | None, list[str]]:
     subpath: list[str] = []
     if len(parts) >= 4 and parts[2] in {"tree", "blob"}:
         ref = parts[3]
-        subpath = parts[4:]
+        subpath = [urllib.parse.unquote(p) for p in parts[4:]]
+        for seg in subpath:
+            if seg in (".", "..") or any(c in seg for c in "\\/:"):
+                raise FetchError(f"unsafe path segment in GitHub URL: {seg!r}")
     return owner, repo.removesuffix(".git"), ref, subpath
 
 
@@ -278,6 +295,12 @@ def resolve_github(url: str, dest: Path) -> ResolvedSource:
     safe_extract_zip(http_bytes(archive), dest)
     root = first_child_dir(dest)
     source = root.joinpath(*subpath) if subpath else root
+    try:
+        source.resolve().relative_to(root.resolve())
+    except ValueError:
+        raise FetchError(f"GitHub subpath leaves the repository archive: {url}") from None
+    if not source.exists():
+        raise FetchError(f"GitHub subpath not found in the repository archive: {url}")
     label = f"github:{owner}/{repo}@{sha}"
     if subpath:
         label += "/" + "/".join(subpath)
@@ -301,9 +324,12 @@ def resolve_archive(url: str, dest: Path) -> ResolvedSource:
 
 def resolve_raw_markdown(url: str, dest: Path) -> ResolvedSource:
     data = http_bytes(url)
-    path = dest / "downloaded.md"
+    path = dest / safe_basename(url, "downloaded.md")
+    if path.resolve().parent != dest.resolve():
+        raise FetchError(f"unsafe file name in URL: {url}")
     path.write_bytes(data)
-    return ResolvedSource(kind="markdown", source_path=path, label=url,
+    kind = "markdown" if path.suffix.lower() in (".md", ".markdown") else "file"
+    return ResolvedSource(kind=kind, source_path=path, label=url,
                           pinned_ref="downloaded-file")
 
 
@@ -472,14 +498,27 @@ def resolve_catalog_page(url: str, dest: Path) -> ResolvedSource:
 
 
 def package_from_url(url: str) -> tuple[str, str] | None:
+    """Return (ecosystem, spec). The spec carries the version of the URL
+    (`name==1.2` for PyPI, `name@1.2` for npm) so that exactly that version is
+    scanned; an unrecognised path tail is refused, never ignored."""
     parsed = urllib.parse.urlparse(url)
     host = parsed.netloc.lower()
     parts = [p for p in parsed.path.strip("/").split("/") if p]
     if host == "pypi.org" and len(parts) >= 2 and parts[0] == "project":
-        return "pypi", parts[1]
+        if len(parts) == 2:
+            return "pypi", parts[1]
+        if len(parts) == 3:
+            return "pypi", f"{parts[1]}=={parts[2]}"
+        raise FetchError(f"cannot tell which PyPI version {url} means")
     if host in {"www.npmjs.com", "npmjs.com"} and len(parts) >= 2 and parts[0] == "package":
-        name = "/".join(parts[1:3]) if parts[1].startswith("@") and len(parts) >= 3 else parts[1]
-        return "npm", name
+        scoped = parts[1].startswith("@") and len(parts) >= 3
+        name = "/".join(parts[1:3]) if scoped else parts[1]
+        tail = parts[3:] if scoped else parts[2:]
+        if not tail:
+            return "npm", name
+        if len(tail) == 2 and tail[0] == "v":
+            return "npm", f"{name}@{tail[1]}"
+        raise FetchError(f"cannot tell which npm version {url} means")
     return None
 
 

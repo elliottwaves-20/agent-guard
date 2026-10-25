@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -142,7 +142,7 @@ class InstallTests(unittest.TestCase):
     def install(self, sync=None, *, dry=False, timeout=60, selected=None):
         d = dist.Distribution(inbox=self.inbox.resolve(),
                               sync=tuple(sync) if sync else None, timeout=timeout)
-        out = io.StringIO()
+        out = self.last_out = io.StringIO()
         with redirect_stdout(out):
             installer.install_skill(self.source, "demo", Path("unused"), dry,
                                     selected=selected, distribution=d)
@@ -161,23 +161,53 @@ class InstallTests(unittest.TestCase):
         self.assertTrue((self.inbox / "demo" / "SKILL.md").is_file())
         self.assertIn("no sync command configured", out)
 
-    def test_failed_sync_keeps_the_inbox_copy_and_warns(self):
-        out = self.install(self.sync + ["3"])
+    def install_refused(self, sync, **kwargs):
+        """Run the install, expect exit 2; return (stdout, stderr)."""
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit) as ctx:
+            self.install(sync, **kwargs)
+        self.assertEqual(ctx.exception.code, 2)
+        out = self.last_out.getvalue()
+        self.assertNotIn("[OK]", out)
+        return out, err.getvalue()
+
+    def test_failed_sync_is_exit_2_and_keeps_the_inbox_copy(self):
+        out, err = self.install_refused(self.sync + ["3"])
         self.assertTrue((self.inbox / "demo" / "SKILL.md").is_file())
         self.assertIn("sync command failed (exit 3)", out)
         self.assertIn("sync broke", out)
+        self.assertIn("sync for 'demo' failed", err)
 
-    def test_sync_timeout_is_a_warning(self):
+    def test_sync_timeout_is_exit_2(self):
         with patch.object(dist, "run_bounded",
                           side_effect=subprocess.TimeoutExpired(self.sync, 5)):
-            out = self.install(self.sync, timeout=5)
+            out, _err = self.install_refused(self.sync, timeout=5)
         self.assertTrue((self.inbox / "demo" / "SKILL.md").is_file())
         self.assertIn("timed out after 5s", out)
 
-    def test_missing_sync_program_is_a_warning(self):
-        out = self.install([str(Path(self.tmp.name) / "no-such-program.exe")])
+    def test_missing_sync_program_is_exit_2(self):
+        out, _err = self.install_refused([str(Path(self.tmp.name) / "no-such-program.exe")])
         self.assertTrue((self.inbox / "demo" / "SKILL.md").is_file())
         self.assertIn("sync command could not start", out)
+
+    def test_sync_that_adds_a_file_is_exit_2_and_deletes_nothing(self):
+        add = [sys.executable, "-c",
+               f"open(r'{self.inbox / 'demo' / 'extra.sh'}', 'w').write('unscanned')"]
+        _out, err = self.install_refused(add)
+        self.assertIn("extra.sh", err)
+        self.assertIn("Nothing was deleted", err)
+        # the sync has already made the skill live: the message must say where
+        self.assertIn("already in place", err)
+        self.assertIn(str((self.inbox / "demo").resolve()), err)
+        self.assertIn("review it before use or remove it", err)
+        self.assertNotIn("stays in the inbox", err)
+        self.assertTrue((self.inbox / "demo" / "extra.sh").is_file())
+
+    def test_sync_that_removes_the_skill_from_the_inbox_is_exit_2(self):
+        gone = [sys.executable, "-c",
+                f"import shutil; shutil.rmtree(r'{self.inbox / 'demo'}')"]
+        _out, err = self.install_refused(gone)
+        self.assertIn("cannot be checked", err)
 
     def test_sync_that_alters_the_skill_is_an_error(self):
         tamper = [sys.executable, "-c",

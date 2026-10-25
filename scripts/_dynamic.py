@@ -59,6 +59,7 @@ MANAGER_READS = {
 }
 REQUIRED_PHASES = ("install", "import")
 PHASE_ORDER = ("install", "import", "execute")
+PHASE_KEYS = ("Files", "DNS", "Sockets", "Commands")  # lists every completed phase carries
 
 SENSITIVE_READ = re.compile(
     r"/\.ssh/|id_rsa|id_ed25519|/\.aws/|/\.azure/|/\.config/gcloud/|/\.gnupg/"
@@ -116,6 +117,19 @@ def _planted_values(phase: dict) -> set:
 
 
 def analyse(result: dict, ecosystem: str, allow_hosts=(), expect_name: str | None = None) -> Report:
+    """Judge an OpenSSF result. A shape this code did not expect (an entry that is
+    no object, a changed schema) is an incomplete analysis, never a crash with a
+    BLOCK-looking exit code."""
+    try:
+        return _analyse(result, ecosystem, allow_hosts, expect_name)
+    except Exception as exc:
+        report = Report()
+        report.complete = False
+        report.problem = f"the result could not be evaluated ({type(exc).__name__}: {exc})"
+        return report
+
+
+def _analyse(result: dict, ecosystem: str, allow_hosts, expect_name: str | None) -> Report:
     package = result.get("Package") or {}
     report = Report(name=package.get("Name", ""), version=package.get("Version", ""))
     analysis = result.get("Analysis") or {}
@@ -139,6 +153,27 @@ def analyse(result: dict, ecosystem: str, allow_hosts=(), expect_name: str | Non
         report.problem = "; ".join(filter(None, [
             f"phase(s) missing: {', '.join(missing)}" if missing else "",
             f"phase(s) did not complete: {', '.join(failed)}" if failed else ""]))
+
+    # A completed phase must carry every record list (null is how the recorded output
+    # spells "none"). A renamed or mistyped key would otherwise read as a clean phase.
+    unreadable = [f"{name}: {key}" for name, result_phase in analysis.items()
+                  if (result_phase or {}).get("Status") == "completed"
+                  for key in PHASE_KEYS
+                  if key not in result_phase
+                  or not (result_phase[key] is None or isinstance(result_phase[key], list))]
+    # The execute phase may end in error_analysis (see above). Whatever record lists it
+    # still carries are read as "nothing found" below, so their types are checked too.
+    crashed = analysis.get("execute") or {}
+    if crashed.get("Status") == "error_analysis":
+        unreadable += [f"execute: {key}" for key in PHASE_KEYS
+                       if key in crashed
+                       and not (crashed[key] is None or isinstance(crashed[key], list))]
+    if unreadable:
+        report.complete = False
+        report.problem = "; ".join(filter(None, [
+            report.problem,
+            f"result keys missing or of the wrong type: {', '.join(unreadable)}"]))
+        return report
 
     allow = _egress.parse_allow([*REGISTRY_HOSTS[ecosystem], *allow_hosts])
     allowed_names = {host for host, _port in allow}
@@ -167,7 +202,11 @@ def analyse(result: dict, ecosystem: str, allow_hosts=(), expect_name: str | Non
                 finding(f"{name}: DNS lookup of {host}")
         for sock in phase.get("Sockets") or []:
             port, address = sock.get("Port") or 0, sock.get("Address", "")
-            if port in (0, 53):   # 0: resolved only, never connected; 53: the resolver
+            # 0: resolved only, never connected; 53 on a private address: the resolver.
+            # A configured public resolver is not exempt here: OpenSSF sockets carry
+            # no protocol, so DNS over TCP cannot be told from UDP (UDP lookups are
+            # judged from the DNS block above).
+            if port == 0 or (port == 53 and _egress.private_address(address)):
                 continue
             names = [h.rstrip(".").lower() for h in sock.get("Hostnames") or []]
             if (address, port) in allow or any((h, port) in allow for h in names):

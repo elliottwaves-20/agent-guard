@@ -33,9 +33,13 @@ VERDICTS = ("malicious", "benign", "unsure")
 BOOT_GRACE_SECONDS = 60
 BOOT = Path(__file__).resolve().parent / "_verifier_boot.py"
 # Prompt injection, system-prompt leakage, anti-refusal and context leaks: an
-# AI judge must not be the one to clear content that addresses AIs.
+# AI judge must not be the one to clear content that addresses AIs. The same
+# holds for data exfiltration and taint flows (TT3 and BH2 are hard rules in
+# _triage and never reach the verifier): text in the checked code can
+# steer the judge, and one "benign" would lift the finding.
 NEVER_CLEARED = frozenset({"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9",
-                           "AR1", "AR2", "AR3", "E4"})
+                           "AR1", "AR2", "AR3", "E1", "E2", "E3", "E4", "E5",
+                           "TT1", "TT2", "TT4"})
 
 
 @dataclass(frozen=True)

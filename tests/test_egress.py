@@ -92,6 +92,70 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(report.findings,
                          ["DNS lookup of a host that is not allowed: evil-exfil-test.example.com"])
 
+    def test_dns_query_to_a_public_resolver_is_a_finding(self):
+        with patch.dict(os.environ):
+            os.environ.pop("AGENT_GUARD_DNS_RESOLVERS", None)
+            self._dns_query_to_a_public_resolver_is_a_finding()
+
+    def _dns_query_to_a_public_resolver_is_a_finding(self):
+        report = analyse(["17:35:18.258128 IP 172.17.0.2.50928 > 1.1.1.1.53: 41011+ A? pypi.org. (45)"])
+        self.assertEqual(report.findings, ["DNS traffic to a public address: 1.1.1.1 (not listed in AGENT_GUARD_DNS_RESOLVERS)"])
+
+    def test_configured_resolver_address_counts_as_the_resolver(self):
+        packets = ["17:35:18.258128 IP 172.17.0.2.50928 > 1.1.1.1.53: 41011+ A? pypi.org. (45)"]
+        with patch.dict(os.environ, {"AGENT_GUARD_DNS_RESOLVERS": "1.1.1.1, ::1"}):
+            self.assertEqual(analyse(packets).findings, [])
+        with patch.dict(os.environ, {"AGENT_GUARD_DNS_RESOLVERS": "9.9.9.9"}):
+            self.assertEqual(analyse(packets).findings,
+                             ["DNS traffic to a public address: 1.1.1.1 (not listed in AGENT_GUARD_DNS_RESOLVERS)"])
+        env = {k: v for k, v in os.environ.items() if k != "AGENT_GUARD_DNS_RESOLVERS"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(analyse(packets).findings,
+                             ["DNS traffic to a public address: 1.1.1.1 (not listed in AGENT_GUARD_DNS_RESOLVERS)"])
+
+    def test_invalid_resolver_entries_are_ignored_with_a_warning(self):
+        err = io.StringIO()
+        with patch.dict(os.environ, {"AGENT_GUARD_DNS_RESOLVERS": "nonsense,1.1.1.1"}), \
+                unittest.mock.patch.object(sys, "stderr", err):
+            self.assertEqual(eg.dns_resolvers(), {"1.1.1.1"})
+        self.assertIn("nonsense", err.getvalue())
+
+    def test_tcp_syn_to_port_53_on_a_public_address_is_a_finding(self):
+        with patch.dict(os.environ):
+            os.environ.pop("AGENT_GUARD_DNS_RESOLVERS", None)
+            report = analyse(["17:35:18.358137 IP 172.17.0.2.44712 > 8.8.8.8.53: Flags [S], "
+                              "seq 1, win 64240, length 0"])
+        self.assertEqual(report.findings, ["DNS traffic to a public address: 8.8.8.8 (not listed in AGENT_GUARD_DNS_RESOLVERS)"])
+
+    def test_tcp_to_port_53_of_a_configured_resolver_is_still_a_finding(self):
+        # The configured resolver is exempt for UDP queries whose name is checked;
+        # DNS over TCP is not parsed, so it must not slip through.
+        packets = [
+            "17:35:18.358137 IP 172.17.0.2.44712 > 1.1.1.1.53: Flags [S], seq 1, "
+            "win 64240, length 0",
+            "17:35:18.358999 IP 172.17.0.2.44712 > 1.1.1.1.53: Flags [P.], seq 1:40, "
+            "ack 1, win 502, length 39",
+        ]
+        with patch.dict(os.environ, {"AGENT_GUARD_DNS_RESOLVERS": "1.1.1.1"}):
+            report = analyse(packets)
+        self.assertEqual(report.findings,
+                         ["TCP traffic to port 53 of a configured resolver: 1.1.1.1"])
+        # a UDP query to the same resolver stays exempt, its name is still judged
+        with patch.dict(os.environ, {"AGENT_GUARD_DNS_RESOLVERS": "1.1.1.1"}):
+            report = analyse(["17:35:18.258128 IP 172.17.0.2.50928 > 1.1.1.1.53: "
+                              "41011+ A? evil.example.com. (45)"])
+        self.assertEqual(report.findings,
+                         ["DNS lookup of a host that is not allowed: evil.example.com"])
+
+    def test_dns_to_the_private_sandbox_resolver_is_fine(self):
+        self.assertEqual(analyse(PYPI[:2]).findings, [])
+
+    def test_private_address_helper(self):
+        for address in ["127.0.0.11", "10.0.0.2", "192.168.65.7", "172.17.0.1", "fd00::1"]:
+            self.assertTrue(eg.private_address(address), address)
+        for address in ["1.1.1.1", "8.8.8.8", "2606:4700::1111", "not-an-address"]:
+            self.assertFalse(eg.private_address(address), address)
+
     def test_connection_to_a_bare_ip_is_a_finding(self):
         report = analyse(BARE_IP)
         self.assertEqual(report.findings,

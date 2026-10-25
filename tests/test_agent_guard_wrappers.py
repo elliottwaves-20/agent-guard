@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -244,6 +245,18 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 "score": 10, "severity": "LOW", "recommendation": "SAFE",
                 "max_issue_severity": "HIGH"})
             self.assertEqual(module.verdict_skillspector(report, 0), 1)
+
+    def test_verdict_needs_llm_available_to_be_exactly_true(self):
+        # The triage compares with `is True`; the wrapper must not be looser.
+        module = importlib.import_module("_skillspector")
+        for value in ("false", "true", 1, [1], {"a": 1}):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as d,                     patch.dict(os.environ):
+                os.environ.pop("AGENT_GUARD_STATIC_ONLY", None)
+                report = Path(d) / "report.json"
+                self._write_report(report, metadata={"llm_requested": False,
+                                                     "llm_available": value})
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(module.verdict_skillspector(report, 0), 2)
 
     def test_verdict_safe_on_complete_clean_report(self):
         module = importlib.import_module("_skillspector")
@@ -711,7 +724,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         class Result:
             returncode = 0
             stdout = (
-                '{"summary": {"total_found": 1, "total_to_scan": 1, "scanned": 1, '
+                '{"summary": {"kind": "file", "total_found": 1, "total_to_scan": 1, "scanned": 1, '
                 '"clean": 1, "malicious": 0, "not_found": 0, "throttled": 0, '
                 '"failed": 0, "skipped_by_limit": 0}, "findings": []}'
             )
@@ -895,6 +908,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         original_state = (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
                           module.SKILLSPECTOR, module.run_bounded)
         saved_explicit = module.LLM_EXPLICIT
+        saved_cmd = module.SKILLSPECTOR_CMD
         try:
             module.PROVIDER = ""
             module.LLM_READY = False
@@ -915,16 +929,93 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 src = Path(src_dir)
                 (src / "SKILL.md").write_text("---\nname: static\n---\n",
                                                encoding="utf-8")
-                self.assertEqual(module.run_skillspector(src), 0)
+                # Static only by default is no verdict, not SAFE.
+                self.assertEqual(module.run_skillspector(src), 2)
         finally:
             (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
              module.SKILLSPECTOR, module.run_bounded) = original_state
             module.LLM_EXPLICIT = saved_explicit
+            module.SKILLSPECTOR_CMD = saved_cmd
 
         self.assertEqual(len(calls), 1)
         self.assertIn("--no-llm", calls[0])
 
-    def _clean_verdict(self, env, on_path=()):
+    def _run_scan_with(self, fake_run, **kwargs):
+        """run_skillspector over a minimal skill with an LLM-ready provider and
+        `fake_run` in place of run_bounded. Returns (exit code, call count)."""
+        module = importlib.import_module("_skillspector")
+        calls = []
+
+        def counting(cmd, **kw):
+            calls.append(cmd)
+            return fake_run(cmd, **kw)
+
+        with patch.object(module, "PROVIDER", "claude_cli"), \
+             patch.object(module, "LLM_READY", True), \
+             patch.object(module, "LLM_EXPLICIT", False), \
+             patch.object(module, "LLM_REASON", "claude CLI (local login)"), \
+             patch.object(module, "SKILLSPECTOR", "skillspector"), \
+             patch.object(module, "SKILLSPECTOR_CMD", ["skillspector"]), \
+             patch.object(module, "LLM_RETRIES", 0), \
+             patch.object(module, "run_bounded", counting), \
+             tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "SKILL.md").write_text("---\nname: failing\n---\n", encoding="utf-8")
+            return module.run_skillspector(src, **kwargs), len(calls)
+
+    def test_skillspector_timeout_is_no_verdict(self):
+        import subprocess
+
+        def fake_run(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, 1)
+
+        self.assertEqual(self._run_scan_with(fake_run), (2, 1))
+
+    def test_skillspector_run_aborted_before_the_report_is_no_verdict(self):
+        class Result:
+            stdout = ""
+            stderr = ""
+
+            def __init__(self, returncode):
+                self.returncode = returncode
+
+        # The scanner dies without writing a report, whatever exit code it gives.
+        for code in (0, 1, 2, -9):
+            with self.subTest(returncode=code):
+                code_result, _ = self._run_scan_with(lambda cmd, **kw: Result(code))
+                self.assertEqual(code_result, 2)
+
+    def test_skillspector_interrupt_is_not_swallowed_into_a_verdict(self):
+        def fake_run(cmd, **kwargs):
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            self._run_scan_with(fake_run)
+
+    def test_skillspector_unsavable_report_is_no_verdict(self):
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def fake_run(cmd, **kwargs):
+            self._write_report(Path(cmd[cmd.index("--output") + 1]))
+            return Result()
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            # A clean report would be SAFE; an existing target is never overwritten.
+            existing = Path(out_dir) / "report.json"
+            existing.write_text("keep", encoding="utf-8")
+            self.assertEqual(self._run_scan_with(fake_run, report_output=existing), (2, 1))
+            self.assertEqual(existing.read_text(encoding="utf-8"), "keep")
+            # And a destination that cannot be created at all.
+            self.assertEqual(self._run_scan_with(
+                fake_run, report_output=Path(out_dir) / "missing-dir" / "report.json"), (2, 1))
+            # Control: the same scan with a writable destination is SAFE.
+            self.assertEqual(self._run_scan_with(
+                fake_run, report_output=Path(out_dir) / "new.json"), (0, 1))
+
+    def _clean_verdict(self, env, on_path=(), **kwargs):
         """Exit code of verdict_skillspector for a clean report, with the
         provider resolution run under a controlled environment."""
         import shutil
@@ -942,7 +1033,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 report = Path(d) / "report.json"
                 self._write_report(report, metadata={"llm_available": False})
                 with contextlib.redirect_stdout(out):
-                    code = module.verdict_skillspector(report, 0)
+                    code = module.verdict_skillspector(report, 0, **kwargs)
             return code, out.getvalue()
         finally:
             shutil.which = old_which
@@ -962,10 +1053,21 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("NO VERDICT", text)
 
-    def test_nothing_named_and_nothing_found_stays_static_safe(self):
+    def test_nothing_named_and_no_ai_analysis_gives_no_verdict(self):
         code, text = self._clean_verdict({})
+        self.assertEqual(code, 2)
+        self.assertIn("NO VERDICT", text)
+        self.assertIn("static only", text)
+
+    def test_static_only_policy_allows_static_verdict_without_provider(self):
+        code, text = self._clean_verdict({"AGENT_GUARD_STATIC_ONLY": "1"})
         self.assertEqual(code, 0)
         self.assertIn("static only", text)
+
+    def test_caller_confirmed_ai_analysis_is_safe(self):
+        # Campaign scans check the report for the requested AI analysis themselves.
+        code, _text = self._clean_verdict({}, llm_confirmed=True)
+        self.assertEqual(code, 0)
 
     def test_static_only_policy_allows_static_verdict_despite_named_provider(self):
         code, _text = self._clean_verdict({"SKILLSPECTOR_PROVIDER": "codex",
@@ -992,6 +1094,378 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             "summary": {"scanned": 1, "failed": 0, "throttled": 0},
             "findings": [{"severity": "HIGH", "summary": "malicious file"}],
         }), 1)
+
+    def test_virustotal_verdict_counted_malicious_without_findings_is_block(self):
+        scan_mcp = importlib.import_module("scan_mcp")
+        for summary in ({"total_to_scan": 1, "scanned": 1, "clean": 0, "malicious": 1},
+                        {"total_to_scan": 3, "scanned": 2, "clean": 1, "malicious": 1},
+                        {"total_to_scan": 2, "scanned": 2, "clean": 1, "malicious": 1,
+                         "not_found": 1}):
+            with self.subTest(summary), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(scan_mcp.virustotal_verdict(
+                    {"summary": summary, "findings": []}), 1)
+
+    def test_virustotal_verdict_unknown_hash_is_no_verdict(self):
+        # A hash VirusTotal has never seen is exactly what a new payload looks
+        # like -- it must not read as clean.
+        scan_mcp = importlib.import_module("scan_mcp")
+        self.assertEqual(scan_mcp.virustotal_verdict({
+            "summary": {"scanned": 1, "clean": 0, "not_found": 1,
+                        "failed": 0, "throttled": 0},
+            "findings": [],
+        }), 2)
+
+    def test_virustotal_verdict_unchecked_or_suspicious_files_are_no_verdict(self):
+        scan_mcp = importlib.import_module("scan_mcp")
+        self.assertEqual(scan_mcp.virustotal_verdict({
+            "summary": {"scanned": 10, "clean": 10, "skipped_by_limit": 3,
+                        "failed": 0, "throttled": 0},
+            "findings": [],
+        }), 2)
+        self.assertEqual(scan_mcp.virustotal_verdict({
+            "summary": {"scanned": 1, "clean": 0, "suspicious": 1,
+                        "failed": 0, "throttled": 0},
+            "findings": [],
+        }), 2)
+
+    def test_virustotal_verdict_clean_known_hash_is_safe(self):
+        scan_mcp = importlib.import_module("scan_mcp")
+        self.assertEqual(scan_mcp.virustotal_verdict({
+            "summary": {"kind": "file", "total_to_scan": 1, "scanned": 1, "clean": 1,
+                        "not_found": 0, "failed": 0, "throttled": 0,
+                        "skipped_by_limit": 0},
+            "findings": [],
+        }), 0)
+
+    def test_virustotal_verdict_incomplete_summary_is_no_verdict(self):
+        scan_mcp = importlib.import_module("scan_mcp")
+        for report in ({"findings": []}, {"summary": {}, "findings": []},
+                       {"summary": None},
+                       {"summary": {"scanned": 1, "clean": 1}, "findings": []},
+                       {"summary": {"total_to_scan": 2, "scanned": 0, "clean": 0}},
+                       {"summary": {"total_to_scan": 1, "scanned": 1, "clean": 0,
+                                    "malicious": 0}},
+                       {"summary": {"total_to_scan": 1, "scanned": 1, "malicious": 0}},
+                       {"summary": {"total_to_scan": "1", "scanned": 1, "clean": 1,
+                                    "malicious": 0}},
+                       {"summary": {"total_to_scan": True, "scanned": 1, "clean": 1,
+                                    "malicious": 0}},
+                       {"summary": {"total_to_scan": 1, "scanned": "1", "clean": 1,
+                                    "malicious": 0}}):
+            self.assertEqual(scan_mcp.virustotal_verdict(report), 2, report)
+        # Zero files checked is only clean when agent-guard itself found nothing
+        # checkable (agent_guard_eligible 0); a missing or bad count is no verdict.
+        self.assertEqual(scan_mcp.virustotal_verdict(
+            {"summary": {"kind": "directory", "total_to_scan": 0,
+                         "agent_guard_eligible": 0}, "findings": []}), 0)
+        directory = {"kind": "directory", "total_to_scan": 0}
+        for report in ({"summary": directory, "findings": []},
+                       {"summary": dict(directory, agent_guard_eligible=1)},
+                       {"summary": dict(directory, agent_guard_eligible="0")},
+                       {"summary": dict(directory, agent_guard_eligible=True)},
+                       {"summary": dict(directory, agent_guard_eligible=-1)},
+                       {"summary": {"kind": "directory", "total_found": 1,
+                                    "total_to_scan": 1, "scanned": 1, "clean": 1,
+                                    "malicious": 0, "agent_guard_eligible": 2}}):
+            self.assertEqual(scan_mcp.virustotal_verdict(report), 2, report)
+        self.assertEqual(scan_mcp.virustotal_verdict(
+            {"summary": {"kind": "file", "total_to_scan": 1, "scanned": 1, "clean": 1,
+                         "malicious": 0}, "findings": []}), 0)
+
+    def test_virustotal_verdict_summary_without_a_known_kind_is_never_safe(self):
+        # A directory summary without agent_guard_eligible used to pass whenever
+        # total_to_scan was above zero. The kind decides which proof is required.
+        scan_mcp = importlib.import_module("scan_mcp")
+        counted = {"total_found": 1, "total_to_scan": 1, "scanned": 1, "clean": 1,
+                   "malicious": 0}
+        for report in ({"summary": dict(counted)},                       # no kind
+                       {"summary": dict(counted, kind="folder")},        # unknown kind
+                       {"summary": dict(counted, kind=None)},
+                       {"summary": dict(counted, kind="directory")},     # no count
+                       {"summary": dict(counted, kind="file", total_to_scan=2)},
+                       {"summary": {"kind": "file", "total_to_scan": 0}}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(scan_mcp.virustotal_verdict(report), 2, report)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(scan_mcp.virustotal_verdict({"summary": dict(
+                counted, kind="directory", agent_guard_eligible=1)}), 0)
+
+    def test_virustotal_verdict_safe_needs_every_file_clean(self):
+        scan_mcp = importlib.import_module("scan_mcp")
+        self.assertEqual(scan_mcp.virustotal_verdict({"summary": {
+            "total_to_scan": 3, "scanned": 2, "clean": 2, "malicious": 0},
+            "findings": []}), 2)
+        self.assertEqual(scan_mcp.virustotal_verdict({"summary": {
+            "kind": "directory", "agent_guard_eligible": 3, "total_found": 3,
+            "total_to_scan": 3, "scanned": 3, "clean": 3, "malicious": 0},
+            "findings": []}), 0)
+
+    def test_virustotal_verdict_directory_unknown_hash_keeps_specific_message(self):
+        import contextlib
+        import io
+        scan_mcp = importlib.import_module("scan_mcp")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = scan_mcp.virustotal_verdict({"summary": {
+                "kind": "directory", "agent_guard_eligible": 2, "total_found": 2,
+                "total_to_scan": 2, "scanned": 2, "clean": 1, "malicious": 0,
+                "not_found": 1}, "findings": []})
+        self.assertEqual(code, 2)
+        self.assertIn("never seen", out.getvalue())
+
+    def test_cisco_run_judges_stdout_only(self):
+        scan_mcp = importlib.import_module("scan_mcp")
+        import subprocess
+        from unittest.mock import patch
+
+        def run(stdout, stderr):
+            proc = subprocess.CompletedProcess([], 0, stdout, stderr)
+            with patch.object(scan_mcp, "run_bounded", return_value=proc):
+                return scan_mcp.run_cisco(["mcp-scanner"], "label")
+
+        self.assertEqual(run("Total tools scanned: 2\nUnsafe items: 3",
+                             "Unsafe items: 0"), 1)
+        self.assertEqual(run("", "Total tools scanned: 2\nUnsafe items: 0"), 2)
+        self.assertEqual(run("Total tools scanned: 2\nUnsafe items: 0",
+                             "Unsafe items: 3"), 0)
+
+    def _run_vt_helper_single_file(self, query_result):
+        """Execute VT_HELPER's single-file branch against a stub analyzer."""
+        return self._run_vt_helper(query_result)
+
+    def _run_vt_helper(self, query_result, directory=False, dir_summary=None,
+                       files=None, puremagic=True, symlink=None, magic_file=None,
+                       should_scan="stub", magic_import="ok", fake_symlink=None,
+                       unreadable=None):
+        """Execute VT_HELPER against a stub analyzer; return the verdict.
+
+        files: relative path -> bytes written instead of tool.exe (directory mode).
+        The stub analyzer treats .exe and .pyc as scannable, like Cisco's list.
+        symlink: (link name, target name) created in the directory, if possible.
+        fake_symlink: file name that Path.is_symlink reports as a link (no link is made).
+        magic_file: replaces puremagic.magic_file (default: identifies every file).
+        should_scan: "stub", "missing" or "raises" for Cisco's private _should_scan_file.
+        magic_import: "ok" or "fails" (the file_magic module cannot be imported).
+        unreadable: file name whose Path.open raises PermissionError."""
+        import contextlib
+        import io
+        import tempfile
+        import types
+        scan_mcp = importlib.import_module("scan_mcp")
+
+        class StubAnalyzer:
+            def __init__(self, **kwargs):
+                self.upload_files = kwargs.get("upload_files", False)
+
+            def _query_virustotal_cached(self, file_hash):
+                return query_result
+
+            def _create_finding(self, file_path, file_hash, vt_result):
+                return types.SimpleNamespace(severity="HIGH", summary="malicious",
+                                             details={"permalink": "x"})
+
+            def analyze_directory(self, path):
+                if dir_summary is not None:
+                    self.last_scan_summary = dir_summary
+                else:  # one file, looked up through the (wrapped) query method
+                    found = self._query_virustotal_cached("h")[1]
+                    self.last_scan_summary = {
+                        "total_to_scan": 1, "scanned": int(found), "clean": int(found),
+                        "malicious": 0, "not_found": int(not found)}
+                return []
+
+            def analyze_file(self, path):  # the old, ambiguous entry point
+                return None
+
+            def _should_scan_file(self, path):
+                return str(path).endswith((".exe", ".pyc"))
+
+        if should_scan == "missing":
+            del StubAnalyzer._should_scan_file
+        elif should_scan == "raises":
+            def _boom(self, path):
+                raise RuntimeError("private API changed")
+            StubAnalyzer._should_scan_file = _boom
+
+        constants = types.ModuleType("mcpscanner.config.constants")
+        constants.MCPScannerConstants = types.SimpleNamespace()
+        analyzer_mod = types.ModuleType("mcpscanner.core.analyzers.virustotal_analyzer")
+        analyzer_mod.VirusTotalAnalyzer = StubAnalyzer
+        magic_mod = types.ModuleType("mcpscanner.utils.file_magic")
+        magic_mod._PUREMAGIC_AVAILABLE = puremagic
+        magic_mod.puremagic = types.SimpleNamespace(
+            magic_file=magic_file or (lambda path: [object()]))
+        stubs = {"mcpscanner": types.ModuleType("mcpscanner"),
+                 "mcpscanner.utils": types.ModuleType("mcpscanner.utils"),
+                 "mcpscanner.utils.file_magic": magic_mod,
+                 "mcpscanner.config": types.ModuleType("mcpscanner.config"),
+                 "mcpscanner.config.constants": constants,
+                 "mcpscanner.core": types.ModuleType("mcpscanner.core"),
+                 "mcpscanner.core.analyzers": types.ModuleType("mcpscanner.core.analyzers"),
+                 "mcpscanner.core.analyzers.virustotal_analyzer": analyzer_mod}
+        if magic_import == "fails":
+            stubs["mcpscanner.utils.file_magic"] = None   # importing it raises ImportError
+        old_modules = {k: sys.modules.get(k) for k in stubs}
+        old_argv, old_env = sys.argv[:], os.environ.copy()
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "tool.exe"
+            target.write_bytes(b"MZ payload")
+            if directory:
+                target = Path(d)
+                if files is not None:
+                    target.joinpath("tool.exe").unlink()
+                    for rel, data in files.items():
+                        (target / rel).parent.mkdir(parents=True, exist_ok=True)
+                        (target / rel).write_bytes(data)
+                if symlink is not None:
+                    try:
+                        (target / symlink[0]).symlink_to(target / symlink[1])
+                    except (OSError, NotImplementedError):
+                        self.skipTest("symlinks are not available here")
+            out = io.StringIO()
+            try:
+                sys.modules.update(stubs)
+                sys.argv = ["-c", str(target), "1"]
+                os.environ["VIRUSTOTAL_API_KEY"] = "vt-test"
+                real_is_symlink = Path.is_symlink
+
+                def is_symlink(path):
+                    if fake_symlink is not None and path.name == fake_symlink:
+                        return True
+                    return real_is_symlink(path)
+
+                real_open = Path.open
+
+                def open_(path, *args, **kwargs):
+                    if unreadable is not None and path.name == unreadable:
+                        raise PermissionError("denied")
+                    return real_open(path, *args, **kwargs)
+
+                with contextlib.redirect_stdout(out), \
+                        patch.object(Path, "is_symlink", is_symlink), \
+                        patch.object(Path, "open", open_):
+                    exec(scan_mcp.VT_HELPER, {"__name__": "__main__"})
+            finally:
+                for k, v in old_modules.items():
+                    if v is None:
+                        sys.modules.pop(k, None)
+                    else:
+                        sys.modules[k] = v
+                sys.argv = old_argv
+                os.environ.clear()
+                os.environ.update(old_env)
+        report = json.loads(out.getvalue().strip().splitlines()[-1])
+        return scan_mcp.virustotal_verdict(report)
+
+    def test_vt_helper_empty_summary_is_safe_only_when_nothing_is_checkable(self):
+        # Nothing scannable at all: the helper reports total_to_scan 0 (note, not an error).
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={},
+            files={"README.md": b"# docs", "src/a.txt": b"text"}), 0)
+
+    def test_vt_helper_empty_summary_with_files_cisco_skipped_is_no_verdict(self):
+        # Cisco drops dot directories and __pycache__ silently; agent-guard counts them.
+        for files in ({".bin/payload.exe": b"MZ"}, {"__pycache__/a.pyc": b"x"},
+                      {".claude/skills/x/tool.exe": b"MZ"}):
+            with self.subTest(files=list(files)):
+                self.assertEqual(self._run_vt_helper(
+                    (None, False, None), directory=True, dir_summary={}, files=files), 2)
+
+    def test_vt_helper_symlink_is_not_followed_and_not_clean(self):
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={},
+            files={"README.md": b"# docs"}, symlink=("link.txt", "README.md")), 2)
+
+    def test_vt_helper_symlink_check_does_not_need_symlink_rights(self):
+        # Same branch as the real-link test above, without creating a link (Windows
+        # needs a privilege for that).
+        files = {"README.md": b"# docs", "link.txt": b"# docs"}
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={}, files=files,
+            fake_symlink="link.txt"), 2)
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={}, files=files), 0)
+
+    def test_vt_helper_unusable_cisco_private_api_counts_every_file(self):
+        files = {"README.md": b"# docs"}
+        for mode in ("missing", "raises"):
+            with self.subTest(should_scan=mode):
+                self.assertEqual(self._run_vt_helper(
+                    (None, False, None), directory=True, dir_summary={}, files=files,
+                    should_scan=mode), 2)
+        with self.subTest("file_magic cannot be imported"):
+            self.assertEqual(self._run_vt_helper(
+                (None, False, None), directory=True, dir_summary={}, files=files,
+                magic_import="fails"), 2)
+
+    def test_vt_helper_file_whose_type_detection_fails_counts(self):
+        # Cisco swallows a failing detection and calls the file text.
+        def failing(path):
+            raise ValueError("cannot identify")
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={},
+            files={"notes.txt": b"some text"}, magic_file=failing), 2)
+        # An empty file has nothing to detect or check.
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={},
+            files={"__init__.py": b""}, magic_file=failing), 0)
+
+    def test_vt_helper_unreadable_file_counts(self):
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={},
+            files={"README.md": b"# docs", "secret.txt": b"x"}, unreadable="secret.txt"), 2)
+
+    def test_vt_helper_marks_the_kind_of_every_summary(self):
+        scan_mcp = importlib.import_module("scan_mcp")
+        self.assertIn('summary["kind"] = "directory"', scan_mcp.VT_HELPER)
+        self.assertIn('"kind": "file"', scan_mcp.VT_HELPER)
+
+    def test_vt_helper_missing_magic_library_is_not_clean(self):
+        # Without puremagic Cisco cannot tell text from a renamed binary.
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary={},
+            files={"notes.txt": b"MZ pretending to be text"}, puremagic=False), 2)
+
+    def test_vt_helper_scanned_directory_with_extra_dropped_file_is_no_verdict(self):
+        summary = {"total_found": 1, "total_to_scan": 1, "scanned": 1, "clean": 1,
+                   "malicious": 0}
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary=summary,
+            files={"tool.exe": b"MZ", ".hidden/x.exe": b"MZ"}), 2)
+        self.assertEqual(self._run_vt_helper(
+            (None, False, None), directory=True, dir_summary=summary,
+            files={"tool.exe": b"MZ", "README.md": b"x"}), 0)
+
+    def test_vt_helper_unanalysed_hash_is_not_found_in_both_branches(self):
+        # A known hash with no engine results yet (total_engines 0) is not clean.
+        empty = {"malicious": 0, "suspicious": 0, "total_engines": 0, "scan_date": 1}
+        for result in (empty, {"malicious": 0, "suspicious": 0},
+                       dict(empty, total_engines="70")):
+            with self.subTest(result=result):
+                self.assertEqual(self._run_vt_helper((result, True, None)), 2)
+                self.assertEqual(self._run_vt_helper((result, True, None),
+                                                     directory=True), 2)
+        clean = dict(empty, total_engines=70)
+        self.assertEqual(self._run_vt_helper((clean, True, None), directory=True), 0)
+
+    def test_vt_helper_single_file_unknown_hash_is_no_verdict(self):
+        self.assertEqual(self._run_vt_helper_single_file((None, False, None)), 2)
+
+    def test_vt_helper_single_file_lookup_errors_are_no_verdict(self):
+        for reason in ("rate_limit", "quota_exceeded", "daily_cap_reached",
+                       "auth_error", "api_error", "request_error"):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    self._run_vt_helper_single_file((None, False, reason)), 2)
+
+    def test_vt_helper_single_file_verdicts_for_known_hash(self):
+        clean = {"malicious": 0, "suspicious": 0, "total_engines": 70,
+                 "scan_date": 1_900_000_000, "permalink": "x"}
+        self.assertEqual(self._run_vt_helper_single_file((clean, True, None)), 0)
+        bad = dict(clean, malicious=3)
+        self.assertEqual(self._run_vt_helper_single_file((bad, True, None)), 1)
+        sus = dict(clean, suspicious=1)
+        self.assertEqual(self._run_vt_helper_single_file((sus, True, None)), 2)
 
     def test_cisco_verdict_fails_closed_on_llm_auth_errors_even_with_safe_summary(self):
         scan_mcp = importlib.import_module("scan_mcp")
@@ -1581,6 +2055,23 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertTrue(dry)
         self.assertEqual(selected, ["codex"])
 
+    def test_scan_url_remote_candidate_without_sandbox_is_no_verdict_but_not_a_block_loss(self):
+        scan_url = importlib.import_module("scan_url")
+        source = scan_url.ResolvedSource(
+            kind="catalog", remote_urls=["https://api.example.com/mcp"])
+        with patch.object(scan_url, "run_remote",
+                          side_effect=AssertionError("remote must not be contacted")),                 contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(scan_url.scan_marketplace_candidates(
+                source, sandbox=False, max_candidates=10, dry_run=True), 2)
+        # A BLOCK found earlier is not hidden behind the skipped endpoint.
+        source = scan_url.ResolvedSource(
+            kind="catalog", source_urls=["https://github.com/o/r"],
+            remote_urls=["https://api.example.com/mcp"])
+        with patch.object(scan_url, "scan_candidate_source_url", return_value=1),                 patch.object(scan_url, "run_remote",
+                             side_effect=AssertionError("remote must not be contacted")),                 contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(scan_url.scan_marketplace_candidates(
+                source, sandbox=False, max_candidates=10, dry_run=True), 1)
+
     def test_scan_url_safe_remote_candidate_offers_remote_install(self):
         scan_url = importlib.import_module("scan_url")
         calls = []
@@ -1689,6 +2180,228 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             self.assertEqual(stable, target.resolve())
             self.assertTrue((target / "SKILL.md").is_file())
 
+    def _quiet_scan_resolved(self, scan_url, source, kind="auto", **kwargs):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = scan_url.scan_resolved(source, kind, **kwargs)
+        return rc, out.getvalue()
+
+    def test_scan_url_empty_skill_collection_has_no_verdict(self):
+        scan_url = importlib.import_module("scan_url")
+        for dry_run in (False, True):
+            with tempfile.TemporaryDirectory() as src_dir:
+                source = scan_url.ResolvedSource(kind="github", source_path=Path(src_dir))
+                rc, _ = self._quiet_scan_resolved(scan_url, source, "skill-collection",
+                                                  dry_run=dry_run)
+                self.assertEqual(rc, 2)
+
+    def test_scan_url_unknown_layout_is_no_verdict_and_skips_catalog_scan(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / ".claude-plugin").mkdir()
+            (src / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
+            (src / "hooks").mkdir()
+            (src / "hooks" / "run.sh").write_text("echo hi\n", encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            self.assertEqual(scan_url.classify_source(source), "unknown")
+            with patch.object(scan_url, "scan_catalog", return_value=0) as catalog:
+                rc, out = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+            self.assertEqual(rc, 2)
+            catalog.assert_not_called()
+            self.assertIn("unsupported repo layout", out)
+
+    def test_scan_url_collection_with_script_outside_skills_is_no_verdict(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n", encoding="utf-8")
+            (src / "install.ps1").write_text("Write-Host hi\n", encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            with patch.object(scan_url, "run_skill_static", return_value=0):
+                rc, out = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+            self.assertEqual(rc, 2)
+            self.assertIn("install.ps1", out)
+
+    def test_scan_url_collection_with_node_modules_outside_skills_is_no_verdict(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n", encoding="utf-8")
+            (src / "node_modules" / "x").mkdir(parents=True)
+            (src / "node_modules" / "x" / "index.js").write_text("1\n", encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            with patch.object(scan_url, "run_skill_static", return_value=0):
+                rc, out = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+            self.assertEqual(rc, 2)
+            self.assertIn("node_modules", out)
+
+    def test_scan_url_collection_with_workflow_steps_outside_skills_is_no_verdict(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n", encoding="utf-8")
+            (src / ".github" / "workflows").mkdir(parents=True)
+            (src / ".github" / "workflows" / "ci.yml").write_text("on: push\n", encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            with patch.object(scan_url, "run_skill_static", return_value=0):
+                rc, out = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+            self.assertEqual(rc, 2)
+            self.assertIn("workflows", out)
+
+    def test_scan_url_collection_with_only_docs_outside_skills_is_safe(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n", encoding="utf-8")
+            (src / "README.md").write_text("# hi\n", encoding="utf-8")
+            (src / "LICENSE").write_text("MIT\n", encoding="utf-8")
+            (src / ".github" / "ISSUE_TEMPLATE").mkdir(parents=True)
+            (src / ".github" / "ISSUE_TEMPLATE" / "bug.yml").write_text("name: Bug\n", encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            with patch.object(scan_url, "run_skill_static", return_value=0):
+                rc, _ = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+            self.assertEqual(rc, 0)
+
+    def test_scan_url_license_with_code_suffix_is_not_documentation(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        for name, expected in (("LICENSE", 0), ("LICENSE.md", 0), ("license.sh", 2)):
+            with tempfile.TemporaryDirectory() as src_dir:
+                src = Path(src_dir)
+                (src / "skills" / "a").mkdir(parents=True)
+                (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n",
+                                                               encoding="utf-8")
+                (src / name).write_text("x\n", encoding="utf-8")
+                source = scan_url.ResolvedSource(kind="github", source_path=src)
+                with patch.object(scan_url, "run_skill_static", return_value=0):
+                    rc, _ = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+                self.assertEqual(rc, expected, name)
+
+    def test_scan_url_explicit_catalog_kind_does_not_shrink_a_repo_scan(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n",
+                                                           encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            for kind in ("catalog", "markdown"):
+                with patch.object(scan_url, "scan_catalog", return_value=0) as catalog:
+                    rc, out = self._quiet_scan_resolved(scan_url, source, kind, dry_run=True)
+                self.assertEqual(rc, 2, kind)
+                self.assertIn("would check only the README", out)
+                catalog.assert_not_called()
+
+    def test_scan_url_collection_block_beats_unscanned_files(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n", encoding="utf-8")
+            (src / "install.ps1").write_text("Write-Host hi\n", encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            with patch.object(scan_url, "run_skill_static", return_value=1):
+                rc, _ = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+            self.assertEqual(rc, 1)
+
+    def test_find_skill_dirs_accepts_lowercase_manifest(self):
+        scan_skill = importlib.import_module("scan_skill")
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "skill.md").write_text("x\n", encoding="utf-8")
+            (src / "skills" / "b").mkdir()
+            (src / "skills" / "b" / "Skill.MD").write_text("x\n", encoding="utf-8")
+            self.assertEqual(scan_skill.find_skill_dirs(src),
+                             [src / "skills" / "a", src / "skills" / "b"])
+            self.assertTrue(scan_url.has_skill_manifest(src / "skills" / "b"))
+
+    def test_scan_url_marketplace_left_out_candidates_are_no_verdict(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        source = scan_url.ResolvedSource(
+            kind="catalog",
+            source_urls=["https://github.com/a/one", "https://github.com/a/two",
+                         "https://github.com/a/three"],
+        )
+        with patch.object(scan_url, "scan_candidate_source_url", return_value=0), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = scan_url.scan_marketplace_candidates(
+                source, sandbox=False, max_candidates=1, dry_run=True)
+        self.assertEqual(rc, 2)
+
+    def test_scan_url_marketplace_block_is_not_lost_behind_no_verdict(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        source = scan_url.ResolvedSource(
+            kind="catalog",
+            source_urls=["https://github.com/a/one", "https://github.com/a/two"],
+        )
+        with patch.object(scan_url, "scan_candidate_source_url", side_effect=[1, 2]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = scan_url.scan_marketplace_candidates(
+                source, sandbox=False, max_candidates=5, dry_run=True)
+        self.assertEqual(rc, 1)
+
+    def test_scan_skill_all_block_is_not_lost_behind_no_verdict(self):
+        from unittest.mock import patch
+        scan_skill = importlib.import_module("scan_skill")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            for name in ("a", "b"):
+                (src / name).mkdir()
+                (src / name / "SKILL.md").write_text("x\n", encoding="utf-8")
+            with patch.object(scan_skill, "run_skillspector", side_effect=[1, 2]), \
+                    patch.object(sys, "argv", ["scan_skill.py", str(src), "--all"]), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as cm:
+                    scan_skill.main()
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_scan_skill_all_summary_names_the_exit_code(self):
+        from unittest.mock import patch
+        scan_skill = importlib.import_module("scan_skill")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "a").mkdir()
+            (src / "a" / "SKILL.md").write_text("x\n", encoding="utf-8")
+            for code, word in ((1, "BLOCK"), (2, "NO VERDICT"), (0, "all SAFE")):
+                out = io.StringIO()
+                with patch.object(scan_skill, "run_skillspector", return_value=code), \
+                        patch.object(sys, "argv", ["scan_skill.py", str(src), "--all"]), \
+                        contextlib.redirect_stdout(out):
+                    with self.assertRaises(SystemExit):
+                        scan_skill.main()
+                summary = [ln for ln in out.getvalue().splitlines() if "Worst verdict" in ln][0]
+                self.assertIn(f"({word})", summary, code)
+
+    def test_scan_url_collection_summary_names_the_exit_code(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n", encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            for code, word in ((1, "BLOCK"), (2, "NO VERDICT")):
+                with patch.object(scan_url, "run_skill_static", return_value=code):
+                    rc, out = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+                self.assertEqual(rc, code)
+                summary = [ln for ln in out.splitlines() if "Worst verdict" in ln][0]
+                self.assertIn(f"({word})", summary, code)
+
     def test_audit_installed_infers_uvx_git_mcp_scan_commands(self):
         audit = importlib.import_module("audit_installed")
         entry = {
@@ -1783,6 +2496,375 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         path = Path("C:/repo/node_modules/pkg/build/main/cli.js")
 
         self.assertEqual(audit.package_root_for_file(path), Path("C:/repo/node_modules/pkg"))
+
+    def test_audit_dry_run_is_no_verdict(self):
+        audit = importlib.import_module("audit_installed")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(audit.run(["x"], execute=False), 2)
+
+    def test_audit_download_dry_run_is_no_verdict_and_says_so(self):
+        audit = importlib.import_module("audit_installed")
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as src_dir:
+            with contextlib.redirect_stdout(buf):
+                rc = audit.audit_download(Path(src_dir), "mcp", False)
+        self.assertEqual(rc, 2)
+        self.assertIn("NOT EXECUTED -- rerun with --execute for a verdict", buf.getvalue())
+
+    def test_audit_chosen_tool_that_is_not_found_is_no_verdict(self):
+        audit = importlib.import_module("audit_installed")
+        err = io.StringIO()
+        with patch.object(audit, "installed_skill_dirs", return_value=[]), \
+                patch.object(audit, "installed_mcp_servers", return_value=[]), \
+                patch.object(audit.install_skill, "detect_tools",
+                             return_value={"codex": False}), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(audit.audit_installed("all", True, ["codex"]), 2)
+        self.assertIn("codex", err.getvalue())
+
+    def test_audit_chosen_tool_that_is_found_but_empty_is_clean(self):
+        audit = importlib.import_module("audit_installed")
+        with patch.object(audit, "installed_skill_dirs", return_value=[]), \
+                patch.object(audit, "installed_mcp_servers", return_value=[]), \
+                patch.object(audit.install_skill, "detect_tools",
+                             return_value={"codex": True}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(audit.audit_installed("all", True, ["codex"]), 0)
+
+    def test_audit_without_chosen_tool_nothing_installed_stays_clean(self):
+        audit = importlib.import_module("audit_installed")
+        with patch.object(audit, "installed_skill_dirs", return_value=[]), \
+                patch.object(audit, "installed_mcp_servers", return_value=[]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(audit.audit_installed("all", True, None), 0)
+
+    def test_audit_read_json_raises_on_broken_file_and_ignores_missing(self):
+        audit = importlib.import_module("audit_installed")
+        with tempfile.TemporaryDirectory() as src_dir:
+            broken = Path(src_dir) / "broken.json"
+            broken.write_text("{not json", encoding="utf-8")
+            with self.assertRaises(audit.ConfigReadError):
+                audit.read_json(broken)
+            self.assertEqual(audit.read_json(Path(src_dir) / "missing.json"), {})
+
+    def test_audit_installed_broken_config_is_no_verdict(self):
+        audit = importlib.import_module("audit_installed")
+        with patch.object(audit, "installed_skill_dirs", return_value=[]), \
+                patch.object(audit, "installed_mcp_servers",
+                             side_effect=audit.ConfigReadError("broken config")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(audit.audit_installed("mcps", True, None), 2)
+
+    def test_audit_codex_broken_toml_raises_config_read_error(self):
+        audit = importlib.import_module("audit_installed")
+        with tempfile.TemporaryDirectory() as src_dir:
+            cfg = Path(src_dir) / "config.toml"
+            cfg.write_bytes(b"\xff\xfe[mcp_servers.x\x00")
+            with patch.object(Path, "read_text", side_effect=OSError("denied")):
+                with self.assertRaises(audit.ConfigReadError):
+                    audit.read_codex_mcp_servers(cfg)
+
+    def _codex_servers(self, text):
+        audit = importlib.import_module("audit_installed")
+        with tempfile.TemporaryDirectory() as src_dir:
+            cfg = Path(src_dir) / "config.toml"
+            cfg.write_text(text, encoding="utf-8")
+            return audit.read_codex_mcp_servers(cfg)
+
+    def test_audit_codex_multiline_args_are_read_completely(self):
+        audit = importlib.import_module("audit_installed")
+        servers = self._codex_servers(
+            '[mcp_servers.x]\ncommand = "npx"\nargs = ["-y",\n'
+            '  "--registry=http://evil.example",  # "comment"\n  "pkg"]\n')
+        self.assertEqual(servers["x"]["args"], ["-y", "--registry=http://evil.example", "pkg"])
+        self.assertIsNone(audit.mcp_source_scan_command(servers["x"]))
+        self.assertEqual(audit.mcp_sandbox_command(servers["x"])[-3:],
+                         ["-y", "--registry=http://evil.example", "pkg"])
+
+    def test_audit_codex_env_table_with_several_lines_is_read_completely(self):
+        audit = importlib.import_module("audit_installed")
+        servers = self._codex_servers(
+            '[mcp_servers.x]\ncommand = "uvx"\nargs = ["pkg"]\n'
+            '[mcp_servers.x.env]\nOTHER = "1"\n# note\nUV_INDEX_URL = "http://evil.example"\n')
+        self.assertEqual(set(servers["x"]["env"]), {"UV_INDEX_URL", "OTHER"})
+        self.assertNotIn("http://evil.example", str(servers["x"]["env"]))
+        self.assertIsNone(audit.mcp_source_scan_command(servers["x"]))
+
+    def test_audit_codex_env_table_before_server_table_is_kept(self):
+        audit = importlib.import_module("audit_installed")
+        servers = self._codex_servers(
+            '[mcp_servers.x.env]\nUV_INDEX_URL = "http://evil.example"\n\n'
+            '[mcp_servers.x]\ncommand = "uvx"\nargs = ["pkg"]\n')
+        self.assertIn("UV_INDEX_URL", servers["x"]["env"])
+        self.assertIsNone(audit.mcp_source_scan_command(servers["x"]))
+
+    def test_audit_codex_inline_server_table_is_read(self):
+        servers = self._codex_servers(
+            '[mcp_servers]\nx = { command = "uvx", args = ["pkg"] }\n')
+        self.assertEqual(servers["x"]["command"], "uvx")
+
+    def test_audit_codex_invalid_toml_or_wrong_types_are_config_read_errors(self):
+        audit = importlib.import_module("audit_installed")
+        bad = [
+            '[mcp_servers.x\ncommand = "uvx"',
+            '[mcp_servers.x]\ncommand = "uvx"\nargs = "pkg"\n',
+            '[mcp_servers.x]\ncommand = "uvx"\nargs = ["pkg", 3]\n',
+            '[mcp_servers.x]\ncommand = 5\n',
+            '[mcp_servers.x]\nurl = ["a"]\n',
+            '[mcp_servers.x]\ncommand = "uvx"\nenv = "A=B"\n',
+            'mcp_servers = "x"\n',
+            '[mcp_servers]\nx = 3\n',
+        ]
+        for text in bad:
+            with self.subTest(text=text):
+                with self.assertRaises(audit.ConfigReadError):
+                    self._codex_servers(text)
+
+    def test_audit_picks_package_from_first_positional_argument(self):
+        audit = importlib.import_module("audit_installed")
+        cases = [
+            ({"command": "npx", "args": ["-y", "pkg", "stdio"]}, "npm"),
+            ({"command": "uvx", "args": ["pkg", "serve"]}, "pypi"),
+            ({"command": "uvx", "args": ["--python", "3.12", "pkg"]}, "pypi"),
+            ({"command": "uvx", "args": ["-p", "3.12", "pkg"]}, "pypi"),
+            ({"command": "uvx", "args": ["-p=3.12", "pkg"]}, "pypi"),
+            ({"command": "uvx", "args": ["--python=3.12", "--from", "pkg", "cmd"]}, "pypi"),
+            ({"command": "uvx", "args": ["pkg", "--port", "3000"]}, "pypi"),
+            ({"command": "npx", "args": ["-p", "pkg", "bin"]}, "npm"),
+            ({"command": "npx", "args": ["-y", "pkg", "--registry", "x"]}, "npm"),
+            ({"command": "npx", "args": ["-p", "pkg", "-p", "pkg", "bin"]}, "npm"),
+            ({"command": "npx", "args": ["--package=pkg", "bin"]}, "npm"),
+            ({"command": "npx", "args": ["--package", "pkg", "bin"]}, "npm"),
+            ({"command": "uvx", "args": ["--from", "pkg", "cmd"]}, "pypi"),
+            ({"command": "uvx", "args": ["--from=pkg", "cmd"]}, "pypi"),
+        ]
+        for entry, ecosystem in cases:
+            cmd = audit.mcp_source_scan_command(entry)
+            self.assertEqual(cmd, ["python", "scripts/scan_mcp.py", ecosystem, "pkg"], entry)
+
+    def test_audit_launch_with_unscannable_extras_is_not_inferred(self):
+        audit = importlib.import_module("audit_installed")
+        cases = [
+            {"command": "uvx", "args": ["--with", "extra", "pkg"]},
+            {"command": "uvx", "args": ["--with=extra", "pkg"]},
+            {"command": "uvx", "args": ["--index-url", "https://i.example", "pkg"]},
+            {"command": "uvx", "args": ["--index-url=https://i.example", "pkg"]},
+            {"command": "npx", "args": ["--registry", "https://r.example", "pkg"]},
+            {"command": "npx", "args": ["--registry=https://r.example", "pkg"]},
+        ]
+        for entry in cases:
+            self.assertIsNone(audit.mcp_source_scan_command(entry), entry)
+
+    def test_audit_launch_with_index_or_source_options_is_not_inferred(self):
+        audit = importlib.import_module("audit_installed")
+        uv_options = ["--with", "-w", "--with-editable", "--with-requirements", "--index",
+                      "--default-index", "--index-url", "-i", "--extra-index-url",
+                      "--find-links", "-f", "--constraints", "-c", "--overrides",
+                      "--build-constraints", "-b", "--env-file", "--config-file",
+                      "--project", "--directory"]
+        cases = []
+        for opt in uv_options:
+            cases.append({"command": "uvx", "args": [opt, "v", "pkg"]})
+            cases.append({"command": "uvx", "args": [f"{opt}=v", "pkg"]})
+            cases.append({"command": "uvx", "args": [opt, "v", "--from", "pkg", "cmd"]})
+            cases.append({"command": "uvx", "args": [
+                opt, "v", "--from", "git+https://github.com/a/b", "cmd"]})
+            cases.append({"command": "uvx", "args": [
+                "--from=git+https://github.com/a/b", f"{opt}=v", "cmd"]})
+        cases.append({"command": "uvx", "args": ["--no-index", "pkg"]})
+        for opt in ["--registry", "--userconfig", "--globalconfig", "-c", "--call",
+                    "-w", "--workspace", "--prefix"]:
+            cases.append({"command": "npx", "args": [opt, "v", "pkg"]})
+            cases.append({"command": "npx", "args": ["-y", f"{opt}=v", "pkg"]})
+        for entry in cases:
+            self.assertIsNone(audit.mcp_source_scan_command(entry), entry)
+
+    def test_audit_github_shortcut_still_checks_options(self):
+        audit = importlib.import_module("audit_installed")
+        url = "git+https://github.com/example/mcp"
+        expected = ["python", "scripts/scan_url.py", "https://github.com/example/mcp"]
+        self.assertEqual(
+            audit.mcp_source_scan_command({"command": "uvx", "args": ["--from", url, "cmd"]}),
+            expected)
+        self.assertEqual(
+            audit.mcp_source_scan_command({"command": "uvx", "args": [f"--from={url}", "cmd"]}),
+            expected)
+        self.assertIsNone(audit.mcp_source_scan_command(
+            {"command": "uvx", "args": ["--from", url, "--with", "evilpkg", "cmd"]}))
+        self.assertIsNone(audit.mcp_source_scan_command(
+            {"command": "uvx", "args": ["--from", url, "--index-url=https://i.example", "cmd"]}))
+        self.assertIsNone(audit.mcp_source_scan_command(
+            {"command": "uvx", "args": ["--from", "git+https://example.org/a/b", "cmd"]}))
+
+    def test_audit_launch_with_unknown_option_is_not_inferred(self):
+        audit = importlib.import_module("audit_installed")
+        for entry in (
+            {"command": "uvx", "args": ["--frobnicate", "pkg", "cmd"]},
+            {"command": "uvx", "args": ["--frobnicate=1", "pkg"]},
+            {"command": "npx", "args": ["--frobnicate", "pkg", "cmd"]},
+            {"command": "npx", "args": ["-y", "--@scope:registry=https://r.example", "pkg"]},
+            {"command": "uvx", "args": ["--python"]},          # value missing
+            {"command": "uvx", "args": ["--from"]},
+        ):
+            self.assertIsNone(audit.mcp_source_scan_command(entry), entry)
+
+    def test_audit_known_uvx_switches_without_a_value_are_harmless(self):
+        audit = importlib.import_module("audit_installed")
+        for flag in ["--no-project", "--isolated", "--offline", "-q", "-qq", "-v", "-vv",
+                     "--refresh", "--no-cache", "--quiet", "--verbose", "--no-progress",
+                     "--no-config", "--no-sources", "--reinstall", "--no-env-file"]:
+            if flag == "--no-project":
+                # not a uvx switch (uv run only): unknown, so it stays unverifiable
+                self.assertIsNone(audit.mcp_source_scan_command(
+                    {"command": "uvx", "args": [flag, "pkg"]}), flag)
+                continue
+            self.assertEqual(
+                audit.mcp_source_scan_command({"command": "uvx", "args": [flag, "pkg"]}),
+                ["python", "scripts/scan_mcp.py", "pypi", "pkg"], flag)
+
+    def test_audit_launcher_option_tables_are_separate(self):
+        audit = importlib.import_module("audit_installed")
+        # -p is the Python version for uvx but the package for npx
+        self.assertEqual(
+            audit.mcp_source_scan_command({"command": "uvx", "args": ["-p", "3.12", "pkg"]}),
+            ["python", "scripts/scan_mcp.py", "pypi", "pkg"])
+        self.assertEqual(
+            audit.mcp_source_scan_command({"command": "npx", "args": ["-p", "pkg", "bin"]}),
+            ["python", "scripts/scan_mcp.py", "npm", "pkg"])
+        # --package exists for npx only, --python for uvx only
+        self.assertIsNone(audit.mcp_source_scan_command(
+            {"command": "uvx", "args": ["--package", "pkg", "cmd"]}))
+        self.assertIsNone(audit.mcp_source_scan_command(
+            {"command": "npx", "args": ["--python", "3.12", "pkg"]}))
+
+    def test_audit_npx_with_several_packages_is_not_inferred(self):
+        audit = importlib.import_module("audit_installed")
+        self.assertIsNone(audit.mcp_source_scan_command(
+            {"command": "npx", "args": ["-p", "pkg1", "-p", "pkg2", "cmd"]}))
+        self.assertIsNone(audit.mcp_source_scan_command(
+            {"command": "npx", "args": ["--package=pkg1", "--package", "pkg2", "cmd"]}))
+
+    def test_audit_index_and_registry_env_makes_launch_not_inferable(self):
+        audit = importlib.import_module("audit_installed")
+        uv_names = ["UV_INDEX", "UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_EXTRA_INDEX_URL",
+                    "UV_FIND_LINKS", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS",
+                    "uv_index_url", "UV_CONFIG_FILE", "UV_PROJECT", "UV_ENV_FILE", "UV_NO_INDEX"]
+        for name in uv_names:
+            entry = {"command": "uvx", "args": ["pkg"], "env": {name: "https://i.example"}}
+            self.assertIsNone(audit.mcp_source_scan_command(entry), name)
+        for name in ["npm_config_registry", "NPM_CONFIG_REGISTRY", "npm_config_@scope:registry",
+                     "NPM_CONFIG_USERCONFIG", "npm_config_userconfig"]:
+            entry = {"command": "npx", "args": ["pkg"], "env": {name: "x"}}
+            self.assertIsNone(audit.mcp_source_scan_command(entry), name)
+        github = {"command": "uvx", "args": ["--from", "git+https://github.com/a/b", "cmd"],
+                  "env": {"UV_INDEX_URL": "https://i.example"}}
+        self.assertIsNone(audit.mcp_source_scan_command(github))
+        # unrelated variables do not matter, nor do the other launcher's
+        entry = {"command": "uvx", "args": ["pkg"], "env": {"API_TOKEN": "x", "PATH": "y"}}
+        self.assertEqual(audit.mcp_source_scan_command(entry),
+                         ["python", "scripts/scan_mcp.py", "pypi", "pkg"])
+        entry = {"command": "npx", "args": ["pkg"], "env": {"UV_INDEX_URL": "x"}}
+        self.assertEqual(audit.mcp_source_scan_command(entry),
+                         ["python", "scripts/scan_mcp.py", "npm", "pkg"])
+
+    def test_audit_codex_env_subsection_reaches_the_index_check(self):
+        audit = importlib.import_module("audit_installed")
+        with tempfile.TemporaryDirectory() as src_dir:
+            cfg = Path(src_dir) / "config.toml"
+            cfg.write_text(
+                "\n".join([
+                    "[mcp_servers.example]",
+                    'command = "uvx"',
+                    'args = ["pkg"]',
+                    "[mcp_servers.example.env]",
+                    'UV_INDEX_URL = "https://i.example"',
+                ]),
+                encoding="utf-8",
+            )
+            servers = audit.read_codex_mcp_servers(cfg)
+            self.assertIn("UV_INDEX_URL", servers["example"]["env"])
+            self.assertIsNone(audit.mcp_source_scan_command(servers["example"]))
+
+    def test_audit_installed_not_inferable_entry_is_never_safe(self):
+        entries = [
+            {"command": "uvx", "args": ["--with", "evil", "pkg"]},
+            {"command": "uvx", "args": ["--from", "git+https://github.com/a/b",
+                                        "--index-url=https://i.example", "cmd"]},
+            {"command": "npx", "args": ["-p", "a", "-p", "b", "cmd"]},
+            {"command": "uvx", "args": ["pkg"], "env": {"UV_INDEX_URL": "https://i.example"}},
+        ]
+        for entry in entries:
+            servers = [("claude-code", "x", entry)]
+            # every scan that does run is SAFE; the unverifiable source still gives 2
+            self.assertEqual(self._audit_mcps_with(servers, [0, 0, 0]), 2, entry)
+
+    def test_audit_installed_mcp_servers_that_are_not_an_object_are_no_verdict(self):
+        audit = importlib.import_module("audit_installed")
+        for bad in ([], ["a"], "text", 5, {"a": "string-entry"}, {"a": ["x"]},
+                    {"a": {"command": "uvx", "args": "pkg"}},
+                    {"a": {"command": "uvx", "args": ["pkg"], "env": ["X"]}}):
+            with tempfile.TemporaryDirectory() as src_dir:
+                cfg = Path(src_dir) / "cfg.json"
+                cfg.write_text(json.dumps({"mcpServers": bad}), encoding="utf-8")
+                err = io.StringIO()
+                with patch.object(audit.install_skill, "CLAUDE_DESKTOP_CONFIG", cfg), \
+                        patch.object(audit.install_skill, "detect_tools",
+                                     return_value={"claude-desktop": True}), \
+                        patch.object(audit, "installed_skill_dirs", return_value=[]), \
+                        patch.object(audit, "run", return_value=0), \
+                        contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(err):
+                    rc = audit.audit_installed("mcps", True, None)
+                self.assertEqual(rc, 2, bad)
+                self.assertIn("NO VERDICT", err.getvalue())
+                self.assertIn("mcpServers", err.getvalue())
+
+    def test_audit_installed_missing_or_null_mcp_servers_is_empty(self):
+        audit = importlib.import_module("audit_installed")
+        for data in ({}, {"mcpServers": None}, {"mcpServers": {}}):
+            with tempfile.TemporaryDirectory() as src_dir:
+                cfg = Path(src_dir) / "cfg.json"
+                cfg.write_text(json.dumps(data), encoding="utf-8")
+                with patch.object(audit.install_skill, "CLAUDE_DESKTOP_CONFIG", cfg), \
+                        patch.object(audit.install_skill, "detect_tools",
+                                     return_value={"claude-desktop": True}):
+                    self.assertEqual(audit.installed_mcp_servers(None), [], data)
+
+    def _audit_mcps_with(self, servers, codes):
+        audit = importlib.import_module("audit_installed")
+        with patch.object(audit, "installed_skill_dirs", return_value=[]), \
+                patch.object(audit, "installed_mcp_servers", return_value=servers), \
+                patch.object(audit, "run", side_effect=codes), \
+                contextlib.redirect_stdout(io.StringIO()):
+            return audit.audit_installed("mcps", True, None)
+
+    def test_audit_installed_unknown_source_is_no_verdict(self):
+        servers = [("claude-code", "odd", {"command": "something", "args": []})]
+        self.assertEqual(self._audit_mcps_with(servers, [0]), 2)  # sandbox run is SAFE
+
+    def test_audit_installed_skill_block_is_not_lost_behind_no_verdict(self):
+        audit = importlib.import_module("audit_installed")
+        skills = [("claude-code", Path("skills/a")), ("codex", Path("skills/b"))]
+        for codes in ([1, 2], [2, 1]):
+            with self.subTest(codes=codes),                     patch.object(audit, "installed_skill_dirs", return_value=skills),                     patch.object(audit, "run", side_effect=codes),                     contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(audit.audit_installed("skills", True, None), 1)
+
+    def test_audit_installed_unreadable_config_file_is_no_verdict_end_to_end(self):
+        audit = importlib.import_module("audit_installed")
+        installer = importlib.import_module("install_skill")
+        for text in ("{broken", "[]", '"text"'):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                config = Path(d) / "claude_desktop_config.json"
+                config.write_text(text, encoding="utf-8")
+                with patch.object(installer, "CLAUDE_DESKTOP_CONFIG", config),                         patch.object(audit.install_skill, "detect_tools",
+                                     return_value={"claude-desktop": True}),                         patch.object(audit, "installed_skill_dirs", return_value=[]),                         patch.object(audit, "run", return_value=0),                         contextlib.redirect_stdout(io.StringIO()),                         contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(audit.audit_installed("mcps", True, None), 2)
+
+    def test_audit_installed_block_is_not_lost_behind_no_verdict(self):
+        servers = [("claude-code", "a", {"command": "npx", "args": ["a"]}),
+                   ("claude-code", "b", {"url": "https://x.example/mcp"})]
+        # a: source=1, sandbox=2; b: source=2
+        self.assertEqual(self._audit_mcps_with(servers, [1, 2, 2]), 1)
 
     def test_shipped_text_is_not_double_encoded(self):
         # UTF-8 read as cp1252 and saved again turns "—" into "â€”"; agents
@@ -2009,9 +3091,10 @@ class ScanCliRouterTests(unittest.TestCase):
             cmd = self.scan_cli.guarddog_command("npm", "left-pad")
         finally:
             self.scan_cli.shutil.which = original
-        self.assertEqual(cmd[:4], ["docker", "run", "--rm",
+        # --pull=always: a cached :latest image would keep old rules forever.
+        self.assertEqual(cmd[:5], ["docker", "run", "--rm", "--pull=always",
                                    self.scan_cli.GUARDDOG_IMAGE])
-        self.assertEqual(cmd[4:], ["npm", "scan", "left-pad",
+        self.assertEqual(cmd[5:], ["npm", "scan", "left-pad",
                                    "--output-format", "json"])
 
     def test_guarddog_command_dies_without_guarddog_or_docker(self):
@@ -2040,6 +3123,38 @@ class ScanCliRouterTests(unittest.TestCase):
         self.assertEqual(self.scan_cli.malcontent_verdict({"Files": {}}), 2)
         self.assertEqual(self.scan_cli.malcontent_verdict({}), 2)
 
+    def test_malcontent_verdict_unknown_risk_data_is_no_verdict(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(self.scan_cli.malcontent_verdict(
+                {"Files": {"a": {}}}), 2)
+            self.assertEqual(self.scan_cli.malcontent_verdict(
+                {"Files": {"a": {"RiskLevel": "WEIRD"}}}), 2)
+            self.assertEqual(self.scan_cli.malcontent_verdict(
+                {"Files": ["a"]}), 2)
+        self.assertIn("NO VERDICT", buf.getvalue())
+
+    def test_malcontent_verdict_keeps_block_next_to_unknown_level(self):
+        self.assertEqual(self.scan_cli.malcontent_verdict(
+            {"Files": {"a": {"RiskLevel": "CRITICAL"},
+                       "b": {"RiskLevel": "WEIRD"}}}), 1)
+
+    def test_safe_basename_returns_only_a_bare_file_name(self):
+        resolver = importlib.import_module("_url_resolver")
+        cases = {
+            "https://x/a/tool.exe": "tool.exe",
+            "https://x/a/tool.exe?v=..": "tool.exe",
+            "https://x/a/..%5C..%5Cevil.exe": "evil.exe",
+            "https://x/a/..\\..\\evil.exe": "evil.exe",
+            "https://x/a/C:\\evil.exe": "evil.exe",
+            "https://x/a/C:evil.exe": "download.bin",
+            "https://x/a/..": "download.bin",
+            "https://x/": "download.bin",
+        }
+        for url, name in cases.items():
+            with self.subTest(url=url):
+                self.assertEqual(resolver.safe_basename(url, "download.bin"), name)
+
     # -- binary flow -----------------------------------------------------------
 
     def test_run_binary_hashes_then_delegates_to_virustotal(self):
@@ -2063,6 +3178,53 @@ class ScanCliRouterTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(calls["url"], "https://example.com/releases/tool.exe")
         self.assertEqual(calls["vt"].name, "tool.exe")
+
+    def test_run_binary_keeps_download_inside_temp_dir(self):
+        from unittest.mock import patch
+
+        seen = {}
+
+        def fake_download(url, dest):
+            seen["dest"] = Path(dest)
+            Path(dest).write_bytes(b"x")
+            return Path(dest)
+
+        with patch.object(self.scan_cli, "_download", fake_download), \
+                patch.object(self.scan_cli, "run_virustotal",
+                             lambda path, max_files=10: 0), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = self.scan_cli.run_binary(
+                "https://example.com/a/..%5C..%5Cevil.exe", deep=False)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["dest"].name, "evil.exe")
+        self.assertEqual(seen["dest"].parent.parent.resolve(),
+                         Path(tempfile.gettempdir()).resolve())
+
+    def test_run_script_keeps_download_inside_temp_dir(self):
+        seen = {}
+
+        def fake_download(url, dest):
+            seen["dest"] = Path(dest)
+            Path(dest).write_bytes(b"x")
+            return Path(dest)
+
+        with patch.object(self.scan_cli, "_download", fake_download),                 patch.object(self.scan_cli, "run_skillspector", lambda path, **kw: 0),                 contextlib.redirect_stdout(io.StringIO()):
+            rc = self.scan_cli.run_script("https://example.com/a/..%5C..%5Cevil.ps1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["dest"].name, "evil.ps1")
+        self.assertEqual(seen["dest"].parent.parent.resolve(),
+                         Path(tempfile.gettempdir()).resolve())
+        # A name without a dot gets .sh and stays inside the temp directory too.
+        with patch.object(self.scan_cli, "_download", fake_download),                 patch.object(self.scan_cli, "run_skillspector", lambda path, **kw: 0),                 contextlib.redirect_stdout(io.StringIO()):
+            self.scan_cli.run_script("https://example.com/a/..%5C..%5Cevil")
+        self.assertEqual(seen["dest"].name, "evil.sh")
+        self.assertEqual(seen["dest"].parent.parent.resolve(),
+                         Path(tempfile.gettempdir()).resolve())
+
+    def test_run_script_refuses_a_download_name_that_leaves_the_temp_dir(self):
+        with patch.object(self.scan_cli, "safe_basename", lambda url, default: "../escape.sh"),                 patch.object(self.scan_cli, "_download",
+                             side_effect=AssertionError("must not download")),                 contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.scan_cli.run_script("https://example.com/x.sh"), 2)
 
     def test_run_binary_deep_combines_verdicts_fail_closed(self):
         original_download = self.scan_cli._download

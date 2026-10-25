@@ -2,7 +2,8 @@
 """Audit already downloaded or installed skills/MCP servers.
 
 Default mode is inventory/dry-run: list what would be scanned and how to remove
-it. Use --execute to run scans. MCP runtime execution is only performed through
+it. The default run is NOT EXECUTED and ends with exit 2 if it lists any scan. Use --execute to
+run scans. MCP runtime execution is only performed through
 scan_mcp.py sandbox.
 """
 
@@ -13,42 +14,69 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import install_skill
+from _skillspector import combine_verdicts
 from scan_skill import find_skill_dirs
+
+
+class ConfigReadError(Exception):
+    """An existing agent config could not be read; its servers are unknown."""
 
 
 def read_json(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+        raise ConfigReadError(f"cannot read {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigReadError(f"cannot read {path}: top level is not an object")
+    return data
 
 
 def read_codex_mcp_servers(path: Path) -> dict[str, dict]:
+    """Servers of the Codex config, read with a real TOML parser.
+
+    Anything that cannot be parsed or has an unexpected type is a ConfigReadError
+    (NO VERDICT), never a guess: a line parser once dropped options that sat on
+    continuation lines. Variable values are never kept, only the names.
+    """
     if not path.exists():
         return {}
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError, OSError) as exc:
+        raise ConfigReadError(f"cannot read {path}: {exc}") from exc
+    table = data.get("mcp_servers")
+    if table is None:
+        return {}
+    if not isinstance(table, dict):
+        raise ConfigReadError(f"cannot read {path}: mcp_servers is not a table")
     servers: dict[str, dict] = {}
-    current: str | None = None
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        stripped = line.strip()
-        m = re.fullmatch(r"\[mcp_servers\.([^\].]+)\]", stripped)
-        if m:
-            current = m.group(1).strip('"')
-            servers[current] = {}
-            continue
-        if stripped.startswith("["):
-            current = None
-            continue
-        if current and stripped.startswith("command"):
-            servers[current]["command"] = stripped.split("=", 1)[1].strip().strip('"')
-        if current and stripped.startswith("url"):
-            servers[current]["url"] = stripped.split("=", 1)[1].strip().strip('"')
-        if current and stripped.startswith("args"):
-            servers[current]["args"] = re.findall(r'"([^"]*)"', stripped)
+    for name, entry in table.items():
+        where = f"cannot read {path}: mcp_servers.{name}"
+        if not isinstance(entry, dict):
+            raise ConfigReadError(f"{where} is not a table")
+        server: dict = {}
+        for key in ("command", "url"):
+            if key in entry:
+                if not isinstance(entry[key], str):
+                    raise ConfigReadError(f"{where}.{key} is not a string")
+                server[key] = entry[key]
+        if "args" in entry:
+            args = entry["args"]
+            if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+                raise ConfigReadError(f"{where}.args is not a list of strings")
+            server["args"] = list(args)
+        if "env" in entry:
+            if not isinstance(entry["env"], dict):
+                raise ConfigReadError(f"{where}.env is not a table")
+            server["env"] = {str(key): "" for key in entry["env"]}
+        servers[name] = server
     return servers
 
 
@@ -69,33 +97,50 @@ def installed_skill_dirs(selected: list[str] | None = None) -> list[tuple[str, P
     return dirs
 
 
+def mcp_servers_in(data: dict, path: Path) -> dict[str, dict]:
+    """The mcpServers table of a JSON config; a malformed one is unknown, not empty."""
+    servers = data.get("mcpServers")
+    if servers is None:
+        return {}
+    if not isinstance(servers, dict):
+        raise ConfigReadError(f"cannot read {path}: mcpServers is not an object")
+    for name, entry in servers.items():
+        if not isinstance(entry, dict):
+            raise ConfigReadError(f"cannot read {path}: mcpServers.{name} is not an object")
+        if not isinstance(entry.get("args", []), list):
+            raise ConfigReadError(f"cannot read {path}: mcpServers.{name}.args is not a list")
+        if not isinstance(entry.get("env", {}), dict):
+            raise ConfigReadError(f"cannot read {path}: mcpServers.{name}.env is not an object")
+    return servers
+
+
 def installed_mcp_servers(selected: list[str] | None = None) -> list[tuple[str, str, dict]]:
     present = install_skill.detect_tools(selected)
     servers: list[tuple[str, str, dict]] = []
-    if present.get("claude-desktop"):
-        for name, entry in (read_json(install_skill.CLAUDE_DESKTOP_CONFIG)
-                            .get("mcpServers", {}) or {}).items():
-            servers.append(("claude-desktop", name, entry))
-    if present.get("antigravity"):
-        for name, entry in (read_json(install_skill.ANTIGRAVITY_CONFIG)
-                            .get("mcpServers", {}) or {}).items():
-            servers.append(("antigravity", name, entry))
-    if present.get("gemini-cli"):
-        for name, entry in (read_json(install_skill.GEMINI_CLI_CONFIG)
-                            .get("mcpServers", {}) or {}).items():
-            servers.append(("gemini-cli", name, entry))
+    json_configs = [
+        ("claude-desktop", install_skill.CLAUDE_DESKTOP_CONFIG),
+        ("antigravity", install_skill.ANTIGRAVITY_CONFIG),
+        ("gemini-cli", install_skill.GEMINI_CLI_CONFIG),
+    ]
+    for tid, config in json_configs:
+        if present.get(tid):
+            for name, entry in mcp_servers_in(read_json(config), config).items():
+                servers.append((tid, name, entry))
     if present.get("codex"):
         for name, entry in read_codex_mcp_servers(install_skill.CODEX_CONFIG).items():
             servers.append(("codex", name, entry))
     claude_json = install_skill.HOME / ".claude.json"
     if present.get("claude-code") and claude_json.exists():
-        data = read_json(claude_json)
-        for name, entry in (data.get("mcpServers", {}) or {}).items():
+        for name, entry in mcp_servers_in(read_json(claude_json), claude_json).items():
             servers.append(("claude-code", name, entry))
     return servers
 
 
 def mcp_source_scan_command(entry: dict) -> list[str] | None:
+    """Scan command for the source an MCP entry runs, or None if it cannot be told.
+
+    None means "cannot verify what runs": the caller must turn it into NO VERDICT.
+    """
     # Gemini CLI writes streamable-HTTP servers as "httpUrl" and SSE as "url".
     remote = entry.get("url") or entry.get("httpUrl")
     if remote:
@@ -103,22 +148,137 @@ def mcp_source_scan_command(entry: dict) -> list[str] | None:
     cmd = str(entry.get("command", ""))
     args = [str(a) for a in entry.get("args", [])]
     launcher = launcher_name(cmd)
-    local_cmd = local_source_scan_command(cmd, args)
-    if local_cmd:
-        return local_cmd
-    if launcher == "uvx":
-        if "--from" in args:
-            idx = args.index("--from")
-            if idx + 1 < len(args) and args[idx + 1].startswith("git+https://github.com/"):
-                return ["python", "scripts/scan_url.py", normalize_git_url(args[idx + 1])]
-        packages = [a for a in args if not a.startswith("-")]
-        if packages:
-            return ["python", "scripts/scan_mcp.py", "pypi", packages[-1]]
-    if launcher == "npx":
-        packages = [a for a in args if not a.startswith("-")]
-        if packages:
-            return ["python", "scripts/scan_mcp.py", "npm", packages[-1]]
-    return None
+    if launcher in LAUNCHERS:
+        # Options and environment come first: anything that can change which
+        # package, index or registry is used makes the entry unverifiable,
+        # whatever source it appears to name.
+        if env_changes_source(launcher, entry.get("env")):
+            return None
+        package = parse_launch_args(launcher, args)
+        if package is None:
+            return None
+        local_cmd = local_source_scan_command(cmd, args)
+        if local_cmd:
+            return local_cmd
+        if not package:
+            return None
+        if package.startswith("git+"):
+            if launcher == "uvx" and package.startswith("git+https://github.com/"):
+                return ["python", "scripts/scan_url.py", normalize_git_url(package)]
+            return None   # only a GitHub source is scannable from the entry alone
+        return ["python", "scripts/scan_mcp.py", LAUNCHERS[launcher], package]
+    return local_source_scan_command(cmd, args)
+
+
+# Launcher name -> ecosystem handed to scan_mcp.py.
+LAUNCHERS = {"uvx": "pypi", "npx": "npm"}
+
+# Option tables per launcher. Names come from `uvx --help` (uv 0.9.x) and
+# `npm exec --help` (npm 12); an option in no table is not guessed at, because
+# its arity is unknown and the wrong argument could be scanned as the package.
+# PACKAGE: the value names the package to run. VALUE: takes a value that does
+# not change the source. FLAG: takes no value. UNSCANNABLE: changes or adds a
+# source we cannot scan from the entry alone.
+UVX_PACKAGE_OPTIONS = {"--from"}
+UVX_VALUE_OPTIONS = {
+    "-p", "--python", "--python-platform", "--torch-backend", "--index-strategy",
+    "--keyring-provider", "-P", "--upgrade-package", "--upgrade-group", "--resolution",
+    "--prerelease", "--prerelease-package", "--fork-strategy", "--exclude-newer",
+    "--exclude-newer-package", "--no-sources-package", "--reinstall-package",
+    "--link-mode", "-C", "--config-setting", "--config-settings-package",
+    "--no-build-isolation-package", "--no-build-package", "--no-binary-package",
+    "--cache-dir", "--refresh-package", "--color", "--allow-insecure-host",
+}
+UVX_FLAG_OPTIONS = {
+    "--isolated", "--no-env-file", "--lfs", "-V", "--version", "-U", "--upgrade",
+    "--no-sources", "--reinstall", "--compile-bytecode", "--no-build-isolation",
+    "--no-build", "--no-binary", "--require-build-hashes", "--no-require-build-hashes",
+    "-n", "--no-cache", "--refresh", "--managed-python", "--no-managed-python",
+    "--no-python-downloads", "-q", "--quiet", "-v", "--verbose", "--system-certs",
+    "--offline", "--no-progress", "--no-config", "-h", "--help",
+}
+UVX_UNSCANNABLE_OPTIONS = {
+    "-w", "--with", "--with-editable", "--with-requirements", "--index",
+    "--default-index", "-i", "--index-url", "--extra-index-url", "-f", "--find-links",
+    "--no-index", "-c", "--constraints", "-b", "--build-constraints", "--overrides",
+    "--env-file", "--config-file", "--project", "--directory",
+}
+NPX_PACKAGE_OPTIONS = {"-p", "--package"}
+NPX_VALUE_OPTIONS = {"--loglevel", "--cache", "--fetch-timeout", "--fetch-retries",
+                     "--allow-scripts"}
+NPX_FLAG_OPTIONS = {
+    "-y", "--yes", "--no", "--no-install", "--prefer-online", "--prefer-offline",
+    "--offline", "--no-offline", "--silent", "-q", "--quiet", "--ignore-scripts",
+    "--no-audit", "--no-fund", "--no-progress", "--strict-allow-scripts",
+    "--dangerously-allow-all-scripts", "--include-workspace-root",
+}
+NPX_UNSCANNABLE_OPTIONS = {"--registry", "--userconfig", "--globalconfig", "-c", "--call",
+                           "-w", "--workspace", "--workspaces", "--prefix"}
+LAUNCH_OPTIONS = {
+    "uvx": (UVX_PACKAGE_OPTIONS, UVX_VALUE_OPTIONS, UVX_FLAG_OPTIONS, UVX_UNSCANNABLE_OPTIONS),
+    "npx": (NPX_PACKAGE_OPTIONS, NPX_VALUE_OPTIONS, NPX_FLAG_OPTIONS, NPX_UNSCANNABLE_OPTIONS),
+}
+
+# Environment variables that point uvx at another index, config file or project.
+UVX_SOURCE_ENV = {"UV_INDEX", "UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_EXTRA_INDEX_URL",
+                  "UV_FIND_LINKS", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS",
+                  "UV_NO_INDEX", "UV_CONFIG_FILE", "UV_PROJECT", "UV_ENV_FILE"}
+
+
+def env_changes_source(launcher: str, env: object) -> bool:
+    if not env:
+        return False
+    if not isinstance(env, dict):
+        return True   # cannot be read, so cannot be ruled out
+    for name in env:
+        upper = str(name).upper()
+        lower = str(name).lower()
+        if launcher == "uvx" and upper in UVX_SOURCE_ENV:
+            return True
+        if launcher == "npx" and lower.startswith("npm_config_") and (
+                "registry" in lower
+                or lower in {"npm_config_userconfig", "npm_config_globalconfig"}):
+            return True
+    return False
+
+
+def parse_launch_args(launcher: str, args: list[str]) -> str | None:
+    """Return the package to scan ("" if none is named), or None if the arguments
+    cannot be read with certainty.
+
+    Parsing stops at the first positional argument: everything after it belongs
+    to the launched command, not to the launcher.
+    """
+    package_opts, value_opts, flag_opts, unscannable = LAUNCH_OPTIONS[launcher]
+    packages: list[str] = []
+    positional = ""
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        if arg == "--":
+            positional = args[i] if i < len(args) else ""
+            break
+        if not arg.startswith("-") or arg == "-":
+            positional = arg
+            break
+        name, has_value, value = arg.partition("=")
+        if name in unscannable:
+            return None
+        if name in package_opts or name in value_opts:
+            if not has_value:
+                if i >= len(args):
+                    return None   # value missing
+                value = args[i]
+                i += 1
+            if name in package_opts:
+                packages.append(value)
+        elif name not in flag_opts and not (
+                launcher == "uvx" and re.fullmatch(r"-(q+|v+)", arg)):
+            return None   # unknown option: arity unknown, so the package is unknown
+    if len(set(packages)) > 1:
+        return None   # only one package would be scanned
+    return packages[0] if packages else positional
 
 
 def launcher_name(command: str) -> str:
@@ -178,7 +338,8 @@ def mcp_sandbox_command(entry: dict) -> list[str] | None:
 def run(cmd: list[str], execute: bool) -> int:
     print("  " + " ".join(cmd))
     if not execute:
-        return 0
+        print("  NOT EXECUTED -- rerun with --execute for a verdict")
+        return 2
     return subprocess.run(cmd).returncode
 
 
@@ -227,7 +388,14 @@ def audit_download(path: Path, kind: str, execute: bool) -> int:
 
 
 def audit_installed(kind: str, execute: bool, selected: list[str] | None) -> int:
-    worst = 0
+    worst = 0  # SAFE until a stage says otherwise; merged with combine_verdicts
+    if selected:
+        absent = [tid for tid, found in install_skill.detect_tools(selected).items()
+                  if not found]
+        if absent:
+            print(f"ERROR: chosen tool not found on this machine: {', '.join(absent)}; "
+                  "nothing was audited for it (NO VERDICT)", file=sys.stderr)
+            worst = combine_verdicts(worst, 2)
     if kind in {"all", "skills"}:
         print("\n== Installed skills ==")
         skills = installed_skill_dirs(selected)
@@ -235,11 +403,16 @@ def audit_installed(kind: str, execute: bool, selected: list[str] | None) -> int
             print("  none detected")
         for tool, path in skills:
             print(f"- {path} ({tool})")
-            worst = max(worst, run(["python", "scripts/scan_skill.py", str(path)], execute))
+            worst = combine_verdicts(
+                worst, run(["python", "scripts/scan_skill.py", str(path)], execute))
             print(f"  removal: {removal_hint_skill(path)}")
     if kind in {"all", "mcps"}:
         print("\n== Installed MCP servers ==")
-        servers = installed_mcp_servers(selected)
+        try:
+            servers = installed_mcp_servers(selected)
+        except ConfigReadError as exc:
+            print(f"ERROR: {exc}; MCP servers not audited (NO VERDICT)", file=sys.stderr)
+            return combine_verdicts(worst, 2)
         if not servers:
             print("  none detected")
         for tool, name, entry in servers:
@@ -249,12 +422,13 @@ def audit_installed(kind: str, execute: bool, selected: list[str] | None) -> int
                 print(f"- {name} ({tool}): {entry.get('command')} {' '.join(entry.get('args', []))}")
             src_cmd = mcp_source_scan_command(entry)
             if src_cmd:
-                worst = max(worst, run(src_cmd, execute))
+                worst = combine_verdicts(worst, run(src_cmd, execute))
             else:
                 print("  source scan: cannot infer package/source from config")
+                worst = combine_verdicts(worst, 2)
             sandbox_cmd = mcp_sandbox_command(entry)
             if sandbox_cmd:
-                worst = max(worst, run(sandbox_cmd, execute))
+                worst = combine_verdicts(worst, run(sandbox_cmd, execute))
             print(f"  removal: {removal_hint_mcp(tool, name)}")
     return worst
 
@@ -262,7 +436,8 @@ def audit_installed(kind: str, execute: bool, selected: list[str] | None) -> int
 def main() -> None:
     parser = argparse.ArgumentParser(description="Audit downloaded or already installed skills/MCPs.")
     parser.add_argument("--execute", action="store_true",
-                        help="run scans; default only prints commands/removal guidance")
+                        help="run scans; default only prints commands/removal guidance "
+                             "and ends with exit 2 (NOT EXECUTED) if any scan is listed")
     parser.add_argument("--tool", dest="tools", action="append",
                         choices=list(install_skill.TOOLS), default=None,
                         help="limit to a tool; repeat for multiple tools")

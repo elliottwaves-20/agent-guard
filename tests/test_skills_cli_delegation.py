@@ -4,8 +4,10 @@ Distribution is delegated to a third-party CLI, so the interesting part is the
 gate in front of it: the pin, the reviewed findings, the reduced environment,
 and the fallback that must take over whenever any of those does not hold.
 """
+import contextlib
 import copy
 import importlib
+import io
 import json
 import os
 import subprocess
@@ -281,9 +283,15 @@ class InstallerIntegrationTests(unittest.TestCase):
                 installer.verify_distributed_copy(scanned, canonical)
 
             (canonical / "SKILL.md").write_text("reviewed", encoding="utf-8")
-            installer.verify_distributed_copy(scanned, canonical)   # extra files are fine
-            (canonical / "NOTES.md").write_text("cli bookkeeping", encoding="utf-8")
-            installer.verify_distributed_copy(scanned, canonical)
+            (canonical / "NOTES.md").write_text("unscanned", encoding="utf-8")
+            with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()) as err:
+                installer.verify_distributed_copy(scanned, canonical)
+            self.assertEqual(ctx.exception.code, 2)      # extra files are unscanned content
+            self.assertIn("NOTES.md", err.getvalue())
+            self.assertIn("already in place", err.getvalue())   # the skill is live
+            self.assertIn(str(canonical), err.getvalue())
+            self.assertIn("review it before use or remove it", err.getvalue())
+            self.assertTrue((canonical / "NOTES.md").exists())   # nothing is deleted
 
     def test_missing_canonical_copy_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -292,6 +300,59 @@ class InstallerIntegrationTests(unittest.TestCase):
             (scanned / "SKILL.md").write_text("reviewed", encoding="utf-8")
             with self.assertRaises(SystemExit):
                 installer.verify_distributed_copy(scanned, Path(tmp) / "nope")
+
+
+class VerifyUpdateFailureTests(unittest.TestCase):
+    """verify_skills_cli --update must not report success when it has nothing to review."""
+
+    def setUp(self):
+        self.tool = importlib.import_module("verify_skills_cli")
+        self.meta = {"dist": {"shasum": "abc", "integrity": "sha512-xyz"}}
+
+    def _update(self, **fakes):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out),              patch.object(cli, "registry_metadata", **fakes.get("meta", {"return_value": self.meta})),              patch.object(cli, "guarddog_report", **fakes.get("report", {"return_value": guarddog_report()})):
+            return self.tool.update("9.9.9"), out.getvalue()
+
+    def test_registry_metadata_failure_is_no_verdict(self):
+        for error in (OSError("offline"), ValueError("bad json"), TimeoutError()):
+            with self.subTest(error=type(error).__name__):
+                code, out = self._update(meta={"side_effect": error})
+                self.assertEqual(code, 2)
+                self.assertNotIn("Draft for", out)
+
+    def test_missing_digests_are_no_verdict(self):
+        for meta in ({}, {"dist": {}}, {"dist": {"shasum": "abc"}},
+                     {"dist": {"integrity": "sha512-xyz"}}, {"dist": None}):
+            with self.subTest(meta=meta):
+                code, out = self._update(meta={"return_value": meta})
+                self.assertEqual(code, 2)
+                self.assertNotIn("Draft for", out)
+
+    def test_missing_scanner_report_is_no_verdict(self):
+        code, out = self._update(report={"return_value": None})
+        self.assertEqual(code, 2)
+        self.assertNotIn("Draft for", out)
+
+    def test_guarddog_timeout_or_garbage_gives_no_report(self):
+        def timeout(*args, **kwargs):
+            raise subprocess.TimeoutExpired("docker", 1)
+
+        garbage = subprocess.CompletedProcess([], 0, stdout="not json", stderr="")
+        for label, fake in (("timeout", timeout), ("garbage", lambda *a, **k: garbage)):
+            with self.subTest(label),                  patch.object(cli, "run_bounded", fake),                  patch.object(cli, "registry_metadata", return_value=self.meta):
+                import contextlib
+                import io
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(self.tool.update("9.9.9"), 2)
+
+    def test_main_passes_the_failure_code_on(self):
+        import contextlib
+        import io
+        with patch.object(sys, "argv", ["verify_skills_cli.py", "--update", "9.9.9"]),              patch.object(cli, "registry_metadata", side_effect=OSError("offline")),              contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.tool.main(), 2)
 
 
 if __name__ == "__main__":

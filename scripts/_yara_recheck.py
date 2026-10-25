@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -45,6 +46,13 @@ def parse_answer(item) -> bool | None:
     return not corrected
 
 
+def failed(count: int, reason: str) -> list:
+    """Unknown for every item; say why, so UNCLEAR/BLOCK is not a silent helper failure."""
+    print(f"[WARN] YARA recheck helper failed: {reason}; the findings stay as they are.",
+          file=sys.stderr)
+    return [None] * count
+
+
 def run_boot(python: str, checks: list, rules: dict) -> list:
     request = json.dumps({
         "corrected": str(CORRECTIONS.parent / load_corrections()["corrected"]),
@@ -54,16 +62,16 @@ def run_boot(python: str, checks: list, rules: dict) -> list:
     try:
         done = subprocess.run([python, str(BOOT)], input=request.encode("utf-8"),
                               capture_output=True, timeout=SECONDS)
-    except (OSError, subprocess.TimeoutExpired):
-        return [None] * len(checks)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return failed(len(checks), f"could not run ({type(exc).__name__}: {exc})")
     if done.returncode != 0:
-        return [None] * len(checks)
+        return failed(len(checks), f"exited with {done.returncode}")
     try:
         out = json.loads(done.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return [None] * len(checks)
+        return failed(len(checks), "printed no valid JSON")
     if not isinstance(out, list) or len(out) != len(checks):
-        return [None] * len(checks)
+        return failed(len(checks), "answered a different number of items than asked")
     return [parse_answer(item) for item in out]
 
 
@@ -95,7 +103,9 @@ class Rechecker:
             try:
                 answers = self.runner([(key[0], path) for key, path in wanted],
                                       {n: self.rules[n] for n in {k[0] for k, _ in wanted}})
-            except Exception:  # a failed recheck leaves the findings hard
+            except Exception as exc:  # a failed recheck leaves the findings hard
+                print(f"[WARN] YARA recheck failed ({type(exc).__name__}: {exc}); "
+                      "the findings stay hard evidence.", file=sys.stderr)
                 answers = [None] * len(wanted)
             if not isinstance(answers, list) or len(answers) != len(wanted):
                 answers = [None] * len(wanted)

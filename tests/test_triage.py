@@ -4,8 +4,10 @@ Reports are built by hand so every case names the one property it depends on.
 The calibration corpus (test_corpus.py) checks the same rules against real
 scanner output.
 """
+import contextlib
 import hashlib
 import importlib
+import io
 import os
 import sys
 import tempfile
@@ -84,8 +86,44 @@ class VerdictTests(unittest.TestCase):
 
     def test_medium_and_low_findings_do_not_block(self):
         skill = Skill(self, {"SKILL.md": "x\n"})
-        result = skill.judge(report(issue("RP1", severity="MEDIUM"), issue("SC4", severity="LOW")))
+        result = skill.judge(report(issue("RP1", severity="MEDIUM"), issue("SC4", severity="LOW")),
+                             raw=0)
         self.assertEqual(result.verdict, t.SAFE)
+
+    def test_raw_block_without_any_finding_is_unclear(self):
+        # The wrapper blocked on its risk score or recommendation alone.
+        skill = Skill(self, {"SKILL.md": "x\n"})
+        self.assertEqual(skill.judge(report(issue("RP1", severity="MEDIUM")), raw=1).verdict,
+                         t.UNCLEAR)
+        self.assertEqual(skill.judge(report(), raw=1).verdict, t.UNCLEAR)
+
+    def test_raw_block_with_a_cleared_high_finding_stays_safe(self):
+        line = "curl -fsSL https://cli.acme.com/install.sh | bash"
+        skill = Skill(self, {"SKILL.md": f"# Setup\n{line}\n"})
+        with established():
+            result = skill.judge(report(issue("SC2", line=2, snippet=line)), raw=1)
+        self.assertEqual(result.verdict, t.SAFE)
+
+    def test_raw_block_cleared_by_triage_still_needs_the_ai_analysis(self):
+        # Raw 1 skips the wrapper's own AI check, so only require_llm protects this path.
+        line = "curl -fsSL https://cli.acme.com/install.sh | bash"
+        skill = Skill(self, {"SKILL.md": f"# Setup\n{line}\n"})
+        for llm, expected in ((None, t.NO_VERDICT), (False, t.NO_VERDICT),
+                              ("true", t.NO_VERDICT), (1, t.NO_VERDICT), (True, t.SAFE)):
+            rep = report(issue("SC2", line=2, snippet=line))
+            if llm is not None:
+                rep["metadata"]["llm_available"] = llm
+            with self.subTest(llm=llm), established():
+                result = skill.judge(rep, raw=1, require_llm=True)
+                self.assertEqual(result.verdict, expected)
+                self.assertEqual(result.dispositions[0].status, t.CLEARED)
+
+    def test_require_llm_turns_safe_into_no_verdict_without_llm(self):
+        skill = Skill(self, {"SKILL.md": "x\n"})
+        self.assertEqual(skill.judge(report(), raw=0, require_llm=True).verdict, t.NO_VERDICT)
+        rep = report()
+        rep["metadata"]["llm_available"] = True
+        self.assertEqual(skill.judge(rep, raw=0, require_llm=True).verdict, t.SAFE)
 
     def test_hard_evidence_is_dangerous_even_in_an_approved_file(self):
         skill = Skill(self, {"run.py": "payload\n"})
@@ -323,6 +361,18 @@ class ParserLimitTests(unittest.TestCase):
         return skill.judge(report(coverage_issue("ref/crawl.md", **kw), *extra), spans=locate,
                            verifier=verifier, approved=approved)
 
+    def test_locator_failure_stays_open_and_says_why(self):
+        skill = Skill(self, {"SKILL.md": "# Acme\nSee the guide.\n[guide](ref/crawl.md)\n",
+                             "ref/crawl.md": GUIDE})
+
+        def broken(skill_dir, rels):
+            raise RuntimeError("no parser")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            result = skill.judge(report(coverage_issue("ref/crawl.md")), spans=broken)
+        self.assertEqual(result.verdict, t.UNCLEAR)
+        self.assertIn("[WARN]", err.getvalue())
+        self.assertIn("no parser", err.getvalue())
+
     def test_parse_limit_of_another_analyzer_stays_open(self):
         result = self.judge(analyzers=("static_yara",))
         self.assertEqual(result.verdict, t.UNCLEAR)
@@ -540,12 +590,12 @@ class InspectionGapTests(unittest.TestCase):
         self.assertEqual(self.judge(completeness).verdict, t.SAFE)
 
     def test_settled_gaps_with_every_file_read_are_judged(self):
-        # A reference matching several bundled files, and images the text
+        # A reference matching no bundled file, and images the text
         # analyzers skip: every file was read, so nothing is unseen.
         completeness = {
             "entirely_uninspected_files": 0,
             "ledger_exceptions": [{"phase": "reference_resolution",
-                                   "reason_code": "reference_unresolved",
+                                   "reason_code": "reference_missing",
                                    "path": "SKILL.md", "fatal": False}],
             "scope_exclusions": [{"outcome": "out_of_scope", "phase": "static",
                                   "reason_code": "binary_content", "path": "docs/plot.png",
@@ -584,10 +634,25 @@ class InspectionGapTests(unittest.TestCase):
         result = self.judge({"entirely_uninspected_files": 1}, issue("YR1"))
         self.assertEqual(result.verdict, t.DANGEROUS)
 
-    def test_clean_wrapper_exit_is_not_second_guessed(self):
-        # Exit 0 means the wrapper already accepted the completeness.
+    def test_reference_matching_several_files_is_not_settled(self):
+        # The wrapper accepts it only with a reviewed baseline; the triage has none.
         completeness = {"ledger_exceptions": [{"phase": "reference_resolution",
                                                "reason_code": "reference_unresolved",
+                                               "path": "SKILL.md", "fatal": False}]}
+        for raw in (0, 1):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.judge(completeness, raw=raw).verdict, t.NO_VERDICT)
+
+    def test_unsettled_gap_blocks_safe_even_at_raw_zero(self):
+        completeness = {"ledger_exceptions": [], "scope_exclusions": [
+            {"outcome": "out_of_scope", "reason_code": "binary_content",
+             "path": "payload.bin", "fatal": False}]}
+        result = self.judge(completeness, raw=0, binaries={"payload.bin": b"\x00\x01"})
+        self.assertEqual(result.verdict, t.NO_VERDICT)
+
+    def test_settled_gap_at_raw_zero_is_safe(self):
+        completeness = {"ledger_exceptions": [{"phase": "reference_resolution",
+                                               "reason_code": "reference_missing",
                                                "path": "SKILL.md", "fatal": False}]}
         self.assertEqual(self.judge(completeness, raw=0).verdict, t.SAFE)
 
@@ -650,8 +715,11 @@ class YaraCorrectionTests(unittest.TestCase):
         class Broken(FakeRecheck):
             def __call__(self, skill_dir, checks):
                 raise RuntimeError("boom")
-        result = self.judge(None, recheck=Broken(None))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            result = self.judge(None, recheck=Broken(None))
         self.assertEqual(result.dispositions[0].status, t.HARD)
+        self.assertIn("[WARN]", err.getvalue())
+        self.assertIn("boom", err.getvalue())
 
     def test_without_rechecker_stays_hard(self):
         skill = Skill(self, {"SKILL.md": "x\n"})

@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -237,11 +238,138 @@ class ScanBoundaryTests(unittest.TestCase):
                  [], 3, '{"issues": 0, "results": {}}', '')):
             self.assertEqual(scan_cli.run_guarddog('pypi', 'demo'), 2)
 
+    def test_guarddog_timeout_and_unreadable_output_are_no_verdict(self):
+        clean = '{"issues": 0, "errors": {}, "results": {}}'
+        cases = {
+            'timeout': subprocess.TimeoutExpired([], 5),
+            'not json': subprocess.CompletedProcess([], 0, 'no report here', ''),
+            'truncated json': subprocess.CompletedProcess([], 0, '{"issues": 0, "res', ''),
+            'empty': subprocess.CompletedProcess([], 0, '', ''),
+            'crash after clean report': subprocess.CompletedProcess([], 1, clean, ''),
+        }
+        for label, outcome in cases.items():
+            with self.subTest(label), \
+                 patch.object(scan_cli, 'guarddog_command', return_value=['guarddog']), \
+                 patch.object(scan_cli, 'run_bounded', side_effect=[outcome]):
+                self.assertEqual(scan_cli.run_guarddog('pypi', 'demo==1'), 2)
+        # Control: the same clean report from a clean exit is SAFE.
+        with patch.object(scan_cli, 'guarddog_command', return_value=['guarddog']), \
+             patch.object(scan_cli, 'run_bounded',
+                          return_value=subprocess.CompletedProcess([], 0, clean, '')):
+            self.assertEqual(scan_cli.run_guarddog('pypi', 'demo==1'), 0)
+
+    def test_guarddog_issue_count_that_is_not_a_number_is_no_verdict(self):
+        for issues in ('0', 'none', None, [], 0.0):
+            with self.subTest(issues=issues):
+                self.assertEqual(scan_cli.guarddog_verdict({'issues': issues}), 2)
+
+    def test_malcontent_timeout_and_unreadable_output_are_no_verdict(self):
+        clean = '{"Files": {"file": {"RiskLevel": "LOW"}}}'
+        cases = {
+            'timeout': subprocess.TimeoutExpired([], 5),
+            'not json': subprocess.CompletedProcess([], 0, 'oops', ''),
+            'truncated json': subprocess.CompletedProcess([], 0, '{"Files": {"fi', ''),
+            'empty': subprocess.CompletedProcess([], 0, '', ''),
+        }
+        for label, outcome in cases.items():
+            with self.subTest(label), \
+                 patch.object(scan_cli.shutil, 'which', return_value='docker'), \
+                 patch.object(scan_cli, 'run_bounded', side_effect=[outcome]):
+                self.assertEqual(scan_cli.run_malcontent(Path('file')), 2)
+        with patch.object(scan_cli.shutil, 'which', return_value='docker'), \
+             patch.object(scan_cli, 'run_bounded',
+                          return_value=subprocess.CompletedProcess([], 0, clean, '')):
+            self.assertEqual(scan_cli.run_malcontent(Path('file')), 0)
+
+    def test_cisco_timeout_is_no_verdict(self):
+        with patch.object(scan_mcp, 'run_bounded',
+                          side_effect=subprocess.TimeoutExpired([], 5)):
+            self.assertEqual(scan_mcp.run_cisco(['mcp-scanner'], 'label'), 2)
+
+    def test_virustotal_helper_failures_are_no_verdict(self):
+        clean = json.dumps({'summary': {'kind': 'directory', 'agent_guard_eligible': 1,
+                                        'total_found': 1, 'total_to_scan': 1, 'scanned': 1,
+                                        'clean': 1},
+                            'findings': []})
+        cases = {
+            'no output': subprocess.CompletedProcess([], 0, '', ''),
+            'broken json': subprocess.CompletedProcess([], 0, '{"summary": {', ''),
+            'plain text': subprocess.CompletedProcess([], 0, 'Traceback', 'boom'),
+            'error in report': subprocess.CompletedProcess(
+                [], 0, json.dumps({'error': 'rate limited'}), ''),
+            'error beside a clean summary': subprocess.CompletedProcess(
+                [], 0, json.dumps({'error': 'x', 'summary': {'total_to_scan': 0}}), ''),
+            'crash after clean report': subprocess.CompletedProcess([], 1, clean, 'crash'),
+        }
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.dict(scan_mcp.os.environ, {'VIRUSTOTAL_API_KEY': 'test-key'}), \
+             patch.object(scan_mcp, 'mcpscanner_python', return_value='python'):
+            for label, outcome in cases.items():
+                with self.subTest(label), \
+                     patch.object(scan_mcp, 'run_bounded', side_effect=[outcome]):
+                    self.assertEqual(scan_mcp.run_virustotal(Path(tmp)), 2)
+            # A helper that hangs is not caught inside run_virustotal; it must end
+            # the run (non-zero exit), never come back as a verdict of 0.
+            with patch.object(scan_mcp, 'run_bounded',
+                              side_effect=subprocess.TimeoutExpired([], 5)), \
+                 self.assertRaises(subprocess.TimeoutExpired):
+                scan_mcp.run_virustotal(Path(tmp))
+            # Control: the clean report from a clean exit is SAFE.
+            with patch.object(scan_mcp, 'run_bounded', return_value=subprocess.CompletedProcess(
+                    [], 0, clean, '')):
+                self.assertEqual(scan_mcp.run_virustotal(Path(tmp)), 0)
+
+    def test_sandbox_result_survives_a_failing_container_cleanup(self):
+        for failure in (OSError('docker gone'), subprocess.TimeoutExpired('docker', 30)):
+            for scan_result in (0, 1, 2):
+                with self.subTest(failure=type(failure).__name__, scan=scan_result), \
+                     patch.object(scan_mcp, 'need_mcp_scanner'), \
+                     patch.object(scan_mcp, 'build_sandbox_image'), \
+                     patch.object(scan_mcp.shutil, 'which', return_value='docker'), \
+                     patch.object(scan_mcp, 'MCP_SCANNER', 'mcp-scanner'), \
+                     patch.object(scan_mcp, 'CISCO_LLM_KEY', 'runtime-test-secret'), \
+                     patch.object(scan_mcp, 'CISCO_LLM_MODEL', 'test-model'), \
+                     patch.object(scan_mcp, 'run_cisco', return_value=scan_result), \
+                     patch.object(scan_mcp._egress.Capture, 'start') as capture, \
+                     patch.object(scan_mcp._egress, 'verdict', return_value=0), \
+                     patch.object(scan_mcp.subprocess, 'run', side_effect=failure):
+                    capture.return_value.name = 'agent-guard-net-test'
+                    self.assertEqual(scan_mcp.run_sandbox(['python', '-c', 'print(1)']),
+                                     scan_result)
+
+    def test_sandbox_scan_error_is_not_masked_by_a_failing_cleanup(self):
+        with patch.object(scan_mcp, 'need_mcp_scanner'),              patch.object(scan_mcp, 'build_sandbox_image'),              patch.object(scan_mcp.shutil, 'which', return_value='docker'),              patch.object(scan_mcp, 'MCP_SCANNER', 'mcp-scanner'),              patch.object(scan_mcp, 'CISCO_LLM_KEY', 'runtime-test-secret'),              patch.object(scan_mcp, 'CISCO_LLM_MODEL', 'test-model'),              patch.object(scan_mcp, 'run_cisco', side_effect=RuntimeError('failed handshake')),              patch.object(scan_mcp._egress.Capture, 'start') as capture,              patch.object(scan_mcp.subprocess, 'run', side_effect=OSError('docker gone')):
+            capture.return_value.name = 'agent-guard-net-test'
+            with self.assertRaises(RuntimeError):
+                scan_mcp.run_sandbox(['python', '-c', 'print(1)'])
+            capture.return_value.remove.assert_called_once()
+
+    @patch.object(installer, "detect_tools", return_value={})
+    def test_installer_refuses_files_added_to_the_staged_tree_during_the_scan(self, _detect):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            source.mkdir()
+            (source / "SKILL.md").write_text("reviewed")
+            workspace = root / "workspace"
+
+            def scan(candidate, **kwargs):
+                (candidate / "added.py").write_text("print('added after the scan started')")
+                return 0
+
+            with patch.object(installer, "run_skillspector", side_effect=scan):
+                with self.assertRaises(SystemExit):
+                    installer.install_skill(source, "demo", workspace, False)
+            self.assertFalse((workspace / "demo").exists())
+            self.assertEqual(list(workspace.glob(".guard-stage-*")), [])
+
     def test_cisco_requires_success_and_analyzed_tools(self):
         for output, code in [('Total tools scanned: 2\nUnsafe items: 0', 1),
                              ('Unsafe items: 0', 0), ('Total tools scanned: 0\nUnsafe items: 0', 0)]:
             self.assertEqual(scan_mcp.verdict(output, code), 2)
         self.assertEqual(scan_mcp.verdict('Total tools scanned: 2\nUnsafe items: 0', 0), 0)
+        self.assertEqual(scan_mcp.verdict(
+            'Total tools scanned: 2\nUnsafe items: 0\nUnsafe items: 3', 0), 2)
 
     def test_cisco_incomplete_items_are_not_safe(self):
         # Since 4.8.5 a crashed analyzer yields is_safe=None, reported as
@@ -250,6 +378,13 @@ class ScanBoundaryTests(unittest.TestCase):
         self.assertEqual(scan_mcp.verdict(partial, 0), 2)
         both = 'Total tools scanned: 2\nSafe items: 0\nUnsafe items: 1\nIncomplete items: 1'
         self.assertEqual(scan_mcp.verdict(both, 0), 1)
+
+    def test_cisco_malformed_or_repeated_incomplete_line_is_no_verdict(self):
+        head = 'Total tools scanned: 2\nUnsafe items: 0\n'
+        self.assertEqual(scan_mcp.verdict(head + 'Incomplete items: x', 0), 2)
+        self.assertEqual(scan_mcp.verdict(head + 'Incomplete items: 0\nIncomplete items: 0', 0), 2)
+        self.assertEqual(scan_mcp.verdict(head + 'Incomplete items: 0', 0), 0)
+        self.assertEqual(scan_mcp.verdict(head.rstrip('\n'), 0), 0)
 
     def test_unresolved_git_ref_never_falls_back_to_mutable_branch(self):
         for result in [{}, {'sha': 'main'}]:
@@ -360,6 +495,67 @@ class ScanBoundaryTests(unittest.TestCase):
              patch.object(scan_url, 'offer_mcp_install') as offer:
             self.assertEqual(scan_url.scan_install_command('uvx demo', False, False), 0)
             offer.assert_not_called()
+
+    def _raw(self, url, data=b'echo hi\n'):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        with patch.object(resolver, 'http_bytes', return_value=data):
+            source = resolver.resolve_url(url, Path(d.name))
+        return Path(d.name), source
+
+    def test_raw_script_keeps_its_name_and_is_classified_as_file(self):
+        dest, source = self._raw('https://raw.githubusercontent.com/o/r/main/run.sh')
+        self.assertEqual(source.source_path, dest / 'run.sh')
+        self.assertEqual(source.kind, 'file')
+        self.assertEqual(scan_url.classify_source(source), 'file')
+
+    def test_raw_markdown_keeps_name_and_stays_markdown(self):
+        for name in ('README.md', 'Notes.MARKDOWN'):
+            dest, source = self._raw(f'https://raw.githubusercontent.com/o/r/main/{name}')
+            self.assertEqual(source.source_path, dest / name)
+            self.assertEqual(source.kind, 'markdown')
+            self.assertEqual(scan_url.classify_source(source), 'markdown')
+
+    def test_raw_file_with_hostile_name_stays_directly_in_dest(self):
+        for name in ('..%5Cx.sh', 'a%2F..%2F..%2Fx.sh'):
+            dest, source = self._raw(f'https://raw.githubusercontent.com/o/r/main/{name}')
+            self.assertEqual(source.source_path.parent.resolve(), dest.resolve())
+
+    def test_github_subpath_with_unsafe_segments_is_refused(self):
+        for sub in ('../../x', 'a/./b', 'C:', 'a%5Cb', 'a/b:c'):
+            with self.subTest(sub=sub):
+                with self.assertRaises(resolver.FetchError):
+                    resolver.github_parts(f'https://github.com/o/r/tree/main/{sub}')
+
+    def _github_zip(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr('r-abc/skills/demo/SKILL.md', 'x')
+        return buf.getvalue()
+
+    def test_github_subpath_missing_in_archive_is_refused(self):
+        with tempfile.TemporaryDirectory() as d, \
+             patch.object(resolver, 'github_ref_sha', return_value='a' * 40), \
+             patch.object(resolver, 'http_bytes', return_value=self._github_zip()):
+            with self.assertRaises(resolver.FetchError):
+                resolver.resolve_url('https://github.com/o/r/tree/main/nope', Path(d))
+
+    def test_github_existing_subpath_still_resolves(self):
+        with tempfile.TemporaryDirectory() as d, \
+             patch.object(resolver, 'github_ref_sha', return_value='a' * 40), \
+             patch.object(resolver, 'http_bytes', return_value=self._github_zip()):
+            source = resolver.resolve_url('https://github.com/o/r/tree/main/skills/demo', Path(d))
+            self.assertTrue(source.source_path.is_dir())
+
+    def test_scan_url_exits_2_for_unsafe_github_subpath(self):
+        argv = ['scan_url.py', 'https://github.com/o/r/tree/main/../../x']
+        with patch.object(sys, 'argv', argv), \
+             patch.object(resolver, 'github_ref_sha', return_value='a' * 40), \
+             patch.object(resolver, 'http_bytes', return_value=self._github_zip()), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                scan_url.main()
+        self.assertEqual(cm.exception.code, 2)
 
 
 if __name__ == '__main__':
