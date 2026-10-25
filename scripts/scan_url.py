@@ -471,7 +471,8 @@ def scan_marketplace_candidates(source: ResolvedSource, sandbox: bool,
     if worst == 0:
         print("[SAFE] Marketplace candidate scan completed without blocking findings.")
     else:
-        print(f"[BLOCK] One or more marketplace candidates failed or were incomplete "
+        tag = "BLOCK" if worst == 1 else "NO VERDICT"
+        print(f"[{tag}] One or more marketplace candidates failed or were incomplete "
               f"(worst exit {worst}).")
     return worst
 
@@ -633,7 +634,7 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
             worst = combine_verdicts(worst, 2)
         print("\n" + "=" * 60)
         print(f"Scanned {len(skills)} skill(s). Worst verdict -> exit {worst} "
-              f"({'BLOCK' if worst else 'all SAFE'}).")
+              f"({'all SAFE' if worst == 0 else 'BLOCK' if worst == 1 else 'NO VERDICT'}).")
         if worst == 0:
             print("Install concrete SAFE skill directories individually, for example:")
             if dry_run:
@@ -665,7 +666,8 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
             if not has_candidate:
                 return 2
             if rc != 0:
-                print("[BLOCK] Catalog scan produced a blocking verdict; candidate "
+                tag = "BLOCK" if rc == 1 else "NO VERDICT"
+                print(f"[{tag}] Catalog scan did not end SAFE; candidate "
                       "scans and install prompts are skipped.")
                 return rc
             if scan_candidates:

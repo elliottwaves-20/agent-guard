@@ -153,7 +153,7 @@ def main():
             worst = combine_verdicts(worst, run_skillspector(d))
         print("\n" + "=" * 60)
         print(f"Scanned {len(skills)} skill(s). Worst verdict -> exit {worst} "
-              f"({'BLOCK' if worst else 'all SAFE'}).")
+              f"({'all SAFE' if worst == 0 else 'BLOCK' if worst == 1 else 'NO VERDICT'}).")
         sys.exit(worst)
 
     sys.exit(run_skillspector(target, baseline=args.baseline, report_output=args.report))

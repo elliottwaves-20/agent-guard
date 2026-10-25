@@ -2255,6 +2255,38 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                     scan_skill.main()
         self.assertEqual(cm.exception.code, 1)
 
+    def test_scan_skill_all_summary_names_the_exit_code(self):
+        from unittest.mock import patch
+        scan_skill = importlib.import_module("scan_skill")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "a").mkdir()
+            (src / "a" / "SKILL.md").write_text("x\n", encoding="utf-8")
+            for code, word in ((1, "BLOCK"), (2, "NO VERDICT"), (0, "all SAFE")):
+                out = io.StringIO()
+                with patch.object(scan_skill, "run_skillspector", return_value=code), \
+                        patch.object(sys, "argv", ["scan_skill.py", str(src), "--all"]), \
+                        contextlib.redirect_stdout(out):
+                    with self.assertRaises(SystemExit):
+                        scan_skill.main()
+                summary = [ln for ln in out.getvalue().splitlines() if "Worst verdict" in ln][0]
+                self.assertIn(f"({word})", summary, code)
+
+    def test_scan_url_collection_summary_names_the_exit_code(self):
+        from unittest.mock import patch
+        scan_url = importlib.import_module("scan_url")
+        with tempfile.TemporaryDirectory() as src_dir:
+            src = Path(src_dir)
+            (src / "skills" / "a").mkdir(parents=True)
+            (src / "skills" / "a" / "SKILL.md").write_text("---\nname: a\n---\n", encoding="utf-8")
+            source = scan_url.ResolvedSource(kind="github", source_path=src)
+            for code, word in ((1, "BLOCK"), (2, "NO VERDICT")):
+                with patch.object(scan_url, "run_skill_static", return_value=code):
+                    rc, out = self._quiet_scan_resolved(scan_url, source, dry_run=True)
+                self.assertEqual(rc, code)
+                summary = [ln for ln in out.splitlines() if "Worst verdict" in ln][0]
+                self.assertIn(f"({word})", summary, code)
+
     def test_audit_installed_infers_uvx_git_mcp_scan_commands(self):
         audit = importlib.import_module("audit_installed")
         entry = {
