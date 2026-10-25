@@ -156,6 +156,11 @@ class FindingTests(unittest.TestCase):
             "install: connection to 203.0.113.7:4444 (no DNS name)"])
 
     def test_port_53_counts_as_the_resolver_only_on_private_addresses(self):
+        with patch.dict(os.environ):
+            os.environ.pop("AGENT_GUARD_DNS_RESOLVERS", None)
+            self._port_53_only_on_private_addresses()
+
+    def _port_53_only_on_private_addresses(self):
         result = npm_clean()
         result["Analysis"]["install"]["Sockets"].append(
             {"Address": "8.8.8.8", "Port": 53, "Hostnames": []})
@@ -166,18 +171,35 @@ class FindingTests(unittest.TestCase):
             {"Address": "10.0.0.2", "Port": 53, "Hostnames": []})
         self.assertEqual(analyse(result).findings, [])
 
-    def test_configured_resolver_on_port_53_is_not_a_finding(self):
-        def sockets():
-            result = npm_clean()
-            result["Analysis"]["install"]["Sockets"].append(
-                {"Address": "1.1.1.1", "Port": 53, "Hostnames": []})
-            return result
+    def test_configured_resolver_on_port_53_is_still_a_finding(self):
+        # OpenSSF sockets carry no protocol, so DNS over TCP cannot be told from UDP.
+        # The lookups are judged from the DNS block; the socket stays a finding.
+        result = npm_clean()
+        result["Analysis"]["install"]["Sockets"].append(
+            {"Address": "1.1.1.1", "Port": 53, "Hostnames": []})
         with patch.dict(os.environ, {"AGENT_GUARD_DNS_RESOLVERS": "1.1.1.1"}):
-            self.assertEqual(analyse(sockets()).findings, [])
-        env = {k: v for k, v in os.environ.items() if k != "AGENT_GUARD_DNS_RESOLVERS"}
-        with patch.dict(os.environ, env, clear=True):
-            self.assertEqual(analyse(sockets()).findings,
+            self.assertEqual(analyse(result).findings,
                              ["install: connection to 1.1.1.1:53 (no DNS name)"])
+
+    def test_missing_or_mistyped_result_key_is_no_verdict(self):
+        # A completed phase without Files/DNS/Sockets/Commands says nothing, it is
+        # not a clean phase. null is how the recorded output spells "none".
+        for key in ("Files", "DNS", "Sockets", "Commands"):
+            for broken in ("missing", "string", "dict", "number"):
+                with self.subTest(key=key, broken=broken):
+                    result = npm_clean()
+                    if broken == "missing":
+                        del result["Analysis"]["install"][key]
+                    else:
+                        result["Analysis"]["install"][key] = {
+                            "string": "x", "dict": {}, "number": 3}[broken]
+                    report = analyse(result)
+                    self.assertFalse(report.complete)
+                    self.assertIn(key, report.problem)
+                    self.assertIn("install", report.problem)
+        result = npm_clean()
+        result["Analysis"]["install"]["Sockets"] = None
+        self.assertTrue(analyse(result).complete)
 
     def test_registry_of_the_other_ecosystem_is_not_allowed(self):
         result = npm_clean()

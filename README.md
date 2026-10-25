@@ -485,7 +485,7 @@ with `AGENT_GUARD_SANDBOX_ALLOW=host1,host2`; `--no-network` runs the target
 with no network at all (only for commands that need no downloads). DNS traffic
 counts as the sandbox's own resolver only on a private address; if the resolver
 is a public address (on Linux the Docker bridge copies the host's DNS servers),
-list it in `AGENT_GUARD_DNS_RESOLVERS=ip1,ip2`. Inside the
+list it in `AGENT_GUARD_DNS_RESOLVERS=ip1,ip2` (UDP queries only: their names are still checked, and TCP to port 53 of that address stays a finding). Inside the
 sandbox uv may not download Python builds and npm skips its update check, so
 neither reaches for hosts outside the list.
 
@@ -564,6 +564,7 @@ stages (BLOCK before NO VERDICT before SAFE). The optional `execute` phase
 may end early when the package closes stdout — MCP stdio servers do — because
 OpenSSF's own script then fails; what was recorded until then is judged and the
 output says so in a `LIMIT:` line. A failed or missing install or import phase, a
+completed phase without its `Files`, `DNS`, `Sockets` or `Commands` list, a
 result for another package or version, a timeout
 (`AGENT_GUARD_DYNAMIC_TIMEOUT`, default 1200 s) or missing Docker gives **no
 verdict**; `--no-dynamic` skips the stage knowingly and says so, and gives exit 2 unless `AGENT_GUARD_STATIC_ONLY=1`. The first run

@@ -59,6 +59,7 @@ MANAGER_READS = {
 }
 REQUIRED_PHASES = ("install", "import")
 PHASE_ORDER = ("install", "import", "execute")
+PHASE_KEYS = ("Files", "DNS", "Sockets", "Commands")  # lists every completed phase carries
 
 SENSITIVE_READ = re.compile(
     r"/\.ssh/|id_rsa|id_ed25519|/\.aws/|/\.azure/|/\.config/gcloud/|/\.gnupg/"
@@ -140,6 +141,20 @@ def analyse(result: dict, ecosystem: str, allow_hosts=(), expect_name: str | Non
             f"phase(s) missing: {', '.join(missing)}" if missing else "",
             f"phase(s) did not complete: {', '.join(failed)}" if failed else ""]))
 
+    # A completed phase must carry every record list (null is how the recorded output
+    # spells "none"). A renamed or mistyped key would otherwise read as a clean phase.
+    unreadable = [f"{name}: {key}" for name, result_phase in analysis.items()
+                  if (result_phase or {}).get("Status") == "completed"
+                  for key in PHASE_KEYS
+                  if key not in result_phase
+                  or not (result_phase[key] is None or isinstance(result_phase[key], list))]
+    if unreadable:
+        report.complete = False
+        report.problem = "; ".join(filter(None, [
+            report.problem,
+            f"result keys missing or of the wrong type: {', '.join(unreadable)}"]))
+        return report
+
     allow = _egress.parse_allow([*REGISTRY_HOSTS[ecosystem], *allow_hosts])
     allowed_names = {host for host, _port in allow}
 
@@ -147,7 +162,6 @@ def analyse(result: dict, ecosystem: str, allow_hosts=(), expect_name: str | Non
         if text not in report.findings:
             report.findings.append(text)
 
-    resolvers = _egress.dns_resolvers()
     order = [p for p in PHASE_ORDER if p in analysis] + \
             [p for p in analysis if p not in PHASE_ORDER]
     report.phases = order
@@ -168,8 +182,11 @@ def analyse(result: dict, ecosystem: str, allow_hosts=(), expect_name: str | Non
                 finding(f"{name}: DNS lookup of {host}")
         for sock in phase.get("Sockets") or []:
             port, address = sock.get("Port") or 0, sock.get("Address", "")
-            # 0: resolved only, never connected; 53 on a private or configured address: the resolver
-            if port == 0 or (port == 53 and _egress.resolver_address(address, resolvers)):
+            # 0: resolved only, never connected; 53 on a private address: the resolver.
+            # A configured public resolver is not exempt here: OpenSSF sockets carry
+            # no protocol, so DNS over TCP cannot be told from UDP (UDP lookups are
+            # judged from the DNS block above).
+            if port == 0 or (port == 53 and _egress.private_address(address)):
                 continue
             names = [h.rstrip(".").lower() for h in sock.get("Hostnames") or []]
             if (address, port) in allow or any((h, port) in allow for h in names):

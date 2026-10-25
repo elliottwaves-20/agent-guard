@@ -27,20 +27,25 @@
 - `AGENT_GUARD_DNS_RESOLVERS` (comma-separated IP addresses) names resolvers
   that count as the sandbox's own resolver on port 53 even when they are
   public addresses (Linux Docker bridges copy the host's DNS servers);
-  otherwise only private resolver addresses are exempt.
+  otherwise only private resolver addresses are exempt. The exemption covers
+  UDP queries, whose names are still judged. TCP to port 53 of such an address
+  is a finding, and the OpenSSF stage exempts private addresses only (its
+  socket records carry no protocol).
+- OpenSSF package-analysis results: a completed phase without `Files`, `DNS`,
+  `Sockets` or `Commands` (or with one of the wrong type) gives exit 2.
 - Hash-lookup results: an unseen hash, a suspicious-only file, a file skipped
   by the file limit, API errors and a missing, malformed or inconsistent
   summary give exit 2 instead of SAFE. Single-file checks in
   `scan_cli.py binary` no longer treat errors as clean.
+- Directory hash lookups: an empty Cisco summary is SAFE only if agent-guard
+  itself finds no checkable file. It counts the files Cisco would check
+  without Cisco's path exclusions (dot directories, `__pycache__`, symlinks,
+  no magic-byte library); more than Cisco looked at gives exit 2.
 - GuardDog and malcontent images run with `docker run --pull=always`, so
   their rules stay current. Offline means no verdict (exit 2), never SAFE.
 - `scan_url.py`: a repo with no skill and no package manifest gives exit 2
   "unsupported repo layout" (no README-only check); so do skill collections
   with non-documentation files outside the skill folders and marketplace
-- Directory hash lookups: an empty Cisco summary is SAFE only if agent-guard
-  itself finds no checkable file. It counts the files Cisco would check
-  without Cisco's path exclusions (dot directories, `__pycache__`, symlinks,
-  no magic-byte library); more than Cisco looked at gives exit 2.
   candidates skipped by `--max-candidates`.
 - Cooldown: a skill branch without activity entries is accepted only if the
   repository creation time proves it older than the cooldown; otherwise the

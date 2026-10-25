@@ -93,6 +93,11 @@ class AnalysisTests(unittest.TestCase):
                          ["DNS lookup of a host that is not allowed: evil-exfil-test.example.com"])
 
     def test_dns_query_to_a_public_resolver_is_a_finding(self):
+        with patch.dict(os.environ):
+            os.environ.pop("AGENT_GUARD_DNS_RESOLVERS", None)
+            self._dns_query_to_a_public_resolver_is_a_finding()
+
+    def _dns_query_to_a_public_resolver_is_a_finding(self):
         report = analyse(["17:35:18.258128 IP 172.17.0.2.50928 > 1.1.1.1.53: 41011+ A? pypi.org. (45)"])
         self.assertEqual(report.findings, ["DNS traffic to a public address: 1.1.1.1"])
 
@@ -116,9 +121,31 @@ class AnalysisTests(unittest.TestCase):
         self.assertIn("nonsense", err.getvalue())
 
     def test_tcp_syn_to_port_53_on_a_public_address_is_a_finding(self):
-        report = analyse(["17:35:18.358137 IP 172.17.0.2.44712 > 8.8.8.8.53: Flags [S], seq 1, "
-                          "win 64240, length 0"])
+        with patch.dict(os.environ):
+            os.environ.pop("AGENT_GUARD_DNS_RESOLVERS", None)
+            report = analyse(["17:35:18.358137 IP 172.17.0.2.44712 > 8.8.8.8.53: Flags [S], "
+                              "seq 1, win 64240, length 0"])
         self.assertEqual(report.findings, ["DNS traffic to a public address: 8.8.8.8"])
+
+    def test_tcp_to_port_53_of_a_configured_resolver_is_still_a_finding(self):
+        # The configured resolver is exempt for UDP queries whose name is checked;
+        # DNS over TCP is not parsed, so it must not slip through.
+        packets = [
+            "17:35:18.358137 IP 172.17.0.2.44712 > 1.1.1.1.53: Flags [S], seq 1, "
+            "win 64240, length 0",
+            "17:35:18.358999 IP 172.17.0.2.44712 > 1.1.1.1.53: Flags [P.], seq 1:40, "
+            "ack 1, win 502, length 39",
+        ]
+        with patch.dict(os.environ, {"AGENT_GUARD_DNS_RESOLVERS": "1.1.1.1"}):
+            report = analyse(packets)
+        self.assertEqual(report.findings,
+                         ["TCP traffic to port 53 of a configured resolver: 1.1.1.1"])
+        # a UDP query to the same resolver stays exempt, its name is still judged
+        with patch.dict(os.environ, {"AGENT_GUARD_DNS_RESOLVERS": "1.1.1.1"}):
+            report = analyse(["17:35:18.258128 IP 172.17.0.2.50928 > 1.1.1.1.53: "
+                              "41011+ A? evil.example.com. (45)"])
+        self.assertEqual(report.findings,
+                         ["DNS lookup of a host that is not allowed: evil.example.com"])
 
     def test_dns_to_the_private_sandbox_resolver_is_fine(self):
         self.assertEqual(analyse(PYPI[:2]).findings, [])

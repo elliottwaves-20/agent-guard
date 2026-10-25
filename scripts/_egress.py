@@ -185,7 +185,8 @@ def analyse(lines, local_ips, allow: set) -> Report:
             continue  # replies and anything addressed to the target
 
         if dport == 53:
-            if not resolver_address(dst, resolvers):   # only the sandbox's own resolver is exempt
+            exempt = resolver_address(dst, resolvers)  # only the sandbox's own resolver
+            if not exempt:
                 finding(f"DNS traffic to a public address: {dst}")
             query = _QUERY.match(payload)
             if query:
@@ -197,6 +198,10 @@ def analyse(lines, local_ips, allow: set) -> Report:
                     finding(f"DNS lookup of a host that is not allowed: {name}")
             elif "Flags [" not in payload:
                 finding(f"unrecognised traffic: {line}")
+            elif exempt and not private_address(dst):
+                # A configured public resolver is exempt for UDP queries, whose names
+                # are judged above; DNS over TCP is not parsed, so it stays a finding.
+                finding(f"TCP traffic to port 53 of a configured resolver: {dst}")
             continue
         if payload.startswith("Flags [S]"):
             destination("TCP connection to", dst, dport)
