@@ -618,10 +618,12 @@ sync = ["pwsh", "-NoProfile", "-File", "/path/to/your-sync.ps1"]  # argv, no she
 A SAFE skill is then published into `inbox` and `sync` runs once, instead of the
 `skills` CLI or the built-in linker; `--tools` and `--workspace` are refused.
 The sync runs without credentials in its environment, only its output lines
-about the installed skill are shown, and a sync that changes a scanned file is
-an error. A missing, failing or timed-out sync is a warning: the skill stays in
-the inbox for your next regular sync. An invalid section stops the installer
-(exit 2).
+about the installed skill are shown. A sync that changes a scanned file, adds
+a file the scan never saw, or leaves no skill at the inbox path stops the
+installer, and so does a failing or timed-out sync (exit 2, no `[OK]` line;
+nothing is deleted, review the copy by hand). The skill stays in the inbox, but
+it is not reported as installed. Without a `sync` command the skill is only
+published to the inbox. An invalid section stops the installer (exit 2).
 
 **Keeping skills up to date (`update_skills.py`).** With three more keys in the
 same section, installed skills get scanned updates:

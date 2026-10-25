@@ -4,8 +4,10 @@ Distribution is delegated to a third-party CLI, so the interesting part is the
 gate in front of it: the pin, the reviewed findings, the reduced environment,
 and the fallback that must take over whenever any of those does not hold.
 """
+import contextlib
 import copy
 import importlib
+import io
 import json
 import os
 import subprocess
@@ -281,9 +283,12 @@ class InstallerIntegrationTests(unittest.TestCase):
                 installer.verify_distributed_copy(scanned, canonical)
 
             (canonical / "SKILL.md").write_text("reviewed", encoding="utf-8")
-            installer.verify_distributed_copy(scanned, canonical)   # extra files are fine
-            (canonical / "NOTES.md").write_text("cli bookkeeping", encoding="utf-8")
-            installer.verify_distributed_copy(scanned, canonical)
+            (canonical / "NOTES.md").write_text("unscanned", encoding="utf-8")
+            with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()) as err:
+                installer.verify_distributed_copy(scanned, canonical)
+            self.assertEqual(ctx.exception.code, 2)      # extra files are unscanned content
+            self.assertIn("NOTES.md", err.getvalue())
+            self.assertTrue((canonical / "NOTES.md").exists())   # nothing is deleted
 
     def test_missing_canonical_copy_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:

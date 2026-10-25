@@ -18,8 +18,9 @@ the sync does -- store, links, profile assignment -- is the machine's business;
 agent-guard only checks that it did not change the scanned files and prints
 the sync's lines that mention the skill. Without the section nothing changes.
 `origins`, `backup` and `quarantine` are used only by update_skills.py.
-A missing, failing or slow sync is a warning: the skill is already installed
-in the inbox and the next regular sync picks it up.
+A failing or slow sync makes the installer exit 2 without `[OK]`: the skill
+waits in the inbox and is not reported as installed. Extra or changed files in
+the synced copy, or a skill that is gone from the inbox path, also exit 2.
 """
 from __future__ import annotations
 

@@ -522,12 +522,26 @@ def top_up_verified_paths(source: Path, name: str, present: dict, dry: bool):
         make_link(source, link, dry)
 
 
+def refuse_unverified(message: str):
+    """Stop with exit 2 (no verdict): the installed content is not what was scanned."""
+    print(f"ERROR: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def refuse_extra_files(extra: list, location: Path):
+    """Files the scan never saw are unscanned content; list them, delete nothing."""
+    shown = ", ".join(extra[:10]) + (f" (+{len(extra) - 10} more)" if len(extra) > 10 else "")
+    refuse_unverified(
+        f"{location} contains {len(extra)} file(s) or folder(s) the scan never saw: {shown}. "
+        "Review that copy by hand or remove it, then re-run. Nothing was deleted.")
+
+
 def verify_distributed_copy(scanned: Path, canonical: Path):
     """Every scanned file must reach the canonical store byte for byte.
 
     The skills CLI copies the tree itself, so the verdict only covers what is
-    actually installed if the copy matches. Extra files (the CLI's own
-    bookkeeping) are reported, not treated as tampering."""
+    actually installed if the copy matches. Extra entries are unscanned
+    content: they stop the installer (exit 2); nothing is deleted."""
     if not canonical.is_dir():
         sys.exit(f"ERROR: skills CLI reported success but {canonical} does not exist; nothing verified.")
     expected = skill_tree_digest(scanned)
@@ -540,8 +554,7 @@ def verify_distributed_copy(scanned: Path, canonical: Path):
             )
     extra = sorted(set(actual) - set(expected))
     if extra:
-        log(f"  note: canonical copy has {len(extra)} extra entry/entries "
-            f"(first: {extra[0]})")
+        refuse_extra_files(extra, canonical)
     log(f"  verified: canonical copy matches the scanned skill ({canonical})")
 
 
@@ -559,10 +572,11 @@ def configured_distribution():
 
 def verify_synced_copy(expected: dict, published: Path):
     """The sync may move the skill and leave a link behind, but it must not
-    change a scanned file. Extra entries are reported, not treated as tampering."""
+    change a scanned file or add one. A skill that is not at the expected place
+    afterwards cannot be verified (exit 2); nothing is deleted."""
     if not (published.exists() and published.resolve().is_dir()):
-        log(f"  note: the sync moved the skill away from {published}; not re-verified")
-        return
+        refuse_unverified(f"the sync left no skill at {published}; the installed copy "
+                          "cannot be checked against the scan. Find it and review it by hand.")
     actual = skill_tree_digest(published.resolve())
     for key, digest in expected.items():
         if actual.get(key) != digest:
@@ -570,7 +584,7 @@ def verify_synced_copy(expected: dict, published: Path):
                      f"({key} differs under {published.resolve()}). Review and remove it.")
     extra = sorted(set(actual) - set(expected))
     if extra:
-        log(f"  note: synced copy has {len(extra)} extra entry/entries (first: {extra[0]})")
+        refuse_extra_files(extra, published.resolve())
     log(f"  verified: synced copy matches the scanned skill ({published.resolve()})")
 
 
@@ -646,6 +660,9 @@ def install_skill(repo_path: Path, name: str, workspace: Path, dry: bool,
             return
         if _distribution.run_sync(distribution, name):
             verify_synced_copy(before, permanent)
+        elif distribution.sync is not None:
+            refuse_unverified(f"the sync for '{name}' failed; the skill waits unsynced in "
+                              f"{distribution.inbox}. Fix the sync and run it again.")
         print(f"\n[OK] Skill '{name}' installed.")
         print("     Update later: RE-SCAN the new version, then install it again")
         return

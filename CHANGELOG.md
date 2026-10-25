@@ -8,6 +8,12 @@
 
 ### Changed
 
+- `install_skill.py` no longer ends with `[OK]` (exit 0) when the installed
+  content is not what was scanned: extra files in the skills CLI copy or the
+  synced copy, a changed file, a skill that is gone from the inbox path after
+  the sync, and a failed or timed-out sync all give exit 2 and list the files.
+  Nothing is deleted. Without a `sync` command the skill is only published to
+  the inbox, as before.
 - Exit codes: 0 SAFE, 1 BLOCK, 2 NO VERDICT. Decide by the exit code, not the
   text: exit 2 may print as `[WARN]` or `[BLOCK]`. The skill-scan exit codes
   are documented correctly now: a single HIGH or CRITICAL finding alone gives

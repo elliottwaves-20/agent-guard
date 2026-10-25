@@ -578,8 +578,10 @@ all detected ones.
 If the user's personal config has a `[distribution]` section (`mode = "sync"`),
 the installer publishes the SAFE skill into that section's inbox and runs the
 user's own sync command once instead; `--tools` and `--workspace` are then
-refused, so do not ask which agents to target. A sync warning leaves the skill
-in the inbox for the user's next regular sync — report it, do not retry blindly.
+refused, so do not ask which agents to target. A failed or timed-out sync, or
+a synced copy with extra or changed files, ends with exit 2 and no `[OK]`
+line; the skill stays in the inbox. Report it, do not retry blindly and do not
+delete anything on your own.
 
 Updating later: `git -C "$WORKSPACE/<name>" fetch` → **re-scan the new
 commit** → checkout the new SHA.
