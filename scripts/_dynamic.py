@@ -45,6 +45,9 @@ IMAGE = ("gcr.io/ossf-malware-analysis/analysis@sha256:"
 # The analysis image pulls its per-ecosystem sandbox images into this volume;
 # keeping it makes every run after the first take seconds instead of minutes.
 CACHE_VOLUME = "agent-guard-dynamic-cache"
+# The image starts its sandbox with --dns=8.8.8.8 --dns=8.8.4.4 (hard-coded in
+# /usr/local/bin/analyze), so every lookup goes there. Re-check on an image bump.
+SANDBOX_RESOLVERS = frozenset({"8.8.8.8", "8.8.4.4"})
 TIMEOUT = int(os.environ.get("AGENT_GUARD_DYNAMIC_TIMEOUT", "1200"))
 
 ECOSYSTEMS = ("npm", "pypi")
@@ -202,11 +205,12 @@ def _analyse(result: dict, ecosystem: str, allow_hosts, expect_name: str | None)
                 finding(f"{name}: DNS lookup of {host}")
         for sock in phase.get("Sockets") or []:
             port, address = sock.get("Port") or 0, sock.get("Address", "")
-            # 0: resolved only, never connected; 53 on a private address: the resolver.
-            # A configured public resolver is not exempt here: OpenSSF sockets carry
-            # no protocol, so DNS over TCP cannot be told from UDP (UDP lookups are
-            # judged from the DNS block above).
-            if port == 0 or (port == 53 and _egress.private_address(address)):
+            # 0: resolved only, never connected; 53 on the sandbox's own or a private
+            # address: the resolver. A configured public resolver is not exempt here:
+            # OpenSSF sockets carry no protocol, so DNS over TCP cannot be told from
+            # UDP (UDP lookups are judged from the DNS block above).
+            if port == 0 or (port == 53 and (address in SANDBOX_RESOLVERS
+                                             or _egress.private_address(address))):
                 continue
             names = [h.rstrip(".").lower() for h in sock.get("Hostnames") or []]
             if (address, port) in allow or any((h, port) in allow for h in names):

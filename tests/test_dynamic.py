@@ -66,7 +66,7 @@ def npm_clean():
                 names=["registry.npmjs.org"],
                 sockets=[("104.16.0.34", 0, ["registry.npmjs.org"]),
                          ("104.16.0.34", 443, ["registry.npmjs.org"]),
-                         ("10.0.0.2", 53, [])],
+                         ("8.8.8.8", 53, [])],
                 commands=[cmd("node", "/usr/bin/npm", "install", "is-number@7.0.0"),
                           cmd("sh", "-c", "node install.js"), cmd("node", "install.js")]),
         },
@@ -86,7 +86,7 @@ def pypi_clean():
                        write("/tmp/pip-unpack-abc"), write("/dev/null")],
                 names=["pypi.org", "files.pythonhosted.org"],
                 sockets=[("151.101.0.223", 443, ["files.pythonhosted.org", "pypi.org"]),
-                         ("2a04:4e42::223", 443, ["pypi.org"]), ("10.0.0.2", 53, [])],
+                         ("2a04:4e42::223", 443, ["pypi.org"]), ("8.8.8.8", 53, [])],
                 commands=[cmd("/app/.pyenv/bin/python3", "-m", "pip", "install", "six==1.17.0"),
                           cmd("uname", "-rs"), cmd("lsb_release", "-a"), cmd("rustc", "--version")]),
         },
@@ -155,21 +155,38 @@ class FindingTests(unittest.TestCase):
             "install: connection to 104.20.23.154:443 (example.com)",
             "install: connection to 203.0.113.7:4444 (no DNS name)"])
 
-    def test_port_53_counts_as_the_resolver_only_on_private_addresses(self):
+    def test_port_53_counts_as_the_resolver_only_on_sandbox_or_private_addresses(self):
         with patch.dict(os.environ):
             os.environ.pop("AGENT_GUARD_DNS_RESOLVERS", None)
-            self._port_53_only_on_private_addresses()
+            self._port_53_only_on_sandbox_or_private_addresses()
 
-    def _port_53_only_on_private_addresses(self):
+    def _port_53_only_on_sandbox_or_private_addresses(self):
+        # The pinned image starts its sandbox with --dns=8.8.8.8 --dns=8.8.4.4.
+        for address in ("8.8.8.8", "8.8.4.4", "10.0.0.2"):
+            result = npm_clean()
+            result["Analysis"]["install"]["Sockets"].append(
+                {"Address": address, "Port": 53, "Hostnames": []})
+            with self.subTest(address=address):
+                self.assertEqual(analyse(result).findings, [])
         result = npm_clean()
         result["Analysis"]["install"]["Sockets"].append(
-            {"Address": "8.8.8.8", "Port": 53, "Hostnames": []})
+            {"Address": "9.9.9.9", "Port": 53, "Hostnames": []})
         self.assertEqual(analyse(result).findings,
-                         ["install: connection to 8.8.8.8:53 (no DNS name)"])
+                         ["install: connection to 9.9.9.9:53 (no DNS name)"])
+
+    def test_sandbox_resolver_on_another_port_is_a_finding(self):
         result = npm_clean()
         result["Analysis"]["install"]["Sockets"].append(
-            {"Address": "10.0.0.2", "Port": 53, "Hostnames": []})
-        self.assertEqual(analyse(result).findings, [])
+            {"Address": "8.8.8.8", "Port": 443, "Hostnames": []})
+        self.assertEqual(analyse(result).findings,
+                         ["install: connection to 8.8.8.8:443 (no DNS name)"])
+
+    def test_lookups_through_the_sandbox_resolver_are_still_judged(self):
+        result = npm_clean()
+        result["Analysis"]["install"]["DNS"][0]["Queries"].append(
+            {"Hostname": "phone-home.example.net", "Types": ["A"]})
+        self.assertEqual(analyse(result).findings,
+                         ["install: DNS lookup of phone-home.example.net"])
 
     def test_configured_resolver_on_port_53_is_still_a_finding(self):
         # OpenSSF sockets carry no protocol, so DNS over TCP cannot be told from UDP.
