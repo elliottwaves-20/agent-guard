@@ -63,6 +63,7 @@ UNCHANGED, UPDATED, INSTALLED, WOULD_SCAN = "unchanged", "updated", "installed",
 COOLDOWN = "cooldown"   # a newer commit exists but is younger than the 7-day rule
 BLOCKED, PAUSED, REJECTED = "blocked", "paused", "rejected"
 FAILED, NO_VERDICT = "failed", "no-verdict"
+OWN = "own-version"     # source paused on purpose: we maintain our own fork, nothing to decide
 WAITING = {BLOCKED, PAUSED}
 BROKEN = {FAILED, NO_VERDICT}
 
@@ -168,6 +169,8 @@ class Run:
             for name in names:
                 if self.origins["skills"][name].get("blocked"):
                     self.report_blocked(name)
+                elif paused.get("own"):
+                    self.report(name, OWN, source=source, detail=paused["skill"])
                 else:
                     self.report(name, PAUSED, source=source,
                                 detail=f"source paused since {paused['at']} ({paused['skill']} blocked)")
@@ -371,7 +374,8 @@ def pending_text(origins: dict, origins_path) -> str:
         if blocked.get("report"):
             lines.append(f"  scan report: {blocked['report']}")
         lines.append(f"  decide: update_skills.py --accept {name} --reason '...' | --reject {name}")
-    paused = sorted(s for s, v in origins["sources"].items() if v.get("paused"))
+    paused = sorted(s for s, v in origins["sources"].items()
+                    if v.get("paused") and not v["paused"].get("own"))
     if paused:
         lines.append(f"- paused sources (no updates until the blocked skill is decided): {', '.join(paused)}")
     if not lines:

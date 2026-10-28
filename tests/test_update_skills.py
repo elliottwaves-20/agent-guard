@@ -178,6 +178,21 @@ class UpdateFlowTests(unittest.TestCase):
         self.assertEqual(env.scanned, [])
         self.assertEqual(json.loads(report.read_text())["skills"]["alpha"]["status"], "paused")
 
+    def test_own_version_pause_is_not_waiting(self):
+        env = Env(self)
+        write_skill(env.inbox / "alpha", "v1")
+        env.upstream[("o/r", "alpha")] = "v2"
+        env.origins({"alpha": "o/r"})
+        data = env.data()
+        data["sources"]["o/r"] = {"paused": {"skill": "own fork", "own": True,
+                                             "at": "2026-10-28T00:00:00+00:00"}}
+        staging.save_origins(env.dist.origins, data)
+        report = env.inbox.parent / "report.json"
+        self.assertEqual(env.run("--all", "--json", str(report)), 0)
+        self.assertEqual(env.scanned, [])
+        self.assertIn("v1", (env.inbox / "alpha" / "SKILL.md").read_text())
+        self.assertEqual(json.loads(report.read_text())["skills"]["alpha"]["status"], "own-version")
+
     def test_accept_installs_quarantined_version_and_unpauses(self):
         env = Env(self)
         write_skill(env.inbox / "alpha", "v1")
