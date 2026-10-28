@@ -170,7 +170,7 @@ class Run:
                 if self.origins["skills"][name].get("blocked"):
                     self.report_blocked(name)
                 elif paused.get("own"):
-                    self.report(name, OWN, source=source, detail=paused["skill"])
+                    self.report(name, OWN, source=source, detail=paused["skill"], since=paused["at"])
                 else:
                     self.report(name, PAUSED, source=source,
                                 detail=f"source paused since {paused['at']} ({paused['skill']} blocked)")
