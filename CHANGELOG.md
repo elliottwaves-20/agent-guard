@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The dynamic stage no longer blocks every npm and PyPI package with
+  "connection to 8.8.8.8:53". The pinned OpenSSF image hard-codes
+  `--dns=8.8.8.8 --dns=8.8.4.4` for its sandbox; port 53 on these two
+  addresses now counts as the sandbox's resolver. The looked-up names are
+  still judged.
+
 ## 0.5.1 - 2026-10-25
 
 ### Security

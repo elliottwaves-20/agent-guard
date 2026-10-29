@@ -353,7 +353,8 @@ belongs to the server's documented purpose — never to turn a BLOCK green.
 downloaded). A Docker network with its own resolver needs
 `AGENT_GUARD_DNS_RESOLVERS=ip1,ip2` (UDP queries only; TCP to port 53 stays a
 finding). In the dynamic stage a listed resolver on a public address still
-blocks every package (exit 1), because OpenSSF cannot tell TCP from UDP there.
+blocks every package (exit 1), because OpenSSF cannot tell TCP from UDP there;
+only the sandbox's own resolvers `8.8.8.8`/`8.8.4.4` are exempt.
 
 A clean Stage 1 verdict does not prove runtime safety — use `--sandbox` for
 unfamiliar servers. Only after SAFE: `install_skill.py mcp ...` (see below).
