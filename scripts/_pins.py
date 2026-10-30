@@ -13,9 +13,13 @@ carries #704, #709, #737 (codex_cli disabled) and #738, plus the gemini provider
 that signs in through Application Default Credentials. Since 2404212 it also
 carries #779 (a command wrapper with no command is complete) and #810
 (OpenCode keeps its internal plugins, so the ChatGPT OAuth login works without
-a local shim). tests/test_pins.py
-checks on GitHub that main contains it. Move to the release tag with 2.13.0.
+a local shim). Since 54921c8 it also carries #855 (CLI prompts stay under the
+input cap when large files are batched), #856 (security discovery shares the
+LLM limiter) and #882 (code fence lines no longer merge shell lines). Since
+#798 SkillSpector refuses --output on Windows, so reports are read from stdout.
+tests/test_pins.py checks on GitHub that main contains it. The 2.13.x release
+tags sit on a separate branch without #855/#856, so the pin stays on main.
 """
 SKILLSPECTOR_VERSION = "2.12.0"
 SKILLSPECTOR_REPO = "https://github.com/NVIDIA/SkillSpector"
-SKILLSPECTOR_SHA = "240421219409dc0bafef9f618a10d80c2d7e83a3"
+SKILLSPECTOR_SHA = "54921c8c7c23008c8af2328d5ab492a904b6ece4"

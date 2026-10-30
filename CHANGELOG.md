@@ -2,7 +2,20 @@
 
 ## Unreleased
 
+### Changed
+
+- SkillSpector is pinned to NVIDIA main `54921c8` (still reports 2.12.0).
+  It adds #855 (CLI prompts stay under the input cap when large files are
+  batched, so big skills such as REA get a complete LLM pass), #856 and #882.
+  The 2.13.x release tags sit on a separate branch without these fixes.
+
 ### Fixed
+
+- SkillSpector scans work on Windows again with the new pin. Since NVIDIA
+  #798 SkillSpector refuses `--output` where it cannot open no-follow
+  directory descriptors, which includes Windows. agent-guard now reads the
+  JSON report from stdout on every platform; anything on stdout other than
+  exactly one JSON object is still NO VERDICT.
 
 - The dynamic stage no longer blocks every npm and PyPI package with
   "connection to 8.8.8.8:53". The pinned OpenSSF image hard-codes

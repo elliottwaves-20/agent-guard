@@ -176,11 +176,14 @@ class InstalledScannerBaselineTests(unittest.TestCase):
             original = "---\nname: config-demo\ndescription: Configure a local tool.\n---\n# Configuration\nUse the .env configuration file.\n"
             skill.write_text(original, encoding="utf-8")
             policy = Path(tmp) / "review.json"
+            # SkillSpector writes baselines only to stdout where it cannot open
+            # no-follow directory descriptors (Windows).
             cmd = ss.skillspector_command() + ["baseline", str(target), "--no-llm",
-                  "--output", str(policy), "--reason", "Reviewed test configuration reference"]
+                  "--output", "-", "--reason", "Reviewed test configuration reference"]
             result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                                     env=ss.skillspector_env(), timeout=120)
             self.assertEqual(result.returncode, 0, result.stderr)
+            policy.write_text(result.stdout, encoding="utf-8")
             # Without AI analysis only an explicit static-only policy may end SAFE.
             with patch.object(ss, "skillspector_llm_usable", return_value=False), \
                     patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}):

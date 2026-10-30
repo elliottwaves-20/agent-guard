@@ -158,9 +158,10 @@ class CorpusAcceptanceTests(unittest.TestCase):
             with self.subTest(sid):
                 out = Path(self.tmp.name) / f"{sid}.json"
                 cmd = ss.skillspector_command() + ["scan", str(path), "--no-llm", "--format",
-                                                   "json", "--output", str(out)]
+                                                   "json"]
                 done = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                                       errors="replace", env=ss.skillspector_env(), timeout=900)
+                out.write_text(done.stdout, encoding="utf-8")
                 with contextlib.redirect_stdout(io.StringIO()):
                     raw = ss.verdict_skillspector(out, done.returncode)
                 result = _triage.triage(json.loads(out.read_text(encoding="utf-8")), path, raw,
