@@ -576,9 +576,10 @@ def run_skillspector(src: Path, runtime_hint: bool = False, *,
                      baseline: Path | None = None,
                      report_output: Path | None = None) -> int:
     """SkillSpector scan of `src` (a dir / zip / .md / file). Nothing from the
-    scanned target is executed. Writes a JSON report to a temp file (robust
-    across platforms; the terminal renderer is unreliable on legacy Windows
-    consoles) and judges it.
+    scanned target is executed. Reads the JSON report from stdout (SkillSpector
+    refuses --output where it cannot open no-follow directory descriptors, which
+    includes Windows), keeps it in a temp file and judges it. Anything on stdout
+    but exactly one JSON object leaves no parsable report: NO VERDICT.
 
     `runtime_hint=True` adds the MCP-specific note that a static scan cannot see
     tools a server registers only at runtime (set by the MCP wrapper, not for
@@ -599,8 +600,7 @@ def run_skillspector(src: Path, runtime_hint: bool = False, *,
     use_llm = skillspector_llm_usable()
     with tempfile.TemporaryDirectory() as d:
         report = Path(d) / "report.json"
-        cmd = skillspector_command() + ["scan", str(src),
-                                        "--format", "json", "--output", str(report)]
+        cmd = skillspector_command() + ["scan", str(src), "--format", "json"]
         if reviewed is not None:
             snapshot = Path(d) / "reviewed-baseline.json"
             snapshot.write_text(json.dumps(reviewed), encoding="utf-8")
@@ -624,6 +624,8 @@ def run_skillspector(src: Path, runtime_hint: bool = False, *,
                 print(f"[BLOCK] NO VERDICT -- scan timed out after {SCAN_TIMEOUT}s. Do NOT "
                       "install. Raise AGENT_GUARD_SCAN_TIMEOUT or review manually.")
                 return 2
+            if r.stdout and r.stdout.strip():
+                report.write_text(r.stdout, encoding="utf-8")
             data = _load_report(report)
             if not use_llm or attempt >= attempts:
                 break
@@ -648,7 +650,7 @@ def run_skillspector(src: Path, runtime_hint: bool = False, *,
         stderr = _filter_stderr(r.stderr)
         if stderr.strip():
             print(_console_err_text(stderr), file=sys.stderr)
-        if report_output is not None and report.is_file():
+        if report_output is not None and data is not None:
             try:
                 # Refuse overwrite: a report must not replace source or policy files.
                 with report_output.open("xb") as dest:

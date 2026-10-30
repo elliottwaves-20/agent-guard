@@ -58,9 +58,8 @@ class ReviewedBaselineTests(unittest.TestCase):
                 snapshot = Path(cmd[cmd.index("--baseline") + 1])
                 self.assertNotEqual(snapshot, baseline)
                 self.assertEqual(json.loads(snapshot.read_text()), baseline_data())
-            output = data
-            Path(cmd[cmd.index("--output") + 1]).write_text(json.dumps(output), encoding="utf-8")
-            return subprocess.CompletedProcess(cmd, 0, "", "")
+            self.assertNotIn("--output", cmd)
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(data), "")
         with patch.object(ss, "need_skillspector"), \
                 patch.object(ss, "skillspector_command", return_value=["skillspector"]), \
                 patch.object(ss, "skillspector_llm_usable", return_value=llm), \
