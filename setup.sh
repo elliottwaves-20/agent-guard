@@ -12,7 +12,7 @@ set -euo pipefail
 # commit behind a release tag (tags can move, commits cannot) so "scan = install"
 # applies to the scanner itself. Bump deliberately; keep the tag comment in sync.
 SKILLSPECTOR_REPO="https://github.com/NVIDIA/SkillSpector"   # main until 2.13.0
-SKILLSPECTOR_SHA="54921c8c7c23008c8af2328d5ab492a904b6ece4"   # v2.12.0 + main 2026-10-29
+SKILLSPECTOR_SHA="9adb1a607ab0749e4377e0aba1c834b72f948107"   # v2.12.0 + main 2026-10-30
 
 echo "Checking prerequisites..."
 

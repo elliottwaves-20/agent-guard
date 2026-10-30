@@ -4,9 +4,11 @@
 
 ### Changed
 
-- SkillSpector is pinned to NVIDIA main `54921c8` (still reports 2.12.0).
+- SkillSpector is pinned to NVIDIA main `9adb1a6` (still reports 2.12.0).
   It adds #855 (CLI prompts stay under the input cap when large files are
-  batched, so big skills such as REA get a complete LLM pass), #856 and #882.
+  batched, so big skills such as REA get a complete LLM pass), #856, #882,
+  #872, #929 and #949 (a local matcher timeout marks only that file partial
+  instead of every later one).
   The 2.13.x release tags sit on a separate branch without these fixes.
 
 ### Fixed
