@@ -365,9 +365,10 @@ class ScanFailureTests(unittest.TestCase):
 
     def _app_writing(self, report, exit_code=None, returns=None):
         def app(args, standalone_mode):
+            # SkillSpector refuses --output on Windows; the JSON report goes to stdout.
+            assert "--output" not in args
             if report is not None:
-                Path(args[args.index("--output") + 1]).write_text(
-                    json.dumps(report), encoding="utf-8")
+                print(json.dumps(report))
             if exit_code is not None:
                 raise SystemExit(exit_code)
             return returns   # click returns typer.Exit(code=N) in non-standalone mode
@@ -442,7 +443,15 @@ class ScanFailureTests(unittest.TestCase):
 
     def test_unreadable_report_is_no_verdict(self):
         def app(args, standalone_mode):
-            Path(args[args.index("--output") + 1]).write_text("{broken", encoding="utf-8")
+            print("{broken")
+
+        with patch("_llm_adapter.live_transport"):
+            self.assertEqual(self._scan(app), 2)
+
+    def test_text_around_the_report_is_no_verdict(self):
+        def app(args, standalone_mode):
+            print("Report saved to elsewhere")
+            print(json.dumps(clean_report()))
 
         with patch("_llm_adapter.live_transport"):
             self.assertEqual(self._scan(app), 2)

@@ -9,7 +9,9 @@ variable that profile names. No installation or baseline approval is performed.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import importlib.metadata
 import json
 import os
@@ -150,13 +152,19 @@ def scan(session, campaign, preview, policy):
     if report.exists():
         report.unlink()  # Previous partial report is not evidence for this pass.
     exit_code = 2
+    # SkillSpector refuses --output where it cannot open no-follow directory
+    # descriptors (Windows); its JSON report is the scan's whole stdout instead.
+    captured = io.StringIO()
     try:
-        returned = app(args=["scan", str(session / "snapshot"), "--format", "json",
-                             "--output", str(report)], standalone_mode=False)
+        with contextlib.redirect_stdout(captured):
+            returned = app(args=["scan", str(session / "snapshot"), "--format", "json"],
+                           standalone_mode=False)
         exit_code = scanner_exit_code(returned)
     except SystemExit as exc:
         exit_code = scanner_exit_code(exc.code)
     finally:
+        if captured.getvalue().strip():
+            report.write_text(captured.getvalue(), encoding="utf-8")
         summary = budget.summary()
         summary["snapshot_intact"] = manifest(session / "snapshot") == info["files"]
         summary["session"] = str(session)
