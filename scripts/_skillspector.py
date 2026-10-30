@@ -650,6 +650,15 @@ def run_skillspector(src: Path, runtime_hint: bool = False, *,
         stderr = _filter_stderr(r.stderr)
         if stderr.strip():
             print(_console_err_text(stderr), file=sys.stderr)
+        if data is None and r.stdout and r.stdout.strip():
+            # Not exactly one JSON report: show what came instead, shortened.
+            # Scanned content can reach stdout, so control characters are
+            # escaped and every line is quoted, never passing for our output.
+            excerpt = "".join(ch if ch == "\n" or ch.isprintable() else f"\\x{ord(ch):02x}"
+                              for ch in r.stdout.strip()[:500])
+            quoted = "\n".join("    | " + line for line in excerpt.split("\n"))
+            print("  SkillSpector stdout was not a JSON report; it began with:\n"
+                  + _console_err_text(quoted), file=sys.stderr)
         if report_output is not None and data is not None:
             try:
                 # Refuse overwrite: a report must not replace source or policy files.

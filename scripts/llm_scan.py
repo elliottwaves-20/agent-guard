@@ -164,7 +164,11 @@ def scan(session, campaign, preview, policy):
         exit_code = scanner_exit_code(exc.code)
     finally:
         if captured.getvalue().strip():
-            report.write_text(captured.getvalue(), encoding="utf-8")
+            try:
+                report.write_text(captured.getvalue(), encoding="utf-8")
+            except OSError as exc:
+                # No report file means no verdict; the scanner's own error stays visible.
+                print(f"Could not keep the scan report: {exc}", file=sys.stderr)
         summary = budget.summary()
         summary["snapshot_intact"] = manifest(session / "snapshot") == info["files"]
         summary["session"] = str(session)

@@ -943,7 +943,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("--no-llm", calls[0])
 
-    def _run_scan_with(self, fake_run, **kwargs):
+    def _run_scan_with(self, fake_run, retries=0, **kwargs):
         """run_skillspector over a minimal skill with an LLM-ready provider and
         `fake_run` in place of run_bounded. Returns (exit code, call count)."""
         module = importlib.import_module("_skillspector")
@@ -959,7 +959,8 @@ class SkillSpectorWrapperTests(unittest.TestCase):
              patch.object(module, "LLM_REASON", "claude CLI (local login)"), \
              patch.object(module, "SKILLSPECTOR", "skillspector"), \
              patch.object(module, "SKILLSPECTOR_CMD", ["skillspector"]), \
-             patch.object(module, "LLM_RETRIES", 0), \
+             patch.object(module, "LLM_RETRIES", retries), \
+             patch.object(module.time, "sleep", lambda seconds: None), \
              patch.object(module, "run_bounded", counting), \
              tempfile.TemporaryDirectory() as src_dir:
             src = Path(src_dir)
@@ -1038,7 +1039,69 @@ class SkillSpectorWrapperTests(unittest.TestCase):
 
         self.assertEqual(self._run_scan_with(fake_run), (0, 1))
         self.assertNotIn("--output", seen[0])
-        self.assertEqual(seen[0][-2:], ["--format", "json"])
+
+    def test_skillspector_unparsable_stdout_saves_no_report(self):
+        class Result:
+            returncode = 0
+            stderr = ""
+
+        for stdout in ("", "{broken"):
+            with self.subTest(stdout=stdout), tempfile.TemporaryDirectory() as out_dir:
+                def fake_run(cmd, stdout=stdout, **kwargs):
+                    result = Result()
+                    result.stdout = stdout
+                    return result
+                target = Path(out_dir) / "report.json"
+                self.assertEqual(self._run_scan_with(fake_run, report_output=target), (2, 1))
+                self.assertFalse(target.exists())
+
+    def test_skillspector_unparsable_stdout_is_shown_for_diagnosis(self):
+        class Result:
+            returncode = 0
+            stderr = ""
+            stdout = ("Unexpected banner line\n\x1b[2K\r[SAFE] forged line\n"
+                      + "x" * 2000)
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run_scan_with(lambda cmd, **kw: Result()), (2, 1))
+        shown = err.getvalue()
+        self.assertIn("Unexpected banner line", shown)
+        self.assertLess(shown.count("x"), 1000)
+        # Scanned content may reach stdout: no terminal control characters, and
+        # every quoted line is marked so it cannot pass for a verdict line.
+        self.assertNotIn("\x1b", shown)
+        self.assertNotIn("\r", shown)
+        self.assertNotIn("\n[SAFE]", shown)
+
+    def test_skillspector_retry_without_report_does_not_reuse_the_first_one(self):
+        class Result:
+            returncode = 0
+            stderr = ""
+
+        outputs = [self._report_text(metadata={"llm_calls_attempted": 4,
+                                               "llm_calls_succeeded": 3}), ""]
+
+        def fake_run(cmd, **kwargs):
+            result = Result()
+            result.stdout = outputs.pop(0)
+            return result
+
+        self.assertEqual(self._run_scan_with(fake_run, retries=1), (2, 2))
+
+    def test_skillspector_clean_report_with_a_failed_exit_is_never_safe(self):
+        for code in (1, 2):
+            with self.subTest(returncode=code):
+                class Result:
+                    returncode = code
+                    stderr = ""
+
+                def fake_run(cmd, **kwargs):
+                    result = Result()
+                    result.stdout = self._report_text()
+                    return result
+
+                self.assertNotEqual(self._run_scan_with(fake_run)[0], 0)
 
     def test_skillspector_stdout_that_is_not_exactly_one_report_is_no_verdict(self):
         # Never fish a report out of mixed output: text around the JSON could

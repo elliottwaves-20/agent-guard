@@ -900,8 +900,10 @@ remain visible in both terminal output and the saved report, including on SAFE.
 
 The wrapper never auto-loads a target's baseline. Keep your reviewed baseline
 outside the scanned source, and do not trust one merely because its author
-ships it. `skillspector baseline <source> --output /review/draft.json` can
-generate **candidates for review**; it accepts every current finding, so its
+ships it. `skillspector baseline <source> --output - > /review/draft.json` can
+generate **candidates for review** (SkillSpector writes baseline files itself
+only where it can open no-follow directory descriptors, not on Windows, so the
+portable form is stdout); it accepts every current finding, so its
 output must be inspected, reduced and given specific reasons before use.
 Generate it with the same scanner and LLM policy as the later scan; different
 LLM evidence can invalidate an otherwise unchanged fingerprint.

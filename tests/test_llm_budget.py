@@ -448,6 +448,38 @@ class ScanFailureTests(unittest.TestCase):
         with patch("_llm_adapter.live_transport"):
             self.assertEqual(self._scan(app), 2)
 
+    def test_report_of_an_earlier_pass_is_not_evidence(self):
+        (self.session / "report.json").write_text(json.dumps(clean_report()), encoding="utf-8")
+        with patch("_llm_adapter.live_transport"):
+            self.assertEqual(self._scan(self._app_writing(None, exit_code=0)), 2)
+
+    def test_crash_after_a_clean_report_is_never_safe(self):
+        def app(args, standalone_mode):
+            print(json.dumps(clean_report()))
+            raise RuntimeError("scanner crashed after printing")
+
+        with patch("_llm_adapter.live_transport"), self.assertRaises(RuntimeError):
+            self._scan(app)
+
+    def test_unwritable_report_does_not_hide_the_scanner_error(self):
+        def app(args, standalone_mode):
+            print(json.dumps(clean_report()))
+            raise RuntimeError("scanner crashed after printing")
+
+        original = Path.write_text
+
+        def write_text(path, *args, **kwargs):
+            if path.name == "report.json":
+                raise OSError("disk full")
+            return original(path, *args, **kwargs)
+
+        with patch("_llm_adapter.live_transport"), \
+                patch.object(Path, "write_text", write_text), \
+                self.assertRaises(RuntimeError):
+            self._scan(app)
+        # The pass summary is still written although the report could not be.
+        self.assertTrue((self.session / "progress.json").exists())
+
     def test_text_around_the_report_is_no_verdict(self):
         def app(args, standalone_mode):
             print("Report saved to elsewhere")

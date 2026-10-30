@@ -15,7 +15,9 @@
   #798 SkillSpector refuses `--output` where it cannot open no-follow
   directory descriptors, which includes Windows. agent-guard now reads the
   JSON report from stdout on every platform; anything on stdout other than
-  exactly one JSON object is still NO VERDICT.
+  exactly one JSON object is still NO VERDICT, and the start of what came
+  instead is shown (control characters escaped, each line quoted). The
+  README's baseline example now uses `--output -`.
 
 - The dynamic stage no longer blocks every npm and PyPI package with
   "connection to 8.8.8.8:53". The pinned OpenSSF image hard-codes
