@@ -4,10 +4,11 @@
 
 ### Changed
 
-- SkillSpector is pinned to NVIDIA main `e14c450` (still reports 2.12.0).
+- SkillSpector is pinned to NVIDIA main `6d0b7c8` (still reports 2.12.0).
   It adds #752 (the upstream `info_stealer` rule needs a browser cookie-store
-  path, so agent-guard's corrected copy of that rule no longer applies), #814,
-  #902, #848, #946, #855 (CLI prompts stay under the input cap when large files are
+  path, so agent-guard's corrected copy of that rule no longer applies),
+  #801 and #902 (JavaScript template literals and backticks or apostrophes in
+  comments no longer cause false parser limits), #947, #952, #955, #957, #855 (CLI prompts stay under the input cap when large files are
   batched, so big skills such as REA get a complete LLM pass), #856, #882,
   #872, #929 and #949 (a local matcher timeout marks only that file partial
   instead of every later one).
