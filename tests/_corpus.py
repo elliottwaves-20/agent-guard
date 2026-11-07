@@ -36,6 +36,7 @@ class Sample:
     needs_llm: bool = False
     open: tuple = ()    # rules left open on purpose until `open_until` lands
     open_until: str = ""
+    no_verdict_until: str = ""  # known coverage gap: no verdict until this issue lands
 
 
 def load_manifest(path: Path = MANIFEST) -> tuple:
@@ -48,7 +49,8 @@ def load_manifest(path: Path = MANIFEST) -> tuple:
         samples.append(Sample(e["name"], "benign", e["expect"], e["tree_hash"],
                               e["source"], e["ref"], noise=tuple(e.get("noise", ())),
                               open=tuple(e.get("open", ())),
-                              open_until=e.get("open_until", "")))
+                              open_until=e.get("open_until", ""),
+                              no_verdict_until=e.get("no_verdict_until", "")))
     for e in data.get("malicious", []):
         samples.append(Sample(e["id"], "malicious", e["expect"], e["tree_hash"],
                               repo["source"], repo["ref"], hard=bool(e.get("hard")),

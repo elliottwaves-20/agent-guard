@@ -13,6 +13,8 @@
 # open / open_until: findings that stay open on purpose until the named issue
 #              lands; the verdict is then expected dangerous with only those rules open.
 # needs_llm: the static scan alone finds nothing; only the LLM layer can.
+# no_verdict_until: a coverage gap the triage cannot settle yet (fail-closed);
+#              the verdict is then expected "no_verdict" until the named issue lands.
 
 version = 1
 
@@ -53,6 +55,9 @@ ref = "68832757cbbf941c620b71df5756cf6e5cc287b0"
 tree_hash = "e019449a9102cf035d210b14e8248fa0d1b722f337b03fde6dfd8c18980a5aba"
 expect = "safe"
 noise = ["TP4", "PE3"]
+# SKILL.md links folders and names that match several files: SkillSpector
+# reports referenced_uninspected / reference_unresolved, which stay unsettled.
+no_verdict_until = "agent-guard#15"
 
 [[benign]]
 name = "tavily-search"

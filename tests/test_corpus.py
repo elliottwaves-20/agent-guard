@@ -21,6 +21,10 @@ def assert_meets_expectation(case, sample, result, _triage, verified=False):
     With the verifier in the chain (`verified`) it may settle them; the verdict is
     then the expected one. A finding it confirms still fails the expectation."""
     still_open = [(d.finding.rule, d.reason) for d in result.by_status(_triage.OPEN)]
+    if getattr(sample, "no_verdict_until", ""):
+        # A known coverage gap: the triage must stay closed until the issue lands.
+        case.assertEqual(result.verdict, "no_verdict", (still_open, sample.no_verdict_until))
+        return
     if verified and sample.open and result.verdict == sample.expect:
         return
     if sample.open:
@@ -56,6 +60,17 @@ class ExpectationTests(unittest.TestCase):
     def test_verifier_may_settle_the_open_rule(self):
         result, tr = self.result("safe", "cleared")
         assert_meets_expectation(self, self.sample(), result, tr, verified=True)
+
+    def test_known_coverage_gap_expects_no_verdict(self):
+        from types import SimpleNamespace
+        gap = SimpleNamespace(expect="safe", open=(), open_until="",
+                              no_verdict_until="agent-guard#15")
+        result, tr = self.result("no_verdict")
+        assert_meets_expectation(self, gap, result, tr)
+        for verdict in ("safe", "dangerous", "unclear"):
+            result, tr = self.result(verdict)
+            with self.assertRaises(AssertionError):
+                assert_meets_expectation(self, gap, result, tr, verified=True)
 
     def test_a_confirmed_finding_still_fails(self):
         result, tr = self.result("dangerous", "confirmed")
@@ -93,6 +108,14 @@ class ManifestTests(unittest.TestCase):
             if s.kind == "benign":
                 with self.subTest(s.id):
                     self.assertTrue(s.noise)
+
+    def test_no_verdict_gaps_are_benign_and_name_their_issue(self):
+        for s in self.samples:
+            if s.no_verdict_until:
+                with self.subTest(s.id):
+                    self.assertEqual(s.kind, "benign")
+                    self.assertRegex(s.no_verdict_until, r"agent-guard#\d+")
+                    self.assertFalse(s.open)
 
     def test_open_rules_are_noise_and_name_the_issue_that_closes_them(self):
         for s in self.samples:
@@ -142,6 +165,12 @@ class CorpusAcceptanceTests(unittest.TestCase):
         self.assertEqual(set(self.fetched), set(self.samples))
 
     def test_static_triage_meets_every_expectation(self):
+        # The scan runs --no-llm on purpose, so the explicit static-only policy
+        # applies; without it a scan with no blocking finding has no verdict.
+        with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}):
+            self._static_triage_meets_every_expectation()
+
+    def _static_triage_meets_every_expectation(self):
         import contextlib
         import io
         import json
