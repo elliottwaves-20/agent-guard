@@ -26,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import _pins
 import _skills_cli as cli
 
 
@@ -93,7 +94,7 @@ def update(version: str) -> int:
         "shasum": shasum,
         "integrity": integrity,
         "source": "https://github.com/vercel-labs/skills",
-        "scanner": "guarddog npm scan (ghcr.io/datadog/guarddog:latest)",
+        "scanner": f"guarddog npm scan ({_pins.GUARDDOG_IMAGE})",
         "reviewed_on": "YYYY-MM-DD",
         "note": "REVIEW ME -- describe how this wrapper's invocation neutralises the findings below.",
         "findings": [

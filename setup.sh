@@ -98,4 +98,4 @@ echo "           hosted providers (anthropic/openai/nv_build/...) work with a ke
 echo "           Optional: set VIRUSTOTAL_API_KEY for binary/archive malware reputation checks"
 echo "           CLI-tool scans (scan_cli.py npm/pypi/go) use Datadog GuardDog:"
 echo "           native 'guarddog' on PATH if present, else the official Docker"
-echo "           image ghcr.io/datadog/guarddog (pulled lazily on first scan)"
+echo "           image ghcr.io/datadog/guarddog (pinned by digest, pulled on first scan)"

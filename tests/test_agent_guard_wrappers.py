@@ -3196,11 +3196,43 @@ class ScanCliRouterTests(unittest.TestCase):
             cmd = self.scan_cli.guarddog_command("npm", "left-pad")
         finally:
             self.scan_cli.shutil.which = original
-        # --pull=always: a cached :latest image would keep old rules forever.
-        self.assertEqual(cmd[:5], ["docker", "run", "--rm", "--pull=always",
-                                   self.scan_cli.GUARDDOG_IMAGE])
-        self.assertEqual(cmd[5:], ["npm", "scan", "left-pad",
+        # The image is pinned by digest; Docker pulls a
+        # missing digest itself and an unavailable one ends in no report.
+        import _pins
+        self.assertEqual(cmd[:4], ["docker", "run", "--rm", _pins.GUARDDOG_IMAGE])
+        self.assertNotIn("--pull=always", cmd)
+        self.assertEqual(cmd[4:], ["npm", "scan", "left-pad",
                                    "--output-format", "json"])
+
+    def test_scanner_images_come_only_from_the_pins(self):
+        import _pins
+        self.assertEqual(self.scan_cli.GUARDDOG_IMAGE, _pins.GUARDDOG_IMAGE)
+        self.assertEqual(self.scan_cli.MALCONTENT_IMAGE, _pins.MALCONTENT_IMAGE)
+        source = (Path(self.scan_cli.__file__)).read_text(encoding="utf-8")
+        self.assertNotIn("AGENT_GUARD_GUARDDOG_IMAGE", source)
+        self.assertNotIn("AGENT_GUARD_MALCONTENT_IMAGE", source)
+
+    def test_malcontent_runs_the_pinned_digest(self):
+        import _pins
+        seen = {}
+        original_which = self.scan_cli.shutil.which
+        original_run = self.scan_cli.run_bounded
+
+        def fake_run(cmd, timeout):
+            import subprocess
+            seen["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        try:
+            self.scan_cli.shutil.which = lambda name: "docker"
+            self.scan_cli.run_bounded = fake_run
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = self.scan_cli.run_malcontent(Path("/tmp/tool.bin"))
+        finally:
+            self.scan_cli.shutil.which = original_which
+            self.scan_cli.run_bounded = original_run
+        self.assertEqual(rc, 2)  # no JSON report -> no verdict
+        self.assertIn(_pins.MALCONTENT_IMAGE, seen["cmd"])
+        self.assertNotIn("--pull=always", seen["cmd"])
 
     def test_guarddog_command_dies_without_guarddog_or_docker(self):
         original = self.scan_cli.shutil.which

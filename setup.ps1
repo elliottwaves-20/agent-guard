@@ -84,5 +84,5 @@ Write-Host "           SkillSpector LLM: defaults to your coding-agent CLI (clau
 Write-Host "           hosted providers (anthropic/openai/nv_build/...) work with a key. MCP_SCANNER_LLM_* for Cisco runtime scans."
 Write-Host "           Optional: set VIRUSTOTAL_API_KEY for binary/archive malware reputation checks"
 Write-Host "           CLI-tool scans (scan_cli.py npm/pypi/go) use Datadog GuardDog via the"
-Write-Host "           official Docker image ghcr.io/datadog/guarddog (pulled lazily on first"
-Write-Host "           scan; Docker is GuardDog's only supported install on Windows)"
+Write-Host "           official Docker image ghcr.io/datadog/guarddog (pinned by digest in scripts/_pins.py,"
+Write-Host "           pulled on first scan; Docker is GuardDog's only supported install on Windows)"

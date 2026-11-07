@@ -414,9 +414,9 @@ Notes the agent must respect:
 
 - **Never run an installer script or binary before its scan.** `script` and
   `binary` download the artifact but never execute it.
-- GuardDog needs Docker on Windows (official image is pulled fresh on every
-  run with `--pull=always`; offline gives NO VERDICT; Docker Desktop must be
-  running). On Linux/macOS a native `guarddog` on PATH
+- GuardDog needs Docker on Windows (official image pinned by digest in
+  `scripts/_pins.py`; a missing image that cannot be pulled gives NO VERDICT;
+  Docker Desktop must be running). On Linux/macOS a native `guarddog` on PATH
   is used first.
 - `npm` / `pypi` also run the dynamic install analysis (OpenSSF
   package-analysis, same rules as MCP Stage 1b); the worst stage decides.
@@ -436,7 +436,9 @@ Notes the agent must respect:
   A known-and-clean hash can still be a targeted payload that no engine
   detects yet, so tell the user it is weak evidence, and prefer signed
   releases of well-known projects. The `--deep` malcontent image is also
-  pulled fresh on every run (`--pull=always`); offline gives NO VERDICT.
+  pinned by digest; a missing image that cannot be pulled gives NO VERDICT.
+  `scripts/check_image_pins.py` reports newer scanner releases; bumping a
+  pin is a manual, reviewed step.
 - cargo runs GuardDog's `crates` scan (needs Docker on Windows) plus a
   SkillSpector static scan of the crate source; the worse verdict wins.
   GuardDog's crates rules are newer and thinner than npm/PyPI — still recommend

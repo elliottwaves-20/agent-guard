@@ -29,3 +29,24 @@ tags sit on a separate branch without #855/#856, so the pin stays on main.
 SKILLSPECTOR_VERSION = "2.12.0"
 SKILLSPECTOR_REPO = "https://github.com/NVIDIA/SkillSpector"
 SKILLSPECTOR_SHA = "6d0b7c849949cab9181e57798247f89e48ce5d6a"
+
+# Scanner images, pinned by digest. Docker runs the
+# digest; the tag only keeps the line readable. GuardDog and malcontent carry
+# their rules inside the image and fetch no signatures at run time, so a newer
+# rule set only arrives with a new release. Never fall back to a moving tag:
+# an unavailable digest ends in no verdict. Bump by hand once a newer release
+# is at least 7 days old and the offline suite is green;
+# scripts/check_image_pins.py reports newer releases and finds candidates.
+#
+# GuardDog 3.2.0 (released 2026-08-12): ghcr.io/datadog/guarddog:3.2.0, the
+# build of DataDog's tag-release.yml that also carries :v3 and :latest.
+GUARDDOG_VERSION = "3.2.0"
+GUARDDOG_IMAGE = ("ghcr.io/datadog/guarddog:3.2.0@sha256:"
+                  "3dbc783f65f508b95222101cb2cd84d1d5f3e3675e42d6f1329bb9b8a99c8998")
+# malcontent 1.28.0-r0 (released 2026-10-27): Chainguard's free registry only
+# serves the daily rebuilt :latest, so the pin is one build of it (2026-10-28
+# 20:49 UTC, the minimal variant without a shell), as picked by
+# `check_image_pins.py --malcontent-candidate 1.28.0` on 2026-11-07.
+MALCONTENT_VERSION = "1.28.0"
+MALCONTENT_IMAGE = ("cgr.dev/chainguard/malcontent:latest@sha256:"
+                    "e78ef39008129f3211dc21bf40fd0add5955ff3f045ee671e62dc3a250bf3855")

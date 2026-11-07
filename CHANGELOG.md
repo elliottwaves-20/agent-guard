@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Security
+
+- GuardDog and malcontent images are pinned by digest (GuardDog 3.2.0,
+  malcontent 1.28.0) instead of `:latest` with `--pull=always`. A changed
+  upstream image no longer runs in the scan gate unreviewed; an unavailable
+  digest gives no verdict. The undocumented overrides
+  `AGENT_GUARD_GUARDDOG_IMAGE` / `AGENT_GUARD_MALCONTENT_IMAGE` are gone.
+- New `scripts/check_image_pins.py` reports newer GuardDog and malcontent
+  releases and when the 7-day wait allows pinning them, and finds the
+  malcontent build to pin.
+
 ### Changed
 
 - SkillSpector is pinned to NVIDIA main `6d0b7c8` (still reports 2.12.0).
