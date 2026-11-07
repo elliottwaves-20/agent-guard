@@ -43,9 +43,6 @@ HARD, CLEARED, OPEN, CONFIRMED = "hard", "cleared", "open", "confirmed"
 # decoded-payload execution, obfuscated code, credentials flowing to the network,
 # hooks that send local content to a remote host.
 HARD_RULES = frozenset({"YR1", "YR2", "YR3", "YR4", "AST8", "SC3", "TT3", "BH2"})
-YARA_RULES = frozenset({"YR1", "YR2", "YR3", "YR4"})
-YARA_NAME = re.compile(r"YARA rule '([^']+)'")
-YARA_NAMESPACE = re.compile(r"\[([^\[\]]+)\]\s*$")
 # Findings that show data leaving the machine; any of them (or hard evidence) in
 # a file blocks every catalog check for the other findings in that file.
 EXFIL_RULES = frozenset({"E1", "E2", "E3", "E4", "E5", "P3", "TT1", "TT2", "TT3", "TT4", "BH2"})
@@ -130,18 +127,6 @@ class Finding:
     def coverage_target(self) -> str:
         """AE1: the referenced file that was not completely inspected."""
         return str((self.raw.get("evidence") or {}).get("target_path") or "")
-
-    @property
-    def yara_rule(self) -> str:
-        """YR*: name of the built-in YARA rule that matched, from the report's pattern."""
-        match = YARA_NAME.match(str(self.raw.get("pattern") or ""))
-        return match.group(1) if match else ""
-
-    @property
-    def yara_namespace(self) -> str:
-        """YR*: namespace of the matched rule; SkillSpector appends ' [ns]' unless 'default'."""
-        match = YARA_NAMESPACE.search(str(self.raw.get("pattern") or ""))
-        return match.group(1) if match else "default"
 
     def only_parse_limit(self) -> bool:
         """AE1 whose every reason is the shell parser giving up: the file was read."""
@@ -458,36 +443,14 @@ def coverage_gaps(report: dict, findings: list) -> list:
     return out
 
 
-def recheck_yara(findings: list, skill_dir: Path, yara, version: str) -> set:
-    """ids of YARA findings that only an imprecise built-in pattern produced:
-    the built-in rule matches the file, its corrected version does not."""
-    if yara is None or getattr(yara, "skillspector", None) != version:
-        return set()
-    wanted = [f for f in findings if f.rule in YARA_RULES and f.yara_rule and f.file]
-    if not wanted:
-        return set()
-    try:
-        answers = yara(Path(skill_dir), [(f.yara_rule, f.yara_namespace, f.file) for f in wanted])
-    except Exception as exc:  # a failed recheck leaves the findings hard
-        print(f"[WARN] YARA recheck failed ({type(exc).__name__}: {exc}); "
-              "the findings stay hard evidence.", file=sys.stderr)
-        return set()
-    if not isinstance(answers, dict):
-        return set()
-    return {id(f) for f in wanted
-            if answers.get((f.yara_rule, f.yara_namespace, f.file)) is True}
-
-
 def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | None = None,
            catalog: dict | None = None, approved: frozenset = frozenset(),
-           verifier=None, spans=None, yara=None, require_llm: bool = False) -> Result:
+           verifier=None, spans=None, require_llm: bool = False) -> Result:
     """Judge a SkillSpector report. `raw_code` is verdict_skillspector's exit code;
     `approved` holds SHA-256 hashes of files a person already approved;
     `verifier(open_dispositions, skill_dir) -> answers` is stage d (optional);
     `spans(skill_dir, [rel, ...]) -> {rel: [(start, end), ...] | None}` locates
     the lines behind parser-limit AE1 findings (_parse_spans.py, optional);
-    `yara(skill_dir, [(rule, namespace, rel), ...]) -> {(rule, namespace, rel): bool|None}`
-    rechecks YARA matches with corrected rules (_yara_recheck.py, optional);
     `require_llm` withholds SAFE from a report whose AI analysis did not run."""
     if raw_code not in (0, 1):
         return Result(NO_VERDICT, [])
@@ -496,11 +459,8 @@ def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | Non
     entries = catalog.get("entry", []) if version == catalog.get("skillspector") else []
     findings = [Finding.from_issue(i) for i in report.get("issues") or []]
     findings += coverage_gaps(report, findings)
-    corrected = recheck_yara(findings, skill_dir, yara, version)
     exfil_files = set()
     for f in findings:
-        if id(f) in corrected:
-            continue
         if f.rule in EXFIL_RULES or f.rule in HARD_RULES:
             exfil_files.update(norm_path(p) for p in (f.file, f.evidence_file) if p)
     locate_spans(findings, skill_dir, spans)
@@ -508,13 +468,7 @@ def triage(report: dict, skill_dir: Path, raw_code: int, *, origin: Origin | Non
     out = []
     for f in findings:
         if f.rule in HARD_RULES:
-            if id(f) in corrected:
-                out.append(Disposition(f, CLEARED, "yara-correction",
-                                       f"only an imprecise pattern of the scanner's YARA rule "
-                                       f"{f.yara_rule} matched; the corrected rule does not "
-                                       f"match {f.file}"))
-            else:
-                out.append(Disposition(f, HARD, None, "hard evidence"))
+            out.append(Disposition(f, HARD, None, "hard evidence"))
             continue
         if f.severity not in BLOCKING:
             continue

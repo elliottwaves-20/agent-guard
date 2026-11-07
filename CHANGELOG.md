@@ -15,6 +15,10 @@
 
 ### Changed
 
+- agent-guard no longer rechecks YARA matches with its own corrected rules
+  (`_yara_recheck.py`, `scripts/triage/yara_corrections.*`). Its only
+  correction, for `info_stealer`, is upstream since #752 and was bound to the
+  old rule text, so it no longer applied. Every YARA match is hard evidence.
 - SkillSpector is pinned to NVIDIA main `6d0b7c8` (still reports 2.12.0).
   It adds #752 (the upstream `info_stealer` rule needs a browser cookie-store
   path, so agent-guard's corrected copy of that rule no longer applies),

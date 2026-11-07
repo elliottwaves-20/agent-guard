@@ -148,7 +148,6 @@ class CorpusAcceptanceTests(unittest.TestCase):
         import subprocess
         import _skillspector as ss
         import _parse_spans
-        import _yara_recheck
         import _triage
         ss.need_skillspector()
         for sid, path in sorted(self.fetched.items()):
@@ -166,8 +165,7 @@ class CorpusAcceptanceTests(unittest.TestCase):
                     raw = ss.verdict_skillspector(out, done.returncode)
                 result = _triage.triage(json.loads(out.read_text(encoding="utf-8")), path, raw,
                                         origin=_triage.Origin(sample.source, sample.ref),
-                                        spans=_parse_spans.from_skillspector(),
-                                        yara=_yara_recheck.from_skillspector())
+                                        spans=_parse_spans.from_skillspector())
                 assert_meets_expectation(self, sample, result, _triage)
 
 
@@ -184,7 +182,6 @@ class LiveCorpusAcceptanceTests(unittest.TestCase):
         from unittest.mock import patch as patch_env
         import _skillspector as ss
         import _parse_spans
-        import _yara_recheck
         import _triage
         import _verifier
         from test_llm_integration import live_selection
@@ -206,8 +203,7 @@ class LiveCorpusAcceptanceTests(unittest.TestCase):
                         self.assertEqual(ss.llm_run_incomplete(data, expected=True), "")
                         result = _triage.triage(data, path, raw, verifier=verifier,
                                                 origin=_triage.Origin(sample.source, sample.ref),
-                                                spans=_parse_spans.from_skillspector(),
-                                                yara=_yara_recheck.from_skillspector())
+                                                spans=_parse_spans.from_skillspector())
                         assert_meets_expectation(self, sample, result, _triage, verified=True)
             finally:
                 importlib.reload(ss)
