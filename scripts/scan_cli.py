@@ -64,6 +64,7 @@ import urllib.request
 from pathlib import Path
 
 import _dynamic
+import _pins
 from _skillspector import (
     SCAN_TIMEOUT,
     combine_verdicts,
@@ -75,10 +76,9 @@ from _skillspector import (
 from _url_resolver import safe_basename
 from scan_mcp import http_bytes, http_json, run_virustotal, safe_extract_tar
 
-GUARDDOG_IMAGE = os.environ.get(
-    "AGENT_GUARD_GUARDDOG_IMAGE", "ghcr.io/datadog/guarddog:latest")
-MALCONTENT_IMAGE = os.environ.get(
-    "AGENT_GUARD_MALCONTENT_IMAGE", "cgr.dev/chainguard/malcontent:latest")
+# Pinned by digest in _pins.py; no override, so an unpinned image never runs.
+GUARDDOG_IMAGE = _pins.GUARDDOG_IMAGE
+MALCONTENT_IMAGE = _pins.MALCONTENT_IMAGE
 
 # Cap a single downloaded artifact; a "release binary" larger than this is
 # almost never a CLI tool and would blow past VirusTotal's usefulness anyway.
@@ -164,10 +164,9 @@ def guarddog_command(ecosystem: str, package: str, version: str = None) -> list:
         die("GuardDog is not on PATH and Docker was not found. On Windows, "
             "GuardDog only runs via Docker -- start Docker Desktop, or install "
             "GuardDog natively (Linux/macOS: pipx install guarddog).")
-    # --pull=always: `docker run` reuses a cached :latest image forever, so the
-    # heuristics would freeze at the first pull. Offline, the pull fails and the
-    # run produces no report -> NO VERDICT.
-    return ["docker", "run", "--rm", "--pull=always", GUARDDOG_IMAGE] + args
+    # Pinned digest: Docker pulls it once if missing. If it cannot be pulled
+    # (offline, removed upstream) the run produces no report -> NO VERDICT.
+    return ["docker", "run", "--rm", GUARDDOG_IMAGE] + args
 
 
 # GuardDog 3.0 ships two kinds of rules. `capability-*` rules are transparency
@@ -272,7 +271,7 @@ def run_guarddog(ecosystem: str, spec: str) -> int:
     shown = version or "latest"
     print(f"  GuardDog scan ({ecosystem}): {package} {shown}")
     if cmd[0] == "docker":
-        print(f"  via Docker image {GUARDDOG_IMAGE} (pulled fresh on every run)")
+        print(f"  via Docker image {GUARDDOG_IMAGE} (pinned digest)")
     try:
         r = run_bounded(cmd, timeout=SCAN_TIMEOUT)
     except subprocess.TimeoutExpired:
@@ -345,7 +344,7 @@ def run_malcontent(path: Path) -> int:
     print(f"  malcontent capability scan via {MALCONTENT_IMAGE}")
     print("  NOTE: malcontent's Windows PE analysis is weaker than ELF -- "
           "treat a clean result on .exe files with extra care.")
-    cmd = ["docker", "run", "--rm", "--pull=always",
+    cmd = ["docker", "run", "--rm",
            "-v", f"{path.parent}:/scan:ro",
            MALCONTENT_IMAGE,
            "--format=json", "analyze", f"/scan/{path.name}"]

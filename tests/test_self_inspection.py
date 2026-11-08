@@ -42,10 +42,11 @@ class SelfInspectionTests(unittest.TestCase):
         if report.exists():
             report.unlink()
         cmd = ss.skillspector_command() + ["scan", str(tree), "--no-llm",
-                                           "--format", "json", "--output", str(report)]
+                                           "--format", "json"]
         result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                                 errors="replace", env=ss.skillspector_env(), timeout=900)
-        self.assertTrue(report.is_file(), result.stderr[-2000:])
+        self.assertTrue(result.stdout.strip(), result.stderr[-2000:])
+        report.write_text(result.stdout, encoding="utf-8")
         return json.loads(report.read_text(encoding="utf-8"))["analysis_completeness"]
 
     def test_own_tree_is_fully_inspected(self):

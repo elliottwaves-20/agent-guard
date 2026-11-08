@@ -664,89 +664,27 @@ def yara_issue(rule_name="info_stealer", file="SKILL.md", line=3, namespace="mal
     return item
 
 
-class FakeRecheck:
-    skillspector = VERSION
+class YaraTests(unittest.TestCase):
+    """A YARA match is always hard evidence: the built-in rules are not
+    rechecked or corrected (the correction mechanism was removed with #752)."""
 
-    def __init__(self, answer):
-        self.answer, self.asked = answer, []
-
-    def __call__(self, skill_dir, checks):
-        self.asked.append(sorted(checks))
-        # Mirrors the real Rechecker: only the corrected rule's namespace is rechecked.
-        return {c: self.answer if c[1] == "malware" else None for c in checks}
-
-
-class YaraCorrectionTests(unittest.TestCase):
-    """YARA stays hard evidence unless the corrected rule no longer matches."""
-
-    def judge(self, answer, *extra, recheck=None, **kw):
-        # Split so this file does not match the imprecise rule it tests.
-        skill = Skill(self, {"SKILL.md": "---\ndescription: cook" "ies and Edge\n---\n"})
-        self.recheck = recheck or FakeRecheck(answer)
-        return skill.judge(report(yara_issue(), *extra, **kw), yara=self.recheck)
-
-    def test_imprecise_match_is_cleared(self):
-        result = self.judge(True)
-        self.assertEqual(result.verdict, t.SAFE)
-        self.assertEqual(result.dispositions[0].check, "yara-correction")
-        self.assertEqual(self.recheck.asked, [[("info_stealer", "malware", "SKILL.md")]])
-
-    def test_same_rule_name_in_another_namespace_stays_hard(self):
-        skill = Skill(self, {"SKILL.md": "---\ndescription: cook" "ies and Edge\n---\n"})
-        recheck = FakeRecheck(True)
-        result = skill.judge(report(yara_issue(namespace="custom")), yara=recheck)
-        self.assertNotEqual(result.verdict, t.SAFE)
-        self.assertEqual(recheck.asked, [[("info_stealer", "custom", "SKILL.md")]])
-
-    def test_real_stealer_path_stays_hard(self):
-        result = self.judge(False)
+    def test_yara_match_is_hard_evidence(self):
+        skill = Skill(self, {"SKILL.md": "x\n"})
+        result = skill.judge(report(yara_issue()))
         self.assertEqual(result.verdict, t.DANGEROUS)
         self.assertEqual(result.dispositions[0].status, t.HARD)
 
-    def test_unknown_answer_stays_hard(self):
-        self.assertEqual(self.judge(None).dispositions[0].status, t.HARD)
-
-    def test_other_scanner_version_is_not_rechecked(self):
-        result = self.judge(True, version="2.13.0")
-        self.assertEqual(result.dispositions[0].status, t.HARD)
-        self.assertEqual(self.recheck.asked, [])
-
-    def test_recheck_failure_stays_hard(self):
-        class Broken(FakeRecheck):
-            def __call__(self, skill_dir, checks):
-                raise RuntimeError("boom")
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            result = self.judge(None, recheck=Broken(None))
-        self.assertEqual(result.dispositions[0].status, t.HARD)
-        self.assertIn("[WARN]", err.getvalue())
-        self.assertIn("boom", err.getvalue())
-
-    def test_without_rechecker_stays_hard(self):
-        skill = Skill(self, {"SKILL.md": "x\n"})
-        self.assertEqual(skill.judge(report(yara_issue())).verdict, t.DANGEROUS)
-
-    def test_cleared_yara_does_not_mark_file_as_exfil(self):
-        # A TP4 in the same file may still be cleared by its catalog check.
-        tp4 = issue("TP4", file="SKILL.md", line=2, evidence=("SKILL.md", 2, 2))
-        self.assertEqual(self.judge(True, tp4).verdict, t.SAFE)
-
     def test_hard_yara_still_blocks_catalog_checks_in_same_file(self):
+        skill = Skill(self, {"SKILL.md": "x\n"})
         tp4 = issue("TP4", file="SKILL.md", line=2, evidence=("SKILL.md", 2, 2))
-        result = self.judge(False, tp4)
+        result = skill.judge(report(yara_issue(), tp4))
         tp4_disp = [d for d in result.dispositions if d.finding.rule == "TP4"][0]
         self.assertEqual(tp4_disp.status, t.OPEN)
 
-    def test_yara_rule_name_is_parsed(self):
-        f = t.Finding.from_issue(yara_issue("reverse_shell"))
-        self.assertEqual(f.yara_rule, "reverse_shell")
-        self.assertEqual(t.Finding.from_issue(issue("YR1")).yara_rule, "")
-
-    def test_yara_namespace_is_parsed(self):
-        self.assertEqual(t.Finding.from_issue(yara_issue()).yara_namespace, "malware")
-        self.assertEqual(t.Finding.from_issue(yara_issue(namespace="default")).yara_namespace,
-                         "default")
-        self.assertEqual(t.Finding.from_issue(issue("YR1")).yara_namespace, "default")
-
+    def test_triage_has_no_yara_recheck_hook(self):
+        import inspect
+        self.assertNotIn("yara", inspect.signature(t.triage).parameters)
+        self.assertFalse(hasattr(t, "recheck_yara"))
 
 if __name__ == "__main__":
     unittest.main()

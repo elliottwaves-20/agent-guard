@@ -2,7 +2,42 @@
 
 ## Unreleased
 
+### Security
+
+- GuardDog and malcontent images are pinned by digest (GuardDog 3.2.0,
+  malcontent 1.28.0) instead of `:latest` with `--pull=always`. A changed
+  upstream image no longer runs in the scan gate unreviewed; an unavailable
+  digest gives no verdict. The undocumented overrides
+  `AGENT_GUARD_GUARDDOG_IMAGE` / `AGENT_GUARD_MALCONTENT_IMAGE` are gone.
+- New `scripts/check_image_pins.py` reports newer GuardDog and malcontent
+  releases and when the 7-day wait allows pinning them, and finds the
+  malcontent build to pin.
+
+### Changed
+
+- agent-guard no longer rechecks YARA matches with its own corrected rules
+  (`_yara_recheck.py`, `scripts/triage/yara_corrections.*`). Its only
+  correction, for `info_stealer`, is upstream since #752 and was bound to the
+  old rule text, so it no longer applied. Every YARA match is hard evidence.
+- SkillSpector is pinned to NVIDIA main `6d0b7c8` (still reports 2.12.0).
+  It adds #752 (the upstream `info_stealer` rule needs a browser cookie-store
+  path, so agent-guard's corrected copy of that rule no longer applies),
+  #801 and #902 (JavaScript template literals and backticks or apostrophes in
+  comments no longer cause false parser limits), #947, #952, #955, #957, #855 (CLI prompts stay under the input cap when large files are
+  batched, so big skills such as REA get a complete LLM pass), #856, #882,
+  #872, #929 and #949 (a local matcher timeout marks only that file partial
+  instead of every later one).
+  The 2.13.x release tags sit on a separate branch without these fixes.
+
 ### Fixed
+
+- SkillSpector scans work on Windows again with the new pin. Since NVIDIA
+  #798 SkillSpector refuses `--output` where it cannot open no-follow
+  directory descriptors, which includes Windows. agent-guard now reads the
+  JSON report from stdout on every platform; anything on stdout other than
+  exactly one JSON object is still NO VERDICT, and the start of what came
+  instead is shown (control characters escaped, each line quoted). The
+  README's baseline example now uses `--output -`.
 
 - The dynamic stage no longer blocks every npm and PyPI package with
   "connection to 8.8.8.8:53". The pinned OpenSSF image hard-codes

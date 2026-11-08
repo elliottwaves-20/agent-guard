@@ -20,6 +20,18 @@ class PinTests(unittest.TestCase):
                 self.assertIn(f'"{_pins.SKILLSPECTOR_SHA}"', text)
                 self.assertIn(f"# v{_pins.SKILLSPECTOR_VERSION}", text)
 
+    def test_scanner_images_are_pinned_by_digest(self):
+        # tag@digest: Docker runs the digest; the tag only keeps it readable.
+        import re
+        pattern = re.compile(r"^[a-z0-9.\-/]+:[\w.\-]+@sha256:[0-9a-f]{64}$")
+        for image in (_pins.GUARDDOG_IMAGE, _pins.MALCONTENT_IMAGE):
+            with self.subTest(image=image):
+                self.assertRegex(image, pattern)
+
+    def test_guarddog_image_tag_is_the_pinned_version(self):
+        tag = _pins.GUARDDOG_IMAGE.split("@", 1)[0].rsplit(":", 1)[1]
+        self.assertEqual(tag, _pins.GUARDDOG_VERSION)
+
 
 @unittest.skipUnless(os.environ.get("AGENT_GUARD_INTEGRATION") == "1",
                      "set AGENT_GUARD_INTEGRATION=1 to verify the pin on GitHub")

@@ -1,7 +1,7 @@
 """Full chain on the benign holdout: LLM scan, triage, span locator, verifier.
 
   python tests/run_benign_eval.py            # resumable; results outside the repo
-  python tests/run_benign_eval.py --only NAME --tag=-recheck   # re-scan for cause analysis
+  python tests/run_benign_eval.py --only NAME --tag=-rescan   # re-scan for cause analysis
 Writes %LOCALAPPDATA%/agent-guard-eval/benign-holdout<tag>.jsonl, every full scan
 report and the wrapper's console output under reports/, and prints the summary.
 """
@@ -50,7 +50,7 @@ def main() -> None:
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", action="append", default=[], help="scan only this skill (repeatable)")
-    ap.add_argument("--tag", default="", help="suffix of the results file, e.g. -recheck")
+    ap.add_argument("--tag", default="", help="suffix of the results file, e.g. -rescan")
     args = ap.parse_args()
     import _corpus
     import _eval
@@ -58,12 +58,10 @@ def main() -> None:
     import _skillspector as ss
     import _triage
     import _verifier
-    import _yara_recheck
     ss.need_skillspector()
     if not ss.LLM_READY:
         sys.exit(f"LLM not ready: {ss.LLM_REASON}")
     verifier, spans = _verifier.from_setup(), _parse_spans.from_skillspector()
-    yara = _yara_recheck.from_skillspector()
     if verifier is None:
         sys.exit("no verifier (LLM not ready or provider refused)")
     samples = [s for s in _eval.load() if not args.only or s.id in args.only]
@@ -95,7 +93,7 @@ def main() -> None:
                                  if "NO VERDICT" in l or "LIMIT" in l][:6])
             else:
                 result = _triage.triage(data, path, raw, origin=_triage.Origin(s.source, s.ref),
-                                        verifier=verifier, spans=spans, yara=yara)
+                                        verifier=verifier, spans=spans)
                 row.update(verdict=result.verdict,
                            open=[{"rule": d.finding.rule, "status": d.status,
                                   "file": d.finding.evidence_file or d.finding.file,

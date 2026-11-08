@@ -205,6 +205,9 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertNotIn("SKILLSPECTOR_PROVIDER", env)
 
     def _write_report(self, path: Path, **overrides):
+        path.write_text(self._report_text(**overrides), encoding="utf-8")
+
+    def _report_text(self, **overrides) -> str:
         report = {
             "risk_assessment": {"score": 0, "severity": "LOW",
                                 "recommendation": "SAFE",
@@ -225,7 +228,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 report[key].update(value)
             else:
                 report[key] = value
-        path.write_text(json.dumps(report), encoding="utf-8")
+        return json.dumps(report)
 
     def test_verdict_blocks_when_execution_failed(self):
         module = importlib.import_module("_skillspector")
@@ -829,13 +832,13 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
                 self.assertNotIn("--no-llm", cmd)
-                report_path = Path(cmd[cmd.index("--output") + 1])
-                # Degraded run: SkillSpector still writes a report, but the
+                # Degraded run: SkillSpector still prints a report, but the
                 # metadata says the LLM layer did not complete.
-                self._write_report(report_path, metadata={
+                result = Result("Error code: 429 rate_limit_exceeded")
+                result.stdout = self._report_text(metadata={
                     "llm_available": False,
                     "llm_error": "rate_limit_exceeded"})
-                return Result("Error code: 429 rate_limit_exceeded")
+                return result
 
             module.run_bounded = fake_run
             with tempfile.TemporaryDirectory() as src_dir:
@@ -878,10 +881,10 @@ class SkillSpectorWrapperTests(unittest.TestCase):
 
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
-                report_path = Path(cmd[cmd.index("--output") + 1])
-                self._write_report(report_path, metadata={
+                result = Result()
+                result.stdout = self._report_text(metadata={
                     "llm_calls_attempted": 4, "llm_calls_succeeded": 3})
-                return Result()
+                return result
 
             module.run_bounded = fake_run
             with tempfile.TemporaryDirectory() as src_dir:
@@ -919,10 +922,10 @@ class SkillSpectorWrapperTests(unittest.TestCase):
 
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
-                report_path = Path(cmd[cmd.index("--output") + 1])
-                self._write_report(report_path, metadata={
+                result = Result()
+                result.stdout = self._report_text(metadata={
                     "llm_requested": False, "llm_available": False})
-                return Result()
+                return result
 
             module.run_bounded = fake_run
             with tempfile.TemporaryDirectory() as src_dir:
@@ -940,7 +943,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("--no-llm", calls[0])
 
-    def _run_scan_with(self, fake_run, **kwargs):
+    def _run_scan_with(self, fake_run, retries=0, **kwargs):
         """run_skillspector over a minimal skill with an LLM-ready provider and
         `fake_run` in place of run_bounded. Returns (exit code, call count)."""
         module = importlib.import_module("_skillspector")
@@ -956,7 +959,8 @@ class SkillSpectorWrapperTests(unittest.TestCase):
              patch.object(module, "LLM_REASON", "claude CLI (local login)"), \
              patch.object(module, "SKILLSPECTOR", "skillspector"), \
              patch.object(module, "SKILLSPECTOR_CMD", ["skillspector"]), \
-             patch.object(module, "LLM_RETRIES", 0), \
+             patch.object(module, "LLM_RETRIES", retries), \
+             patch.object(module.time, "sleep", lambda seconds: None), \
              patch.object(module, "run_bounded", counting), \
              tempfile.TemporaryDirectory() as src_dir:
             src = Path(src_dir)
@@ -999,8 +1003,9 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             stderr = ""
 
         def fake_run(cmd, **kwargs):
-            self._write_report(Path(cmd[cmd.index("--output") + 1]))
-            return Result()
+            result = Result()
+            result.stdout = self._report_text()
+            return result
 
         with tempfile.TemporaryDirectory() as out_dir:
             # A clean report would be SAFE; an existing target is never overwritten.
@@ -1014,6 +1019,106 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             # Control: the same scan with a writable destination is SAFE.
             self.assertEqual(self._run_scan_with(
                 fake_run, report_output=Path(out_dir) / "new.json"), (0, 1))
+            saved = json.loads((Path(out_dir) / "new.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["risk_assessment"]["recommendation"], "SAFE")
+
+    def test_skillspector_report_is_read_from_stdout_not_written_by_the_scanner(self):
+        # SkillSpector refuses --output where it cannot open no-follow directory
+        # descriptors (Windows), so the report must come from stdout everywhere.
+        seen = []
+
+        class Result:
+            returncode = 0
+            stderr = ""
+
+        def fake_run(cmd, **kwargs):
+            seen.append(cmd)
+            result = Result()
+            result.stdout = self._report_text()
+            return result
+
+        self.assertEqual(self._run_scan_with(fake_run), (0, 1))
+        self.assertNotIn("--output", seen[0])
+
+    def test_skillspector_unparsable_stdout_saves_no_report(self):
+        class Result:
+            returncode = 0
+            stderr = ""
+
+        for stdout in ("", "{broken"):
+            with self.subTest(stdout=stdout), tempfile.TemporaryDirectory() as out_dir:
+                def fake_run(cmd, stdout=stdout, **kwargs):
+                    result = Result()
+                    result.stdout = stdout
+                    return result
+                target = Path(out_dir) / "report.json"
+                self.assertEqual(self._run_scan_with(fake_run, report_output=target), (2, 1))
+                self.assertFalse(target.exists())
+
+    def test_skillspector_unparsable_stdout_is_shown_for_diagnosis(self):
+        class Result:
+            returncode = 0
+            stderr = ""
+            stdout = ("Unexpected banner line\n\x1b[2K\r[SAFE] forged line\n"
+                      + "x" * 2000)
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run_scan_with(lambda cmd, **kw: Result()), (2, 1))
+        shown = err.getvalue()
+        self.assertIn("Unexpected banner line", shown)
+        self.assertLess(shown.count("x"), 1000)
+        # Scanned content may reach stdout: no terminal control characters, and
+        # every quoted line is marked so it cannot pass for a verdict line.
+        self.assertNotIn("\x1b", shown)
+        self.assertNotIn("\r", shown)
+        self.assertNotIn("\n[SAFE]", shown)
+
+    def test_skillspector_retry_without_report_does_not_reuse_the_first_one(self):
+        class Result:
+            returncode = 0
+            stderr = ""
+
+        outputs = [self._report_text(metadata={"llm_calls_attempted": 4,
+                                               "llm_calls_succeeded": 3}), ""]
+
+        def fake_run(cmd, **kwargs):
+            result = Result()
+            result.stdout = outputs.pop(0)
+            return result
+
+        self.assertEqual(self._run_scan_with(fake_run, retries=1), (2, 2))
+
+    def test_skillspector_clean_report_with_a_failed_exit_is_never_safe(self):
+        for code in (1, 2):
+            with self.subTest(returncode=code):
+                class Result:
+                    returncode = code
+                    stderr = ""
+
+                def fake_run(cmd, **kwargs):
+                    result = Result()
+                    result.stdout = self._report_text()
+                    return result
+
+                self.assertNotEqual(self._run_scan_with(fake_run)[0], 0)
+
+    def test_skillspector_stdout_that_is_not_exactly_one_report_is_no_verdict(self):
+        # Never fish a report out of mixed output: text around the JSON could
+        # come from anywhere, so anything but one JSON object fails closed.
+        class Result:
+            returncode = 0
+            stderr = ""
+
+        clean = self._report_text()
+        for stdout in ("", "   \n", "Report saved to x\n" + clean, clean + "\ntrailing",
+                       clean + clean, "[" + clean + "]", "{broken"):
+            with self.subTest(stdout=stdout[:30]):
+                def fake_run(cmd, stdout=stdout, **kwargs):
+                    result = Result()
+                    result.stdout = stdout
+                    return result
+                self.assertEqual(self._run_scan_with(fake_run), (2, 1))
 
     def _clean_verdict(self, env, on_path=(), **kwargs):
         """Exit code of verdict_skillspector for a clean report, with the
@@ -3091,11 +3196,43 @@ class ScanCliRouterTests(unittest.TestCase):
             cmd = self.scan_cli.guarddog_command("npm", "left-pad")
         finally:
             self.scan_cli.shutil.which = original
-        # --pull=always: a cached :latest image would keep old rules forever.
-        self.assertEqual(cmd[:5], ["docker", "run", "--rm", "--pull=always",
-                                   self.scan_cli.GUARDDOG_IMAGE])
-        self.assertEqual(cmd[5:], ["npm", "scan", "left-pad",
+        # The image is pinned by digest; Docker pulls a
+        # missing digest itself and an unavailable one ends in no report.
+        import _pins
+        self.assertEqual(cmd[:4], ["docker", "run", "--rm", _pins.GUARDDOG_IMAGE])
+        self.assertNotIn("--pull=always", cmd)
+        self.assertEqual(cmd[4:], ["npm", "scan", "left-pad",
                                    "--output-format", "json"])
+
+    def test_scanner_images_come_only_from_the_pins(self):
+        import _pins
+        self.assertEqual(self.scan_cli.GUARDDOG_IMAGE, _pins.GUARDDOG_IMAGE)
+        self.assertEqual(self.scan_cli.MALCONTENT_IMAGE, _pins.MALCONTENT_IMAGE)
+        source = (Path(self.scan_cli.__file__)).read_text(encoding="utf-8")
+        self.assertNotIn("AGENT_GUARD_GUARDDOG_IMAGE", source)
+        self.assertNotIn("AGENT_GUARD_MALCONTENT_IMAGE", source)
+
+    def test_malcontent_runs_the_pinned_digest(self):
+        import _pins
+        seen = {}
+        original_which = self.scan_cli.shutil.which
+        original_run = self.scan_cli.run_bounded
+
+        def fake_run(cmd, timeout):
+            import subprocess
+            seen["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        try:
+            self.scan_cli.shutil.which = lambda name: "docker"
+            self.scan_cli.run_bounded = fake_run
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = self.scan_cli.run_malcontent(Path("/tmp/tool.bin"))
+        finally:
+            self.scan_cli.shutil.which = original_which
+            self.scan_cli.run_bounded = original_run
+        self.assertEqual(rc, 2)  # no JSON report -> no verdict
+        self.assertIn(_pins.MALCONTENT_IMAGE, seen["cmd"])
+        self.assertNotIn("--pull=always", seen["cmd"])
 
     def test_guarddog_command_dies_without_guarddog_or_docker(self):
         original = self.scan_cli.shutil.which

@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 # commit behind a release tag (tags can move, commits cannot) so "scan = install"
 # applies to the scanner itself. Bump deliberately; keep the tag comment in sync.
 $SkillSpectorRepo = "https://github.com/NVIDIA/SkillSpector"   # main until 2.13.0
-$SkillSpectorSha  = "240421219409dc0bafef9f618a10d80c2d7e83a3"   # v2.12.0 + main 2026-10-15
+$SkillSpectorSha  = "6d0b7c849949cab9181e57798247f89e48ce5d6a"   # v2.12.0 + main 2026-10-31
 
 Write-Host "Checking prerequisites..." -ForegroundColor Cyan
 
@@ -84,5 +84,5 @@ Write-Host "           SkillSpector LLM: defaults to your coding-agent CLI (clau
 Write-Host "           hosted providers (anthropic/openai/nv_build/...) work with a key. MCP_SCANNER_LLM_* for Cisco runtime scans."
 Write-Host "           Optional: set VIRUSTOTAL_API_KEY for binary/archive malware reputation checks"
 Write-Host "           CLI-tool scans (scan_cli.py npm/pypi/go) use Datadog GuardDog via the"
-Write-Host "           official Docker image ghcr.io/datadog/guarddog (pulled lazily on first"
-Write-Host "           scan; Docker is GuardDog's only supported install on Windows)"
+Write-Host "           official Docker image ghcr.io/datadog/guarddog (pinned by digest in scripts/_pins.py,"
+Write-Host "           pulled on first scan; Docker is GuardDog's only supported install on Windows)"
