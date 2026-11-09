@@ -697,11 +697,20 @@ version active:
   Configure `quarantine` first; without it the run reports a failure and remains
   retryable rather than creating a review item with no candidate.
 - **Fetch error:** reported, exit 2; no reviewable candidate was obtained.
+- **Own version:** a skill you maintain as your own fork is never fetched,
+  scanned or replaced; it is reported as `own-version` (exit 0). Mark a whole
+  source in `skills-origins.json` with `sources[SOURCE].paused = {"own": true,
+  "skill": NOTE, "at": DATE}`, or a single skill with `skills[NAME].own =
+  {"note": NOTE, "at": DATE}` while the rest of its source keeps updating.
+  Optional `base` (the upstream commit the fork was taken from) and `paths`
+  (the upstream paths it covers) are passed through to the report, so a
+  scheduler can flag newer upstream work for a manual comparison.
 
 Exit codes: 0 everything current or updated, 1 something waits for a decision,
 2 something could not be checked. The `--json` report lists each skill's
 status (`unchanged`, `updated`, `installed`, `blocked`, `paused`, `rejected`,
-`failed`, `no-verdict`) for a scheduler or notifier to act on.
+`failed`, `no-verdict`, `cooldown`, `own-version`) for a scheduler or notifier
+to act on.
 
 **MCP server (PyPI, isolated via uvx) — only after `scan_mcp.py` returned SAFE:**
 

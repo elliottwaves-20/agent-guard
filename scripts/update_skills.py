@@ -62,7 +62,7 @@ UNCHANGED, UPDATED, INSTALLED, WOULD_SCAN = "unchanged", "updated", "installed",
 COOLDOWN = "cooldown"   # a newer commit exists but is younger than the 7-day rule
 BLOCKED, PAUSED, REJECTED = "blocked", "paused", "rejected"
 FAILED, NO_VERDICT = "failed", "no-verdict"
-OWN = "own-version"     # source paused on purpose: we maintain our own fork, nothing to decide
+OWN = "own-version"     # our own fork (whole source or one skill): never fetched, nothing to decide
 WAITING = {BLOCKED, PAUSED}
 BROKEN = {FAILED, NO_VERDICT}
 
@@ -151,6 +151,12 @@ class Run:
         detail = extra.get("detail") or extra.get("source") or ""
         print(f"  {status:<10} {name}  {detail}".rstrip())
 
+    def report_own(self, name, source, own, note):
+        """Report an own version. `base` (the upstream commit it was taken from) and
+        `paths` (upstream paths it covers) let the caller look for newer upstream work."""
+        extra = {k: own[k] for k in ("base", "paths") if own.get(k)}
+        self.report(name, OWN, source=source, detail=note, since=own["at"], **extra)
+
     # -- one source --------------------------------------------------------
 
     def update_source(self, source: str, names: list):
@@ -160,15 +166,19 @@ class Run:
                 if self.origins["skills"][name].get("blocked"):
                     self.report_blocked(name)
                 elif paused.get("own"):
-                    self.report(name, OWN, source=source, detail=paused["skill"], since=paused["at"])
+                    self.report_own(name, source, paused, paused["skill"])
                 else:
                     self.report(name, PAUSED, source=source,
                                 detail=f"source paused since {paused['at']} ({paused['skill']} blocked)")
             return
         active = []
         for name in names:
-            if self.origins["skills"][name].get("blocked"):
+            entry = self.origins["skills"][name]
+            if entry.get("blocked"):
                 self.report_blocked(name)
+            elif entry.get("own"):
+                # Our own fork of this one skill: never fetched, scanned or replaced.
+                self.report_own(name, source, entry["own"], entry["own"]["note"])
             else:
                 active.append(name)
         if not active:

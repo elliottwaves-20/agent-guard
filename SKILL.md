@@ -95,6 +95,9 @@ Professional scanners do the work, each where it is strongest:
    version and records ACCEPTED, never SAFE. Do not accept all NO VERDICT results
    or infer approval from a known parser error, publisher, or earlier version.
    `--reject NAME` dismisses that candidate while preserving the installed one.
+   A skill kept as an own version (`skills[NAME].own`, or a whole source
+   paused with `"own": true`) is never fetched or replaced; it reports
+   `own-version` with its upstream `base`/`paths` for a manual comparison.
 3. **Scan = install.** The commit that was scanned must be the commit that
    gets installed. Always pin the commit SHA (see workflow below). If the repo
    moves between scan and install, re-scan.

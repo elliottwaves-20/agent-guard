@@ -15,6 +15,11 @@
 
 ### Changed
 
+- `update_skills.py` can keep a single skill as an own version
+  (`skills[NAME].own`) while the other skills of its source keep updating;
+  before, only a whole source could be paused as own. Own versions report
+  their upstream `base` commit and `paths`, so newer upstream work can be
+  flagged for a manual comparison instead of the fork going stale silently.
 - agent-guard no longer rechecks YARA matches with its own corrected rules
   (`_yara_recheck.py`, `scripts/triage/yara_corrections.*`). Its only
   correction, for `info_stealer`, is upstream since #752 and was bound to the
