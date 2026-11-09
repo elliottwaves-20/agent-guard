@@ -193,6 +193,44 @@ class UpdateFlowTests(unittest.TestCase):
         self.assertIn("v1", (env.inbox / "alpha" / "SKILL.md").read_text())
         self.assertEqual(json.loads(report.read_text())["skills"]["alpha"]["status"], "own-version")
 
+    def test_own_version_pause_reports_base_and_paths(self):
+        env = Env(self)
+        write_skill(env.inbox / "alpha", "v1")
+        env.origins({"alpha": "o/r"})
+        data = env.data()
+        data["sources"]["o/r"] = {"paused": {"skill": "own fork", "own": True,
+                                             "at": "2026-10-28T00:00:00+00:00",
+                                             "base": "abc123", "paths": ["skills/alpha"]}}
+        staging.save_origins(env.dist.origins, data)
+        report = env.inbox.parent / "report.json"
+        self.assertEqual(env.run("--all", "--json", str(report)), 0)
+        entry = json.loads(report.read_text())["skills"]["alpha"]
+        self.assertEqual(entry["base"], "abc123")
+        self.assertEqual(entry["paths"], ["skills/alpha"])
+
+    def test_own_version_of_one_skill_keeps_the_rest_of_the_source(self):
+        env = Env(self)
+        write_skill(env.inbox / "alpha", "v1")
+        write_skill(env.inbox / "beta", "v1")
+        env.upstream[("o/r", "alpha")] = "v2"
+        env.upstream[("o/r", "beta")] = "v2"
+        env.origins({"alpha": "o/r", "beta": "o/r"})
+        data = env.data()
+        data["skills"]["alpha"]["own"] = {"note": "own fork", "at": "2026-11-09T00:00:00+00:00",
+                                          "base": "abc123", "paths": ["skills/alpha"]}
+        staging.save_origins(env.dist.origins, data)
+        report = env.inbox.parent / "report.json"
+        self.assertEqual(env.run("--all", "--json", str(report)), 0)
+        self.assertEqual(env.scanned, ["beta"])
+        self.assertIn("v1", (env.inbox / "alpha" / "SKILL.md").read_text())
+        skills = json.loads(report.read_text())["skills"]
+        self.assertEqual(skills["alpha"]["status"], "own-version")
+        self.assertEqual(skills["alpha"]["detail"], "own fork")
+        self.assertEqual(skills["alpha"]["since"], "2026-11-09T00:00:00+00:00")
+        self.assertEqual(skills["alpha"]["base"], "abc123")
+        self.assertEqual(skills["alpha"]["paths"], ["skills/alpha"])
+        self.assertEqual(skills["beta"]["status"], "updated")
+
     def test_accept_installs_quarantined_version_and_unpauses(self):
         env = Env(self)
         write_skill(env.inbox / "alpha", "v1")
