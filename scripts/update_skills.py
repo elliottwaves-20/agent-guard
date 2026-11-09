@@ -155,7 +155,7 @@ class Run:
         """Report an own version. `base` (the upstream commit it was taken from) and
         `paths` (upstream paths it covers) let the caller look for newer upstream work."""
         extra = {k: own[k] for k in ("base", "paths") if own.get(k)}
-        self.report(name, OWN, source=source, detail=note, since=own["at"], **extra)
+        self.report(name, OWN, source=source, detail=note, since=own.get("at"), **extra)
 
     # -- one source --------------------------------------------------------
 
@@ -178,7 +178,8 @@ class Run:
                 self.report_blocked(name)
             elif entry.get("own"):
                 # Our own fork of this one skill: never fetched, scanned or replaced.
-                self.report_own(name, source, entry["own"], entry["own"]["note"])
+                own = entry["own"] if isinstance(entry["own"], dict) else {}
+                self.report_own(name, source, own, own.get("note", "own version"))
             else:
                 active.append(name)
         if not active:
