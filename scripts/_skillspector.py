@@ -106,8 +106,11 @@ SKILLSPECTOR_CMD: list | None = None   # resolved lazily by skillspector_command
 
 # Hard cap on a single scan, so a hanging scan never blocks forever.
 # (SCAN_MCP_TIMEOUT kept for backwards compatibility with the old MCP-only knob.)
+# 1200 s leaves WORKFLOW_BUDGET (cap minus 60 s) above SkillSpector's own
+# 1080 s default; with 600 s the wrapper cut that budget to 540 s and large
+# skills scanned through a CLI provider ended in "shared runtime limit reached".
 SCAN_TIMEOUT = int(os.environ.get("AGENT_GUARD_SCAN_TIMEOUT")
-                   or os.environ.get("SCAN_MCP_TIMEOUT", "600"))
+                   or os.environ.get("SCAN_MCP_TIMEOUT", "1200"))
 
 # SkillSpector >= 2.11.1 reads this deadline natively. Leave time for
 # reporting before the parent subprocess timeout.

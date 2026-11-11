@@ -15,6 +15,12 @@
 
 ### Changed
 
+- The default scan cap (`AGENT_GUARD_SCAN_TIMEOUT`) is 1200 s instead of
+  600 s. The SkillSpector workflow budget follows it (cap minus 60 s, now
+  1140 s) and no longer undercuts SkillSpector's own 1080 s default. With
+  540 s, large skills scanned through a CLI provider (OpenCode, Claude CLI)
+  regularly ended in "shared runtime limit reached" and NO VERDICT, worst in
+  scheduled runs at below-normal priority.
 - `update_skills.py` can keep a single skill as an own version
   (`skills[NAME].own`) while the other skills of its source keep updating;
   before, only a whole source could be paused as own. Own versions report
