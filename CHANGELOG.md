@@ -30,6 +30,8 @@
   (`_yara_recheck.py`, `scripts/triage/yara_corrections.*`). Its only
   correction, for `info_stealer`, is upstream since #752 and was bound to the
   old rule text, so it no longer applied. Every YARA match is hard evidence.
+- The malcontent image is pinned to a 1.28.1 build (2026-11-08 20:26 UTC)
+  instead of 1.28.0.
 - SkillSpector is pinned to NVIDIA main `e48d771` (still reports 2.12.0).
   Since `6d0b7c8` it adds #814 (command lines inside a word that spans lines
   are still checked), #848 (PowerShell host syntax no longer causes false

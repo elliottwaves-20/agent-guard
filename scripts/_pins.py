@@ -50,10 +50,12 @@ SKILLSPECTOR_SHA = "e48d771a26f7398b36256ceb8d8f94adce3d5c44"
 GUARDDOG_VERSION = "3.2.0"
 GUARDDOG_IMAGE = ("ghcr.io/datadog/guarddog:3.2.0@sha256:"
                   "3dbc783f65f508b95222101cb2cd84d1d5f3e3675e42d6f1329bb9b8a99c8998")
-# malcontent 1.28.0-r0 (released 2026-10-27): Chainguard's free registry only
-# serves the daily rebuilt :latest, so the pin is one build of it (2026-10-28
-# 20:49 UTC, the minimal variant without a shell), as picked by
-# `check_image_pins.py --malcontent-candidate 1.28.0` on 2026-11-07.
-MALCONTENT_VERSION = "1.28.0"
+# malcontent 1.28.1 (released 2026-11-08): Chainguard's free registry only
+# serves the daily rebuilt :latest, so the pin is one build of it (2026-11-08
+# 20:26 UTC, the minimal variant without a shell), picked with the selection
+# of `check_image_pins.py --malcontent-candidate 1.28.1` on 2026-11-15, about
+# ten hours before the build turned 7 days old (bundled with the SkillSpector
+# and Cisco environment bumps by the user's decision).
+MALCONTENT_VERSION = "1.28.1"
 MALCONTENT_IMAGE = ("cgr.dev/chainguard/malcontent:latest@sha256:"
-                    "e78ef39008129f3211dc21bf40fd0add5955ff3f045ee671e62dc3a250bf3855")
+                    "98734fbb8de4510ac4f5b6e820b74e38d5bd528884e579a2c44afa57aeba0fcf")
