@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.5.2 - 2026-11-15
+
+0.5.1 was merged but never published as a release. 0.5.2 is the first
+release since 0.5.0 and also carries the 0.5.1 changes listed below.
 
 ### Security
 
