@@ -366,7 +366,8 @@ def need_mcp_scanner():
 def mcpscanner_python() -> str:
     """Return a Python executable that can import Cisco's mcpscanner package.
 
-    `uv tool install cisco-ai-mcp-scanner` exposes `mcp-scanner` on PATH, but
+    The setup's `uv tool install` (tool name cisco-ai-mcp-scanner, pinned in
+    scripts/_pins.py) exposes `mcp-scanner` on PATH, but
     not necessarily the package in the Python running this wrapper. Prefer the
     current interpreter when it works, otherwise ask uv for the tool venv.
     """

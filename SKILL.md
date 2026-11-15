@@ -118,8 +118,11 @@ Install the scanner binaries, isolated via uv:
 .\setup.ps1       # Windows PowerShell
 ```
 
-This installs `skillspector` (pinned to the exact commit of a tagged release)
-and `mcp-scanner`. SkillSpector's LLM layer needs **no configuration** when a
+This installs `skillspector` and `mcp-scanner`, each pinned to an exact commit
+(`scripts/_pins.py`), with registry dependencies limited to files uploaded
+before a fixed cutoff date (`--exclude-newer`, set at least 7 days back with
+each pin bump) and, for `mcp-scanner`, a litellm past its published
+advisories. SkillSpector's LLM layer needs **no configuration** when a
 logged-in `claude` or `opencode` CLI is on PATH — the wrapper
 auto-detects it. Prefer process or user environment variables to pick a provider
 explicitly or configure optional layers; no `.env` file is required:

@@ -20,6 +20,107 @@ class PinTests(unittest.TestCase):
                 self.assertIn(f'"{_pins.SKILLSPECTOR_SHA}"', text)
                 self.assertIn(f"# v{_pins.SKILLSPECTOR_VERSION}", text)
 
+    # Variable names per setup script: spec of each scanner, litellm
+    # requirement, dependency window.
+    SETUP_VARS = {
+        "setup.sh": {"ss_spec": "SS_SPEC", "cisco_spec": "CISCO_SPEC",
+                     "cisco_repo": "CISCO_REPO", "cisco_sha": "CISCO_SHA",
+                     "litellm": "CISCO_LITELLM", "window": "EXCLUDE_NEWER"},
+        "setup.ps1": {"ss_spec": "ssSpec", "cisco_spec": "ciscoSpec",
+                      "cisco_repo": "CiscoRepo", "cisco_sha": "CiscoSha",
+                      "litellm": "CiscoLitellm", "window": "ExcludeNewer"},
+    }
+
+    @staticmethod
+    def ref(name):
+        # $NAME or ${NAME}
+        return r'\$\{?' + name + r'\}?'
+
+    @classmethod
+    def var(cls, name):
+        # a variable reference, optionally inside double quotes
+        return '"?' + cls.ref(name) + '"?'
+
+    @staticmethod
+    def assignment(name, value):
+        return r'(?m)^\$?' + name + r'\s*=\s*"' + value + '"'
+
+    def install_lines(self, text):
+        # Join continuation lines so a wrapped command is checked as a whole.
+        import re
+        text = re.sub(r"[`\\]\r?\n\s*", " ", text)
+        return [" ".join(line.split()) for line in text.splitlines()
+                if "uv tool install" in " ".join(line.split())
+                and not line.lstrip().startswith(("#", "echo", "Write-Host"))]
+
+    def test_setup_scripts_install_the_pinned_cisco_commit(self):
+        import re
+        for script, v in self.SETUP_VARS.items():
+            with self.subTest(script=script):
+                text = (ROOT / script).read_text(encoding="utf-8")
+                self.assertRegex(text, self.assignment(v["cisco_repo"],
+                                                       re.escape(_pins.CISCO_MCP_SCANNER_REPO)))
+                self.assertRegex(text, self.assignment(v["cisco_sha"],
+                                                       _pins.CISCO_MCP_SCANNER_SHA))
+                self.assertRegex(text, self.assignment(v["litellm"],
+                                                       re.escape(_pins.CISCO_LITELLM_REQUIREMENT)))
+                self.assertIn(f"package version {_pins.CISCO_MCP_SCANNER_VERSION}", text)
+                spec = self.assignment(v["cisco_spec"],
+                                       "git[+]" + self.ref(v["cisco_repo"])
+                                       + "@" + self.ref(v["cisco_sha"]))
+                self.assertRegex(text, spec)
+                cisco = [l for l in self.install_lines(text)
+                         if re.search(self.var(v["cisco_spec"]), l)]
+                self.assertEqual(len(cisco), 1, cisco)
+                self.assertRegex(cisco[0], r"--with " + self.var(v["litellm"]))
+
+    def test_setup_scripts_install_skillspector_from_its_spec(self):
+        import re
+        for script, v in self.SETUP_VARS.items():
+            with self.subTest(script=script):
+                text = (ROOT / script).read_text(encoding="utf-8")
+                ss = [l for l in self.install_lines(text)
+                      if re.search(self.var(v["ss_spec"]), l)]
+                self.assertEqual(len(ss), 1, ss)
+
+    def test_litellm_floor_excludes_known_vulnerable_releases(self):
+        # 1.106.5 is the first release past the published advisories;
+        # 1.107.0 was the compromised upload of 2026-10-21.
+        parts = [p.strip() for p in _pins.CISCO_LITELLM_REQUIREMENT.split(",")]
+        self.assertEqual(parts[0], "litellm>=1.106.5")
+        self.assertIn("!=1.107.0", parts)
+
+    def test_dependency_window_is_at_least_seven_days_old(self):
+        from datetime import datetime, timedelta, timezone
+        self.assertRegex(_pins.UV_EXCLUDE_NEWER, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        cutoff = datetime.fromisoformat(_pins.UV_EXCLUDE_NEWER.replace("Z", "+00:00"))
+        self.assertLessEqual(cutoff, datetime.now(timezone.utc) - timedelta(days=7))
+
+    def test_every_tool_install_is_forced_with_the_shared_window(self):
+        # --force always: a re-run re-pins an existing (possibly unpinned)
+        # install instead of depending on an "already installed" check.
+        import re
+        for script, v in self.SETUP_VARS.items():
+            with self.subTest(script=script):
+                text = (ROOT / script).read_text(encoding="utf-8")
+                self.assertRegex(text, self.assignment(v["window"], _pins.UV_EXCLUDE_NEWER))
+                self.assertNotIn("uv tool upgrade", text)
+                installs = self.install_lines(text)
+                self.assertEqual(len(installs), 2, installs)  # one per scanner
+                for line in installs:
+                    self.assertIn("uv tool install --force ", line)
+                    self.assertRegex(line, r"--exclude-newer " + self.var(v["window"]))
+
+    def test_setup_ps1_stops_when_an_install_fails(self):
+        # $ErrorActionPreference = "Stop" ignores native exit codes.
+        text = (ROOT / "setup.ps1").read_text(encoding="utf-8")
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            if self.install_lines(line):
+                with self.subTest(line=line.strip()):
+                    self.assertIn("$LASTEXITCODE -ne 0", lines[i + 1])
+                    self.assertIn("exit 1", lines[i + 1])
+
     def test_scanner_images_are_pinned_by_digest(self):
         # tag@digest: Docker runs the digest; the tag only keeps it readable.
         import re
@@ -49,6 +150,13 @@ class UpstreamPinTests(unittest.TestCase):
     def test_pin_is_on_nvidia_main(self):
         self.assertEqual(_pins.SKILLSPECTOR_REPO, "https://github.com/NVIDIA/SkillSpector")
         diff = self.api(f"repos/NVIDIA/SkillSpector/compare/{_pins.SKILLSPECTOR_SHA}...main")
+        self.assertIn(diff["status"], ("ahead", "identical"))
+
+    def test_cisco_pin_is_on_official_main(self):
+        self.assertEqual(_pins.CISCO_MCP_SCANNER_REPO,
+                         "https://github.com/cisco-ai-defense/mcp-scanner")
+        diff = self.api("repos/cisco-ai-defense/mcp-scanner/compare/"
+                        f"{_pins.CISCO_MCP_SCANNER_SHA}...main")
         self.assertIn(diff["status"], ("ahead", "identical"))
 
 

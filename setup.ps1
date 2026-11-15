@@ -8,11 +8,26 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# SkillSpector ships tagged GitHub releases but is not on PyPI. We pin the exact
-# commit behind a release tag (tags can move, commits cannot) so "scan = install"
-# applies to the scanner itself. Bump deliberately; keep the tag comment in sync.
+# SkillSpector is not on PyPI. We pin an exact commit on NVIDIA's main branch
+# (not a release tag: the 2.13.x tags lack fixes agent-guard relies on), so
+# "scan = install" applies to the scanner itself. Bump deliberately; see
+# scripts/_pins.py (a test keeps both in sync).
 $SkillSpectorRepo = "https://github.com/NVIDIA/SkillSpector"   # main until 2.13.0
 $SkillSpectorSha  = "e48d771a26f7398b36256ceb8d8f94adce3d5c44"   # v2.12.0 + main 2026-11-06
+
+# Cisco mcp-scanner: pinned to a commit on the official main branch. The newest
+# PyPI release still pins a litellm with published advisories; main accepts a
+# newer one, so we require litellm past those advisories and never the
+# compromised 1.107.0. Reasons and bump rules: scripts/_pins.py.
+$CiscoRepo   = "https://github.com/cisco-ai-defense/mcp-scanner"
+$CiscoSha    = "9ff8fc84b792aae315a838cf4e37b40ef46a0293"   # main 2026-11-06, package version 4.8.7
+$CiscoLitellm = "litellm>=1.106.5,!=1.107.0"
+
+# A pinned commit fixes the scanner code, not its dependencies: uv resolves them
+# fresh. --exclude-newer limits registry packages to files uploaded before this
+# fixed instant (set at least 7 days back with each pin bump), so a release
+# from the days before a setup run cannot slip in (see scripts/_pins.py).
+$ExcludeNewer = "2026-11-08T09:00:00Z"
 
 Write-Host "Checking prerequisites..." -ForegroundColor Cyan
 
@@ -40,23 +55,18 @@ if ($arch -eq "ARM64") {
     $ssPython = "cpython-3.12-windows-x86_64-none"
     Write-Host "  Windows ARM64 detected: using x86-64 Python (emulated) for prebuilt yara-python wheels"
 }
+# --force on every run: a fresh install and a re-pin of an existing (possibly
+# unpinned) install take the same path. On failure uv leaves any previous
+# install in place, which is not the pinned state, so setup stops.
 $ssSpec = "git+$SkillSpectorRepo@$SkillSpectorSha"
-$ssInstalled = uv tool list 2>$null | Select-String -Quiet "^skillspector"
-if ($ssInstalled) {
-    Write-Host "  skillspector: already installed -- re-pinning to $sha12"
-    uv tool install --force $ssSpec --python $ssPython --link-mode=copy
-} else {
-    uv tool install $ssSpec --python $ssPython --link-mode=copy
-}
+uv tool install --force $ssSpec --python $ssPython --link-mode=copy --exclude-newer $ExcludeNewer
+if ($LASTEXITCODE -ne 0) { Write-Host "SkillSpector install failed; any previous install is unchanged and NOT the pinned version." -ForegroundColor Red; exit 1 }
 
-Write-Host "`nInstalling cisco-ai-mcp-scanner (optional runtime MCP check)..." -ForegroundColor Cyan
-$mcpInstalled = uv tool list 2>$null | Select-String -Quiet "^cisco-ai-mcp-scanner"
-if ($mcpInstalled) {
-    Write-Host "  cisco-ai-mcp-scanner: already installed -- upgrading"
-    uv tool upgrade cisco-ai-mcp-scanner
-} else {
-    uv tool install cisco-ai-mcp-scanner --link-mode=copy
-}
+$ciscoSha12 = $CiscoSha.Substring(0, 12)
+Write-Host "`nInstalling cisco-ai-mcp-scanner (optional runtime MCP check), pinned @ $ciscoSha12..." -ForegroundColor Cyan
+$ciscoSpec = "git+$CiscoRepo@$CiscoSha"
+uv tool install --force $ciscoSpec --with $CiscoLitellm --link-mode=copy --exclude-newer $ExcludeNewer
+if ($LASTEXITCODE -ne 0) { Write-Host "cisco-ai-mcp-scanner install failed; any previous install is unchanged and NOT the pinned version." -ForegroundColor Red; exit 1 }
 
 # cisco-ai-skill-scanner is no longer used -- SkillSpector replaced it for skill
 # and static MCP scans. Leave any existing install untouched, but flag it.

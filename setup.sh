@@ -8,11 +8,26 @@
 
 set -euo pipefail
 
-# SkillSpector ships tagged GitHub releases but is not on PyPI. We pin the exact
-# commit behind a release tag (tags can move, commits cannot) so "scan = install"
-# applies to the scanner itself. Bump deliberately; keep the tag comment in sync.
+# SkillSpector is not on PyPI. We pin an exact commit on NVIDIA's main branch
+# (not a release tag: the 2.13.x tags lack fixes agent-guard relies on), so
+# "scan = install" applies to the scanner itself. Bump deliberately; see
+# scripts/_pins.py (a test keeps both in sync).
 SKILLSPECTOR_REPO="https://github.com/NVIDIA/SkillSpector"   # main until 2.13.0
 SKILLSPECTOR_SHA="e48d771a26f7398b36256ceb8d8f94adce3d5c44"   # v2.12.0 + main 2026-11-06
+
+# Cisco mcp-scanner: pinned to a commit on the official main branch. The newest
+# PyPI release still pins a litellm with published advisories; main accepts a
+# newer one, so we require litellm past those advisories and never the
+# compromised 1.107.0. Reasons and bump rules: scripts/_pins.py.
+CISCO_REPO="https://github.com/cisco-ai-defense/mcp-scanner"
+CISCO_SHA="9ff8fc84b792aae315a838cf4e37b40ef46a0293"   # main 2026-11-06, package version 4.8.7
+CISCO_LITELLM="litellm>=1.106.5,!=1.107.0"
+
+# A pinned commit fixes the scanner code, not its dependencies: uv resolves them
+# fresh. --exclude-newer limits registry packages to files uploaded before this
+# fixed instant (set at least 7 days back with each pin bump), so a release
+# from the days before a setup run cannot slip in (see scripts/_pins.py).
+EXCLUDE_NEWER="2026-11-08T09:00:00Z"
 
 echo "Checking prerequisites..."
 
@@ -49,25 +64,22 @@ esac
 
 echo ""
 echo "Installing SkillSpector (skills + static MCP scan), pinned @ ${SKILLSPECTOR_SHA:0:12}..."
+# --force on every run: a fresh install and a re-pin of an existing (possibly
+# unpinned) install take the same path. On failure uv leaves any previous
+# install in place, which is not the pinned state, so setup stops.
+install_failed() {
+  echo "$1 install failed; any previous install is unchanged and NOT the pinned version." >&2
+  exit 1
+}
 SS_SPEC="git+${SKILLSPECTOR_REPO}@${SKILLSPECTOR_SHA}"
-if uv tool list 2>/dev/null | grep -q "^skillspector"; then
-  echo "  skillspector: already installed -- re-pinning to ${SKILLSPECTOR_SHA:0:12}"
-  # shellcheck disable=SC2086  # LINK_ARGS is intentionally word-split (single flag or empty)
-  uv tool install --force "$SS_SPEC" --python "$SS_PYTHON" $LINK_ARGS
-else
-  # shellcheck disable=SC2086
-  uv tool install "$SS_SPEC" --python "$SS_PYTHON" $LINK_ARGS
-fi
+# shellcheck disable=SC2086  # LINK_ARGS is intentionally word-split (single flag or empty)
+uv tool install --force "$SS_SPEC" --python "$SS_PYTHON" $LINK_ARGS --exclude-newer "$EXCLUDE_NEWER" || install_failed SkillSpector
 
 echo ""
-echo "Installing cisco-ai-mcp-scanner (optional runtime MCP check)..."
-if uv tool list 2>/dev/null | grep -q "^cisco-ai-mcp-scanner"; then
-  echo "  cisco-ai-mcp-scanner: already installed -- upgrading"
-  uv tool upgrade cisco-ai-mcp-scanner
-else
-  # shellcheck disable=SC2086
-  uv tool install cisco-ai-mcp-scanner $LINK_ARGS
-fi
+echo "Installing cisco-ai-mcp-scanner (optional runtime MCP check), pinned @ ${CISCO_SHA:0:12}..."
+CISCO_SPEC="git+${CISCO_REPO}@${CISCO_SHA}"
+# shellcheck disable=SC2086
+uv tool install --force "$CISCO_SPEC" --with "$CISCO_LITELLM" $LINK_ARGS --exclude-newer "$EXCLUDE_NEWER" || install_failed cisco-ai-mcp-scanner
 
 # cisco-ai-skill-scanner is no longer used -- SkillSpector replaced it for skill
 # and static MCP scans. Leave any existing install untouched, but flag it.

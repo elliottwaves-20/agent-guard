@@ -4,6 +4,19 @@
 
 ### Security
 
+- The Cisco mcp-scanner is pinned to a commit on its official main branch
+  (`9ff8fc8`, 4.8.7) instead of the latest PyPI release, and the setup
+  installs it with `litellm>=1.106.5,!=1.107.0`. The PyPI release 4.8.7 still
+  pins litellm 1.93.2 with published advisories; main accepts newer ones.
+  Setup no longer runs `uv tool upgrade`; every run installs both scanners
+  with `uv tool install --force`, which also re-pins an existing install.
+- Every `uv tool install` in `setup.sh` / `setup.ps1` (SkillSpector and
+  Cisco) resolves dependencies with a fixed `--exclude-newer` date
+  (`UV_EXCLUDE_NEWER` in `scripts/_pins.py`). A pinned commit fixes the
+  scanner code but not its dependencies, so a fresh setup could otherwise pull
+  a package uploaded minutes earlier. Both scripts stop when an install
+  fails (`setup.ps1` used to report success) and say that a previous install
+  is still in place and not the pinned version.
 - GuardDog and malcontent images are pinned by digest (GuardDog 3.2.0,
   malcontent 1.28.1) instead of `:latest` with `--pull=always`. A changed
   upstream image no longer runs in the scan gate unreviewed; an unavailable

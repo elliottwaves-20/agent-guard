@@ -1,6 +1,6 @@
-"""Single source for the SkillSpector pin.
+"""Single source for the scanner pins (SkillSpector, Cisco mcp-scanner, images).
 
-setup.sh / setup.ps1 install exactly this commit (a test keeps them in sync);
+setup.sh / setup.ps1 install exactly these commits (a test keeps them in sync);
 the budget adapter and the installed-scanner tests compare against it. Bump
 deliberately: the adapter patches SkillSpector internals and must be
 re-verified against every new release.
@@ -36,6 +36,31 @@ tags sit on a separate branch without #855/#856, so the pin stays on main.
 SKILLSPECTOR_VERSION = "2.12.0"
 SKILLSPECTOR_REPO = "https://github.com/NVIDIA/SkillSpector"
 SKILLSPECTOR_SHA = "e48d771a26f7398b36256ceb8d8f94adce3d5c44"
+
+# Cisco mcp-scanner (optional live MCP runtime check), pinned like SkillSpector
+# to a commit on the official main branch. The newest PyPI release (4.8.7)
+# still pins litellm==1.93.2, which carries published advisories
+# (GHSA-7hp6-4w63-5g45, GHSA-g5ff-637f-6q2m). Main since #289 accepts any
+# litellm>=1.93.2 (minus a few excluded versions) instead of pinning 1.93.2, so
+# the setup adds litellm>=1.106.5 (past those advisories) and excludes the
+# compromised 1.107.0 upload, independent of what the resolver would pick. A
+# known vulnerability is the one case where we install ahead of an official
+# release; move back to a PyPI release once one allows litellm>=1.106.5.
+# 9ff8fc8 is main of 2026-11-06 (package version 4.8.7).
+CISCO_MCP_SCANNER_VERSION = "4.8.7"
+CISCO_MCP_SCANNER_REPO = "https://github.com/cisco-ai-defense/mcp-scanner"
+CISCO_MCP_SCANNER_SHA = "9ff8fc84b792aae315a838cf4e37b40ef46a0293"
+CISCO_LITELLM_REQUIREMENT = "litellm>=1.106.5,!=1.107.0"
+
+# Dependency window for every `uv tool install` in the setup scripts. A pinned
+# commit fixes the scanner code, not its dependencies: `uv tool install git+...`
+# resolves them fresh and ignores the project's uv.lock. --exclude-newer limits
+# registry packages to files uploaded before this instant, so a release from
+# the days before a setup run cannot slip in (git sources are not affected,
+# hence the commit pins). It is a fixed date rather than "now minus 7 days" so
+# a setup run is reproducible; raise it with every scanner pin bump, to a
+# moment at least 7 days back (a test checks the 7 days).
+UV_EXCLUDE_NEWER = "2026-11-08T09:00:00Z"
 
 # Scanner images, pinned by digest. Docker runs the
 # digest; the tag only keeps the line readable. GuardDog and malcontent carry
