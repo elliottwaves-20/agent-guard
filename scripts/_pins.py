@@ -21,14 +21,21 @@ longer stops later files). Since 6d0b7c8 it also carries #752 (info_stealer
 needs a browser cookie-store path, so our corrected rule no longer applies),
 #801 and #902 (fewer false parser limits from JavaScript template literals
 and from backticks or apostrophes in prose), #947, #952 (locked npm
-dependency contents), #955 and #957. Since
+dependency contents), #955 and #957. Since e48d771 it also carries #814
+(command lines inside a word that spans lines), #848 (PowerShell host syntax
+no longer invents shell parse limits), #916 (locked dependencies past
+published advisories), #1051 (one LLM batch admission shared across
+analyzers) and #1048 (accounted refusals). Malformed LLM answers now get a
+bounded field-by-field recovery; its calls go through the same patched
+get_chat_model, and an unfinished recovery is reported as a partial
+inspection, which still ends in no verdict. Since
 #798 SkillSpector refuses --output on Windows, so reports are read from stdout.
 tests/test_pins.py checks on GitHub that main contains it. The 2.13.x release
 tags sit on a separate branch without #855/#856, so the pin stays on main.
 """
 SKILLSPECTOR_VERSION = "2.12.0"
 SKILLSPECTOR_REPO = "https://github.com/NVIDIA/SkillSpector"
-SKILLSPECTOR_SHA = "6d0b7c849949cab9181e57798247f89e48ce5d6a"
+SKILLSPECTOR_SHA = "e48d771a26f7398b36256ceb8d8f94adce3d5c44"
 
 # Scanner images, pinned by digest. Docker runs the
 # digest; the tag only keeps the line readable. GuardDog and malcontent carry
