@@ -78,6 +78,11 @@ release since 0.5.0 and also carries the 0.5.1 changes listed below.
   addresses now counts as the sandbox's resolver. The looked-up names are
   still judged.
 
+- A source pause written by hand in `origins.json` no longer crashes
+  `update_skills.py` when it lacks `skill` or `at`, or is just `true`; such a
+  crash stopped the whole run before later sources were checked. The source
+  stays paused (or reported as own version with `own`).
+
 ## 0.5.1 - 2026-10-25
 
 ### Security

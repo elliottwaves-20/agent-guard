@@ -178,6 +178,44 @@ class UpdateFlowTests(unittest.TestCase):
         self.assertEqual(env.scanned, [])
         self.assertEqual(json.loads(report.read_text())["skills"]["alpha"]["status"], "paused")
 
+    def test_hand_written_pause_without_details_still_pauses(self):
+        # A pause is set by hand; missing fields must not crash the whole run.
+        for paused in ({"at": "2026-10-11T00:00:00+00:00"}, {"skill": "manual pause"}, True):
+            with self.subTest(paused=paused):
+                env = Env(self)
+                write_skill(env.inbox / "alpha", "v1")
+                env.upstream[("o/r", "alpha")] = "v2"
+                env.origins({"alpha": "o/r"})
+                data = env.data()
+                data["sources"]["o/r"] = {"paused": paused}
+                staging.save_origins(env.dist.origins, data)
+                report = env.inbox.parent / "report.json"
+                self.assertEqual(env.run("--all", "--json", str(report)), 1)
+                self.assertEqual(env.scanned, [])
+                self.assertEqual(json.loads(report.read_text())["skills"]["alpha"]["status"], "paused")
+
+    def test_pending_text_lists_a_source_paused_with_a_bare_flag(self):
+        env = Env(self)
+        write_skill(env.inbox / "alpha", "v1")
+        env.origins({"alpha": "o/r"})
+        data = env.data()
+        data["sources"]["o/r"] = {"paused": True}
+        self.assertIn("paused sources", updater.pending_text(data, env.dist.origins))
+        self.assertIn("o/r", updater.pending_text(data, env.dist.origins))
+
+    def test_own_version_pause_without_note_or_date(self):
+        env = Env(self)
+        write_skill(env.inbox / "alpha", "v1")
+        env.upstream[("o/r", "alpha")] = "v2"
+        env.origins({"alpha": "o/r"})
+        data = env.data()
+        data["sources"]["o/r"] = {"paused": {"own": True}}
+        staging.save_origins(env.dist.origins, data)
+        report = env.inbox.parent / "report.json"
+        self.assertEqual(env.run("--all", "--json", str(report)), 0)
+        self.assertEqual(env.scanned, [])
+        self.assertEqual(json.loads(report.read_text())["skills"]["alpha"]["status"], "own-version")
+
     def test_own_version_pause_is_not_waiting(self):
         env = Env(self)
         write_skill(env.inbox / "alpha", "v1")

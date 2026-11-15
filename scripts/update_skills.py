@@ -162,14 +162,19 @@ class Run:
     def update_source(self, source: str, names: list):
         paused = self.origins["sources"].get(source, {}).get("paused")
         if paused:
+            # A source pause is written by hand: any truthy value pauses, and
+            # missing fields only shorten the message.
+            if not isinstance(paused, dict):
+                paused = {}
             for name in names:
                 if self.origins["skills"][name].get("blocked"):
                     self.report_blocked(name)
                 elif paused.get("own"):
-                    self.report_own(name, source, paused, paused["skill"])
+                    self.report_own(name, source, paused, paused.get("skill", "own version"))
                 else:
                     self.report(name, PAUSED, source=source,
-                                detail=f"source paused since {paused['at']} ({paused['skill']} blocked)")
+                                detail=f"source paused since {paused.get('at', '?')} "
+                                       f"({paused.get('skill', 'by hand')})")
             return
         active = []
         for name in names:
@@ -376,7 +381,8 @@ def pending_text(origins: dict, origins_path) -> str:
             lines.append(f"  scan report: {blocked['report']}")
         lines.append(f"  decide: update_skills.py --accept {name} --reason '...' | --reject {name}")
     paused = sorted(s for s, v in origins["sources"].items()
-                    if v.get("paused") and not v["paused"].get("own"))
+                    if v.get("paused") and not (isinstance(v["paused"], dict)
+                                                and v["paused"].get("own")))
     if paused:
         lines.append(f"- paused sources (no updates until the blocked skill is decided): {', '.join(paused)}")
     if not lines:
