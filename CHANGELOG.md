@@ -5,7 +5,7 @@
 ### Security
 
 - GuardDog and malcontent images are pinned by digest (GuardDog 3.2.0,
-  malcontent 1.28.0) instead of `:latest` with `--pull=always`. A changed
+  malcontent 1.28.1) instead of `:latest` with `--pull=always`. A changed
   upstream image no longer runs in the scan gate unreviewed; an unavailable
   digest gives no verdict. The undocumented overrides
   `AGENT_GUARD_GUARDDOG_IMAGE` / `AGENT_GUARD_MALCONTENT_IMAGE` are gone.
@@ -30,8 +30,14 @@
   (`_yara_recheck.py`, `scripts/triage/yara_corrections.*`). Its only
   correction, for `info_stealer`, is upstream since #752 and was bound to the
   old rule text, so it no longer applied. Every YARA match is hard evidence.
-- SkillSpector is pinned to NVIDIA main `6d0b7c8` (still reports 2.12.0).
-  It adds #752 (the upstream `info_stealer` rule needs a browser cookie-store
+- SkillSpector is pinned to NVIDIA main `e48d771` (still reports 2.12.0).
+  Since `6d0b7c8` it adds #814 (command lines inside a word that spans lines
+  are still checked), #848 (PowerShell host syntax no longer causes false
+  shell parse limits), #916 (locked dependencies past published advisories),
+  #1051 (LLM batch admission shared across analyzers, against "shared runtime
+  limit reached" on large skills) and #1048. Malformed LLM answers get a
+  bounded field-by-field recovery; an unfinished recovery counts as a partial
+  inspection and still gives no verdict. Before that it added #752 (the upstream `info_stealer` rule needs a browser cookie-store
   path, so agent-guard's corrected copy of that rule no longer applies),
   #801 and #902 (JavaScript template literals and backticks or apostrophes in
   comments no longer cause false parser limits), #947, #952, #955, #957, #855 (CLI prompts stay under the input cap when large files are

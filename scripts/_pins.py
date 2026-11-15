@@ -21,14 +21,21 @@ longer stops later files). Since 6d0b7c8 it also carries #752 (info_stealer
 needs a browser cookie-store path, so our corrected rule no longer applies),
 #801 and #902 (fewer false parser limits from JavaScript template literals
 and from backticks or apostrophes in prose), #947, #952 (locked npm
-dependency contents), #955 and #957. Since
+dependency contents), #955 and #957. Since e48d771 it also carries #814
+(command lines inside a word that spans lines), #848 (PowerShell host syntax
+no longer invents shell parse limits), #916 (locked dependencies past
+published advisories), #1051 (one LLM batch admission shared across
+analyzers) and #1048 (accounted refusals). Malformed LLM answers now get a
+bounded field-by-field recovery; its calls go through the same patched
+get_chat_model, and an unfinished recovery is reported as a partial
+inspection, which still ends in no verdict. Since
 #798 SkillSpector refuses --output on Windows, so reports are read from stdout.
 tests/test_pins.py checks on GitHub that main contains it. The 2.13.x release
 tags sit on a separate branch without #855/#856, so the pin stays on main.
 """
 SKILLSPECTOR_VERSION = "2.12.0"
 SKILLSPECTOR_REPO = "https://github.com/NVIDIA/SkillSpector"
-SKILLSPECTOR_SHA = "6d0b7c849949cab9181e57798247f89e48ce5d6a"
+SKILLSPECTOR_SHA = "e48d771a26f7398b36256ceb8d8f94adce3d5c44"
 
 # Scanner images, pinned by digest. Docker runs the
 # digest; the tag only keeps the line readable. GuardDog and malcontent carry
@@ -43,10 +50,12 @@ SKILLSPECTOR_SHA = "6d0b7c849949cab9181e57798247f89e48ce5d6a"
 GUARDDOG_VERSION = "3.2.0"
 GUARDDOG_IMAGE = ("ghcr.io/datadog/guarddog:3.2.0@sha256:"
                   "3dbc783f65f508b95222101cb2cd84d1d5f3e3675e42d6f1329bb9b8a99c8998")
-# malcontent 1.28.0-r0 (released 2026-10-27): Chainguard's free registry only
-# serves the daily rebuilt :latest, so the pin is one build of it (2026-10-28
-# 20:49 UTC, the minimal variant without a shell), as picked by
-# `check_image_pins.py --malcontent-candidate 1.28.0` on 2026-11-07.
-MALCONTENT_VERSION = "1.28.0"
+# malcontent 1.28.1 (released 2026-11-08): Chainguard's free registry only
+# serves the daily rebuilt :latest, so the pin is one build of it (2026-11-08
+# 20:26 UTC, the minimal variant without a shell), picked with the selection
+# of `check_image_pins.py --malcontent-candidate 1.28.1` on 2026-11-15, about
+# ten hours before the build turned 7 days old (bundled with the SkillSpector
+# and Cisco environment bumps by the user's decision).
+MALCONTENT_VERSION = "1.28.1"
 MALCONTENT_IMAGE = ("cgr.dev/chainguard/malcontent:latest@sha256:"
-                    "e78ef39008129f3211dc21bf40fd0add5955ff3f045ee671e62dc3a250bf3855")
+                    "98734fbb8de4510ac4f5b6e820b74e38d5bd528884e579a2c44afa57aeba0fcf")
