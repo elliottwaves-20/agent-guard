@@ -56,6 +56,7 @@ import tempfile
 from pathlib import Path
 
 import _distribution
+import _mcp_locked
 import _skills_cli
 import _skillspector
 from _skillspector import run_skillspector
@@ -739,6 +740,53 @@ def install_mcp(name: str, entry: dict, dry: bool, selected: list = None):
         print("     Restart affected apps to activate.")
 
 
+def _parse_overrides(pairs: list) -> dict:
+    overrides = {}
+    for pair in pairs or []:
+        dep, sep, version = pair.partition("=")
+        if not sep or not dep:
+            raise _mcp_locked.Refused(2, f"--override expects NAME=VERSION, got {pair!r}")
+        if dep in overrides:
+            raise _mcp_locked.Refused(2, f"--override names {dep} twice")
+        overrides[dep] = version
+    return overrides
+
+
+def _report_secrets(installed) -> None:
+    if installed.secrets:
+        print(f"   This server needs {', '.join(installed.secrets)}; start it through your "
+              "secret manager (agent-guard stores no key values).")
+
+
+def cmd_mcp_npm(args, *, config: dict, env, platform: str, run=None, which=shutil.which,
+                check=None, deliver=None):
+    """mcp-npm: scan receipt, locked tree, then hand the start command to the agents."""
+    import _lockcheck
+    import _mcp_npm
+    import _mcp_receipts
+    settings = _mcp_locked.settings(config, env, platform)
+    _mcp_npm.check_package(args.package)
+    _mcp_npm.check_version(args.version)
+    name = (_mcp_locked.check_name(args.name) if args.name
+            else _mcp_locked.default_name("npm", args.package))
+    overrides = _parse_overrides(args.override)
+    receipt, accepted = _mcp_receipts.require_receipt(
+        settings.install_dir, "npm", args.package, args.version, args.accept)
+    installed = _mcp_npm.npm_install(
+        name=name, package=args.package, version=args.version, overrides=overrides,
+        override_reason=args.override_reason, bin_name=args.bin,
+        secrets=tuple(args.secret or ()), root=settings.install_dir, receipt=receipt,
+        accepted=accepted, run=run or _mcp_locked.run_tool, check=check or _lockcheck.check,
+        which=which, dry=args.dry_run)
+    if accepted:
+        print(f"   Installed despite the BLOCK verdict: {accepted['grund']}")
+    _report_secrets(installed)
+    (deliver or install_mcp)(installed.name, {"command": installed.command,
+                                              "args": list(installed.args)},
+                             args.dry_run, selected=args.tools)
+    return installed
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -812,8 +860,39 @@ def main():
                             f"(default: all detected). Choices: {', '.join(tool_choices)}")
     p_git.add_argument("--dry-run", action="store_true")
 
+    # Locked npm MCP
+    p_npm = sub.add_parser("mcp-npm", help="Install an npm MCP server from a checked lockfile "
+                                           "in its own directory (after scan_url.py)")
+    p_npm.add_argument("--package", required=True, help="npm package, e.g. @scope/server")
+    p_npm.add_argument("--version", required=True, help="Exact scanned version, e.g. 1.2.3")
+    p_npm.add_argument("--name", help="Server name in configs (default: package name "
+                                      "without scope)")
+    p_npm.add_argument("--override", action="append", default=[], metavar="NAME=VERSION",
+                       help="Pin a dependency in the tree (npm overrides); needs --override-reason")
+    p_npm.add_argument("--override-reason", metavar="TEXT",
+                       help="Why the tree is changed (stored with the install)")
+    p_npm.add_argument("--bin", help="Executable of the package when it declares several")
+    p_npm.add_argument("--secret", action="append", default=[], metavar="NAME",
+                       help="Name of a key the server needs (never a value); repeatable")
+    p_npm.add_argument("--accept", metavar="REASON",
+                       help="Install this exact version despite a BLOCK verdict, with a reason")
+    p_npm.add_argument("--tools", nargs="*", choices=tool_choices, default=None,
+                       metavar="TOOL",
+                       help=f"Limit installation to specific tools "
+                            f"(default: all detected). Choices: {', '.join(tool_choices)}")
+    p_npm.add_argument("--dry-run", action="store_true")
+
     args = parser.parse_args()
     workspace = args.workspace or workspace_default()
+
+    if args.mode == "mcp-npm":
+        try:
+            cmd_mcp_npm(args, config=_skillspector.USER_CONFIG, env=os.environ,
+                        platform=sys.platform)
+        except _mcp_locked.Refused as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(exc.code)
+        return
 
     if args.mode == "skill":
         distribution = configured_distribution()
