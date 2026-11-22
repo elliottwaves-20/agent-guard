@@ -44,6 +44,7 @@ the fallback linker when delegation is unavailable.
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -53,9 +54,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 import _distribution
+import _fastlane
 import _mcp_locked
 import _skills_cli
 import _skillspector
@@ -430,9 +433,10 @@ def install_mcp_git(name: str, git_url: str, package: str, dry: bool,
                     module: str | None = None, *, secrets: tuple = (), accept: str | None = None,
                     scanned_dir: Path | None = None, config: dict | None = None, env=None,
                     platform: str | None = None, run=None, which=shutil.which, check=None,
-                    deliver=None, register_run=None, **network):
+                    deliver=None, register_run=None, policy: _fastlane.Policy = _fastlane.Policy(),
+                    **network):
     """Install a Git-backed Python MCP from a checked uv.lock in its own directory
-    (scan receipt, 7-day rule, pinned build tools), then hand the start command
+    (scan receipt, commit age, pinned build tools), then hand the start command
     `uv run --project <tree> --locked --no-dev ...` to the agents."""
     import _lockcheck
     import _mcp_receipts
@@ -453,7 +457,7 @@ def install_mcp_git(name: str, git_url: str, package: str, dry: bool,
         executable=executable, module=module, secrets=tuple(secrets),
         root=settings.install_dir, receipt=receipt, accepted=accepted, scanned_dir=scanned_dir,
         run=run or _mcp_locked.run_tool, check=check or _lockcheck.check, which=which,
-        dry=dry, **network)
+        dry=dry, policy=policy, **network)
     if accepted:
         print(f"   Installed despite the BLOCK verdict: {accepted['grund']}")
     _mcp_locked.deliver(installed, settings, dry=dry, selected=selected,
@@ -733,12 +737,19 @@ def _parse_overrides(pairs: list) -> dict:
     return overrides
 
 
+def _mcp_policy(args) -> _fastlane.Policy:
+    return _fastlane.policy(getattr(args, "min_age_days", None),
+                            getattr(args, "trusted_days", None),
+                            getattr(args, "no_fast_lane", False))
+
+
 def cmd_mcp_npm(args, *, config: dict, env, platform: str, run=None, which=shutil.which,
                 check=None, deliver=None, register_run=None):
     """mcp-npm: scan receipt, locked tree, then hand the start command to the agents."""
     import _lockcheck
     import _mcp_npm
     import _mcp_receipts
+    policy = _mcp_policy(args)
     settings = _mcp_locked.settings(config, env, platform)
     _mcp_npm.check_package(args.package)
     _mcp_npm.check_version(args.version)
@@ -752,7 +763,7 @@ def cmd_mcp_npm(args, *, config: dict, env, platform: str, run=None, which=shuti
         override_reason=args.override_reason, bin_name=args.bin,
         secrets=tuple(args.secret or ()), root=settings.install_dir, receipt=receipt,
         accepted=accepted, run=run or _mcp_locked.run_tool, check=check or _lockcheck.check,
-        which=which, dry=args.dry_run)
+        which=which, dry=args.dry_run, policy=policy)
     if accepted:
         print(f"   Installed despite the BLOCK verdict: {accepted['grund']}")
     _mcp_locked.deliver(installed, settings, dry=args.dry_run, selected=args.tools,
@@ -766,6 +777,7 @@ def cmd_mcp_pypi(args, *, config: dict, env, platform: str, run=None, which=shut
     import _lockcheck
     import _mcp_receipts
     import _mcp_uv
+    policy = _mcp_policy(args)
     _mcp_locked.require_python_311()
     settings = _mcp_locked.settings(config, env, platform)
     _mcp_uv.check_package(args.package)
@@ -778,12 +790,23 @@ def cmd_mcp_pypi(args, *, config: dict, env, platform: str, run=None, which=shut
         name=name, package=args.package, version=args.version, executable=args.executable,
         secrets=tuple(args.secret or ()), root=settings.install_dir, receipt=receipt,
         accepted=accepted, run=run or _mcp_locked.run_tool, check=check or _lockcheck.check,
-        which=which, dry=args.dry_run)
+        which=which, dry=args.dry_run, policy=policy)
     if accepted:
         print(f"   Installed despite the BLOCK verdict: {accepted['grund']}")
     _mcp_locked.deliver(installed, settings, dry=args.dry_run, selected=args.tools,
                         install=deliver or install_mcp, run=register_run)
     return installed
+
+
+def cmd_mcp_git(args, *, config: dict, env, platform: str):
+    """mcp-git: validate settings, build the checked tree and hand it off."""
+    policy = _mcp_policy(args)
+    if args.trusted_days is not None or args.no_fast_lane:
+        print("note: no effect for Git sources", file=sys.stderr)
+    return install_mcp_git(
+        args.name, args.git_url, args.package, args.dry_run, selected=args.tools,
+        executable=args.executable, module=args.module, secrets=tuple(args.secret or ()),
+        accept=args.accept, config=config, env=env, platform=platform, policy=policy)
 
 
 def cmd_mcp_register(args, *, config: dict, env, platform: str, register_run=None):
@@ -793,6 +816,55 @@ def cmd_mcp_register(args, *, config: dict, env, platform: str, register_run=Non
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
+
+def _age_arg(value: str) -> int | str:
+    """Leave invalid values for policy validation and the installer result."""
+    try:
+        return int(value)
+    except ValueError:
+        return value
+
+
+def _add_mcp_policy_options(parser):
+    parser.add_argument("--min-age-days", type=_age_arg, metavar="N",
+                        help="Minimum age in days (default: 7)")
+    parser.add_argument("--trusted-days", type=_age_arg, metavar="N",
+                        help="Reserved age setting for trusted releases (default: 2)")
+    parser.add_argument("--no-fast-lane", action="store_true",
+                        help="Reserved switch to disable the security-fix fast lane")
+    parser.add_argument("--json", action="store_true",
+                        help="Print one JSON result on stdout and diagnostics on stderr")
+
+
+def _run_locked_mcp(args, handler):
+    as_json = getattr(args, "json", False)
+    output = contextlib.redirect_stdout(sys.stderr) if as_json else contextlib.nullcontext()
+    installed = None
+    code, message, needs_scan = 0, "", []
+    try:
+        with output:
+            installed = handler(args, config=_skillspector.USER_CONFIG, env=os.environ,
+                                platform=sys.platform)
+    except _mcp_locked.Refused as exc:
+        code, message = exc.code, str(exc)
+        if isinstance(exc, _mcp_locked.NeedsScan):
+            needs_scan = exc.items
+    except Exception as exc:  # any other failure is no verdict, never a finding
+        traceback.print_exc(file=sys.stderr)
+        code, message = 2, f"NO VERDICT -- unexpected error: {type(exc).__name__}: {exc}"
+    except SystemExit as exc:
+        if not as_json or not isinstance(exc.code, str):
+            raise
+        code, message = 1, exc.code.removeprefix("ERROR: ")
+    if code:
+        print(f"ERROR: {message}", file=sys.stderr)
+    if as_json:
+        print(json.dumps({"code": code, "message": message, "needs_scan": needs_scan,
+                          "fast_lane": installed.fast_lane if installed else [],
+                          "tier": installed.tier if installed else ""}))
+    if code:
+        sys.exit(code)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -871,6 +943,7 @@ def main():
                        help=f"Limit installation to specific tools "
                             f"(default: all detected). Choices: {', '.join(tool_choices)}")
     p_git.add_argument("--dry-run", action="store_true")
+    _add_mcp_policy_options(p_git)
 
     # Locked npm MCP
     p_npm = sub.add_parser("mcp-npm", help="Install an npm MCP server from a checked lockfile "
@@ -893,6 +966,7 @@ def main():
                        help=f"Limit installation to specific tools "
                             f"(default: all detected). Choices: {', '.join(tool_choices)}")
     p_npm.add_argument("--dry-run", action="store_true")
+    _add_mcp_policy_options(p_npm)
 
     # Locked PyPI MCP
     p_pypi = sub.add_parser("mcp-pypi", help="Install a PyPI MCP server from a checked uv.lock "
@@ -911,6 +985,7 @@ def main():
                         help=f"Limit installation to specific tools "
                              f"(default: all detected). Choices: {', '.join(tool_choices)}")
     p_pypi.add_argument("--dry-run", action="store_true")
+    _add_mcp_policy_options(p_pypi)
 
     # Repeat a failed handoff
     p_reg = sub.add_parser("mcp-register", help="Hand an installed locked MCP tree to the "
@@ -918,20 +993,15 @@ def main():
     p_reg.add_argument("tree", type=Path, help="Directory of the installed server")
 
     args = parser.parse_args()
-    workspace = args.workspace or workspace_default()
 
     locked_modes = {"mcp-npm": cmd_mcp_npm, "mcp-pypi": cmd_mcp_pypi,
-                    "mcp-register": cmd_mcp_register}
+                    "mcp-git": cmd_mcp_git, "mcp-register": cmd_mcp_register}
     if args.mode in locked_modes:
-        try:
-            locked_modes[args.mode](args, config=_skillspector.USER_CONFIG, env=os.environ,
-                                    platform=sys.platform)
-        except _mcp_locked.Refused as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(exc.code)
+        _run_locked_mcp(args, locked_modes[args.mode])
         return
 
     if args.mode == "skill":
+        workspace = args.workspace or workspace_default()
         distribution = configured_distribution()
         if distribution is not None and args.workspace is not None:
             sys.exit("ERROR: --workspace does not apply: [distribution] in the agent-guard "
@@ -991,16 +1061,6 @@ def main():
         if env:
             entry["env"] = env
         install_mcp(args.name, entry, args.dry_run, selected=args.tools)
-
-    elif args.mode == "mcp-git":
-        try:
-            install_mcp_git(args.name, args.git_url, args.package, args.dry_run,
-                            selected=args.tools, executable=args.executable,
-                            module=args.module, secrets=tuple(args.secret or ()),
-                            accept=args.accept)
-        except _mcp_locked.Refused as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(exc.code)
 
 
 if __name__ == "__main__":

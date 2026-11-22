@@ -606,8 +606,9 @@ commit** → checkout the new SHA.
 Local MCP servers get their own directory under `[mcp] install_dir` with an
 exact pin and a lockfile. The installer needs the scan receipt of exactly this
 version, resolves the lockfile without scripts or builds and without packages
-younger than 7 days, checks every entry (OSV, GitHub advisories, age, registry
-hash, top-level = the scanned archive), builds the tree in a staging directory
+younger than the configured age (7 days by default), checks every entry (OSV,
+GitHub advisories, age, registry hash, top-level = the scanned archive),
+builds the tree in a staging directory
 and only then swaps it in. Any failure leaves the installed tree as it was
 (exit 1 finding, exit 2 no verdict or wait).
 
@@ -635,8 +636,16 @@ with `--override-reason` (npm), `--secret NAME` (key name only, never a value),
 `--dry-run`. With `[mcp] register = [...]` in the config the installer writes
 no agent config but hands `agent-guard-register.json` to that command; a
 failed handoff is repeated with `python "$INSTALLER" mcp-register <tree>`.
-Packages younger than 7 days give exit 2 with the date to retry: wait, do not
-work around it. `mcp` refuses `npx`, `uvx`, `bunx`, `pipx run`, `uv tool run`,
+`--min-age-days N` sets the wait for registry packages and, for Git, the
+commit and build tools. The default is 7. `--trusted-days N` (default 2) and
+`--no-fast-lane` are reserved policy settings. Git reports that they have no
+effect. The ages must be integers with `0 <= trusted_days <= min_age_days`.
+With `--json`, stdout carries one result object and progress goes to stderr.
+For a missing npm or PyPI scan receipt, exit 2 includes the required package
+and version in `needs_scan`.
+
+Packages younger than the required age give exit 2 with the date to retry.
+Wait until that date. `mcp` refuses `npx`, `uvx`, `bunx`, `pipx run`, `uv tool run`,
 `uv run --with`, `pnpm dlx`, `yarn dlx` as launch commands (exit 2).
 
 For remote HTTP/SSE MCPs, no local dependency installation is needed:

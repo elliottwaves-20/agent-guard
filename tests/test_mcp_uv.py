@@ -5,11 +5,13 @@ uv is replaced by a fake runner that writes what the real tool would write:
 lockfile check is a stub. The installed wheel must be the scanned one.
 """
 import importlib
+import io
 import json
 import os
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -17,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")
 locked = importlib.import_module("_mcp_locked")
+fastlane = importlib.import_module("_fastlane")
 lockcheck = importlib.import_module("_lockcheck")
 receipts = importlib.import_module("_mcp_receipts")
 uv_mod = importlib.import_module("_mcp_uv")
@@ -144,6 +147,12 @@ class PypiInstall(unittest.TestCase):
         self.assertEqual(data["project"]["dependencies"], [f"{PKG}==1.2.3"])
         self.assertEqual(data["project"]["name"], "mcp-time")
         self.assertEqual(data["tool"]["uv"], {"package": False, "exclude-newer": "7 days"})
+
+    def test_pyproject_window_follows_the_setting(self):
+        self.install(policy=fastlane.Policy(min_age_days=10))
+        lib = importlib.import_module("tomllib")
+        data = lib.loads((self.root / "time" / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(data["tool"]["uv"]["exclude-newer"], "10 days")
 
     def test_check_sees_the_registry_entries(self):
         check = stub_check(0)
@@ -463,6 +472,22 @@ class GitInstall(unittest.TestCase):
                 self.assertIn("7 days", str(ctx.exception))
                 self.assertEqual(uv.commands, [])
 
+    def test_git_commit_check_uses_the_configured_age(self):
+        uv = FakeGitUv()
+        ages = []
+
+        def settled(source, branch, head, *, days):
+            ages.append(days)
+            return "c" * 40, None
+
+        with self.assertRaises(locked.Refused) as ctx:
+            self.install(uv=uv, status="ahead", settled=settled,
+                         policy=fastlane.Policy(min_age_days=10))
+        self.assertEqual(ages, [10])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("10 days", str(ctx.exception))
+        self.assertEqual(uv.commands, [])
+
     def test_identical_commit_is_settled(self):
         self.install(status="identical")
 
@@ -492,6 +517,23 @@ class GitInstall(unittest.TestCase):
         data = lib.loads((self.root / "ex" / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(data["tool"]["uv"]["build-constraint-dependencies"],
                          ["hatchling==1.27.0", "pathspec==0.12.1"])
+
+    def test_git_build_constraints_follow_the_setting(self):
+        uv = FakeGitUv()
+        checks = []
+
+        def check(entries, *, min_age_days, **kwargs):
+            checks.append(([entry.label for entry in entries], min_age_days))
+            return lockcheck.Result(0, ["ok"])
+
+        self.install(uv=uv, check=check, policy=fastlane.Policy(min_age_days=10),
+                     settled=lambda source, branch, head, **kwargs: ("c" * 40, None))
+        compile_cmd = next(c for c in uv.commands if c[1:3] == ["pip", "compile"])
+        self.assertEqual(compile_cmd[compile_cmd.index("--exclude-newer") + 1], "10 days")
+        self.assertEqual(checks, [(["setuptools@80.9.0"], 10), (["anyio@4.0.0"], 10)])
+        lib = importlib.import_module("tomllib")
+        data = lib.loads((self.root / "ex" / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(data["tool"]["uv"]["exclude-newer"], "10 days")
 
     def test_build_constraint_finding_blocks(self):
         uv = FakeGitUv()
@@ -574,6 +616,12 @@ class GitInstall(unittest.TestCase):
         self.assertEqual(self.fetched, [f"https://raw.githubusercontent.com/example/mcp/{SHA}/"
                                         "servers/ex/pyproject.toml"])
 
+    def test_git_records_the_checked_url_with_subdirectory(self):
+        url = f"{GIT_URL}#subdirectory=servers/ex"
+        uv = FakeGitUv(lock_text=lambda root: git_lock(root, query_extra="subdirectory=servers/ex&"))
+        installed = self.install(uv=uv, git_url=url)
+        self.assertEqual(installed.source, url)
+
     def test_whole_repository_scan_covers_a_subdirectory(self):
         url = f"https://github.com/example/mcp@{SHA}#subdirectory=servers/ex"
         uv = FakeGitUv(lock_text=lambda root: git_lock(root, query_extra="subdirectory=servers/ex&"))
@@ -608,6 +656,26 @@ class GitInstall(unittest.TestCase):
         self.assertEqual(uv.commands, [])
         self.assertEqual(self.compared, [])
         self.assertFalse(self.root.exists())
+
+
+class GitCli(unittest.TestCase):
+    def test_git_notes_fast_lane_options(self):
+        install_skill = importlib.import_module("install_skill")
+        argv = ["install_skill.py", "mcp-git", "--name", "ex", "--git-url", GIT_URL,
+                "--package", GIT_PKG]
+        for options in ([], ["--trusted-days", "2"], ["--no-fast-lane"]):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as tmp:
+                config = {"mcp": {"install_dir": tmp}}
+                stderr = io.StringIO()
+                with (mock.patch.object(sys, "argv", argv + options),
+                      mock.patch.object(install_skill._skillspector, "USER_CONFIG", config),
+                      redirect_stderr(stderr), redirect_stdout(io.StringIO()),
+                      self.assertRaises(SystemExit) as ctx):
+                    install_skill.main()
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertIn("scan first", stderr.getvalue())
+                self.assertEqual("note: no effect for Git sources" in stderr.getvalue(),
+                                 bool(options))
 
 
 class PypiCli(unittest.TestCase):

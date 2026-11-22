@@ -1,7 +1,7 @@
 """Locked PyPI MCP installs through uv (#48, A3).
 
 The server gets its own uv project with an exact top-level pin and a
-seven-day window. `uv lock --no-build` resolves the whole tree without running
+configurable age window. `uv lock --no-build` resolves the whole tree without running
 any build; the lockfile is checked as a whole, and the top-level package must
 lock exactly one pure wheel -- the file scan_url.py scanned. The tree is swapped
 in before `uv sync`, because the starters in .venv hold absolute paths; a
@@ -16,6 +16,7 @@ import re
 import shutil
 from pathlib import Path
 
+import _fastlane
 import _lockcheck
 from _mcp_locked import (ENTRY_RE, Installed, Refused, Runner, check_name, check_secrets,
                          normalize_pypi, replace_tree, require_python_311, staged,
@@ -50,11 +51,11 @@ def project_name(name: str) -> str:
     return normalize_pypi(f"mcp-{name}")
 
 
-def _pyproject(name: str, dependency: str, extra: str = "") -> str:
+def _pyproject(name: str, dependency: str, min_age_days: int, extra: str = "") -> str:
     return (f'[project]\nname = "{project_name(name)}"\nversion = "0.0.0"\n'
             f'description = "Locked tree for the MCP server {name} (agent-guard)"\n'
             f'requires-python = ">=3.10"\ndependencies = ["{dependency}"]\n\n'
-            f'[tool.uv]\npackage = false\nexclude-newer = "7 days"\n{extra}')
+            f'[tool.uv]\npackage = false\nexclude-newer = "{min_age_days} days"\n{extra}')
 
 
 def _site_packages(venv: Path) -> list:
@@ -127,7 +128,8 @@ def _top_level_wheel(entries: list, package: str, version: str, receipt) -> None
 
 def pypi_install(*, name: str, package: str, version: str, executable: str | None,
                  secrets: tuple, root: Path, receipt, accepted: dict | None, run: Runner,
-                 check=_lockcheck.check, which=shutil.which, dry: bool = False) -> Installed:
+                 check=_lockcheck.check, which=shutil.which, dry: bool = False,
+                 policy: _fastlane.Policy = _fastlane.Policy()) -> Installed:
     """Build, check and swap in the locked tree of one PyPI MCP server."""
     require_python_311()
     check_name(name)
@@ -159,14 +161,16 @@ def pypi_install(*, name: str, package: str, version: str, executable: str | Non
     for leftover in stale_leftovers(root, name):
         print(f"  note: leftover of an aborted run, not used: {leftover}")
     chosen = {}
+    min_age_days = policy.min_age_days
     with staged(root, name) as stage:
-        (stage / "pyproject.toml").write_text(_pyproject(name, f"{package}=={version}"),
-                                              encoding="utf-8")
+        (stage / "pyproject.toml").write_text(
+            _pyproject(name, f"{package}=={version}", min_age_days), encoding="utf-8")
         (stage / ".gitignore").write_text(".venv/\n", encoding="utf-8")
         code, out = run([uv, "lock", "--no-build", "--default-index", INDEX], stage)
         if code != 0:
             raise Refused(2, f"uv could not lock {package}=={version} from {INDEX} without "
-                             f"builds and without files younger than 7 days:\n{_tail(out)}")
+                             f"builds and without files younger than {min_age_days} days:\n"
+                             f"{_tail(out)}")
         try:
             lock_bytes = (stage / LOCKFILE).read_bytes()
             entries = _lockcheck.uv_lock_entries(lock_bytes.decode("utf-8"), project_name(name))
@@ -175,7 +179,7 @@ def pypi_install(*, name: str, package: str, version: str, executable: str | Non
         except _lockcheck.NoVerdict as exc:
             raise Refused(2, f"NO VERDICT -- {exc}")
         _top_level_wheel(entries, package, version, receipt)
-        result = check(entries)
+        result = check(entries, min_age_days=min_age_days)
         for line in result.lines:
             print(f"  {line}")
         if result.code:
@@ -260,11 +264,12 @@ def build_requires(pyproject_text: str) -> list:
     return [req.strip() for req in requires]
 
 
-def build_constraints(requires: list, stage: Path, run: Runner, uv: str, check) -> list:
+def build_constraints(requires: list, stage: Path, run: Runner, uv: str, check,
+                      min_age_days: int) -> list:
     """Resolve the build tools exactly, check them, return `name==version` pins."""
     (stage / BUILD_IN).write_text("\n".join(requires) + "\n", encoding="utf-8")
-    code, out = run([uv, "pip", "compile", BUILD_IN, "--no-build", "--exclude-newer", "7 days",
-                     "--default-index", INDEX, "-o", BUILD_OUT], stage)
+    code, out = run([uv, "pip", "compile", BUILD_IN, "--no-build", "--exclude-newer",
+                     f"{min_age_days} days", "--default-index", INDEX, "-o", BUILD_OUT], stage)
     if code != 0:
         raise Refused(2, f"uv could not resolve the build tools {', '.join(requires)}:\n{_tail(out)}")
     try:
@@ -273,7 +278,7 @@ def build_constraints(requires: list, stage: Path, run: Runner, uv: str, check) 
         raise Refused(2, f"cannot read the resolved build tools: {exc}")
     except _lockcheck.NoVerdict as exc:
         raise Refused(2, f"NO VERDICT -- {exc}")
-    result = check(entries)
+    result = check(entries, min_age_days=min_age_days)
     for line in result.lines:
         print(f"  {line}")
     if result.code:
@@ -323,19 +328,21 @@ def raw_text(url: str) -> str:
         raise Refused(2, f"cannot read {url}: {exc}")
 
 
-def _settled_commit(source: str, sha: str, settled, branch_head, compare) -> None:
-    """K4: the commit is in the newest state of the default branch that is 7 days old."""
+def _settled_commit(source: str, sha: str, settled, branch_head, compare,
+                    min_age_days: int) -> None:
+    """K4: the commit is in the newest default-branch state that meets the age limit."""
     import _staging
     branch, head = branch_head(source)
+    age_options = {} if min_age_days == _staging.COOLDOWN_DAYS else {"days": min_age_days}
     try:
-        base, _when = settled(source, branch, head)
-    except _staging.StageError as exc:
+        base, _when = settled(source, branch, head, **age_options)
+    except (_staging.StageError, OverflowError) as exc:
         raise Refused(2, f"NO VERDICT -- {exc}")
     status = compare(source, base, sha)
     if status not in ("identical", "behind"):
-        raise Refused(2, f"commit {sha} is not in the state of {branch} from 7 days ago "
-                         f"(GitHub compare: {status}); it is younger than 7 days or not on "
-                         f"{branch} -- retry later")
+        raise Refused(2, f"commit {sha} is not in the state of {branch} from {min_age_days} days "
+                         f"ago (GitHub compare: {status}); it is younger than {min_age_days} "
+                         f"days or not on {branch} -- retry later")
 
 
 def git_install(*, name: str, git_url: str, package: str, executable: str | None,
@@ -343,7 +350,7 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
                 scanned_dir: Path | None, run: Runner, check=_lockcheck.check,
                 which=shutil.which, fetch_text=raw_text, settled=None,
                 branch_head=github_branch_head, compare=github_compare,
-                dry: bool = False) -> Installed:
+                dry: bool = False, policy: _fastlane.Policy = _fastlane.Policy()) -> Installed:
     """Build, check and swap in the locked tree of one Git-backed Python MCP server."""
     require_python_311()
     check_name(name)
@@ -356,6 +363,8 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
             raise Refused(2, f"invalid {what} {value!r}")
     check_secrets(secrets)
     source = f"{owner}/{repo}"
+    repo_url = f"https://github.com/{source}"
+    git_source = f"{repo_url}@{sha}" + (f"#subdirectory={subdir}" if subdir else "")
     scanned_id = source + (f"#{subdir}" if subdir else "")
     import _mcp_receipts
     covering = {_mcp_receipts.identity("git", c) for c in git_scan_ids(source, subdir)}
@@ -370,20 +379,22 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
     if not uv:
         raise Refused(2, "uv must be on PATH for a locked Git MCP install")
     root = Path(root)
+    min_age_days = policy.min_age_days
     tail = ["python", "-m", module] if module else [executable or "<entry point>"]
     if dry:
         target = root.absolute() / name
-        print(f"  [DRY] would check that {sha} is at least 7 days on the default branch, pin "
-              f"and check the build tools, lock and check {package} from {source}, swap, "
+        print(f"  [DRY] would check that {sha} is at least {min_age_days} days on the default "
+              f"branch, pin and check the build tools, lock and check {package} from {source}, "
+              "swap, "
               "uv sync --locked --no-dev --no-build-package <each registry package>")
         return Installed(name=name, kind="git", package=package, requested=sha, command=uv,
                          args=["run", "--project", str(target), "--locked", "--no-dev", *tail],
                          tree=target, lockfile_sha256="", overrides={}, override_reason=None,
-                         secrets=tuple(secrets), accepted=accepted)
+                         secrets=tuple(secrets), accepted=accepted, source=git_source)
     if settled is None:
         import _staging
         settled = _staging.settled_ref
-    _settled_commit(source, sha, settled, branch_head, compare)
+    _settled_commit(source, sha, settled, branch_head, compare, min_age_days)
     if scanned_dir is not None:
         try:
             pyproject = (Path(scanned_dir) / subdir / "pyproject.toml").read_text(encoding="utf-8")
@@ -400,20 +411,19 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
         print(f"  note: leftover of an aborted run, not used: {leftover}")
     chosen = {}
     with staged(root, name) as stage:
-        constraints = build_constraints(requires, stage, run, uv, check)
-        dependency = (f"{package} @ git+https://github.com/{source}@{sha}"
-                      + (f"#subdirectory={subdir}" if subdir else ""))
+        constraints = build_constraints(requires, stage, run, uv, check, min_age_days)
+        dependency = f"{package} @ git+{git_source}"
         extra = ("build-constraint-dependencies = ["
                  + ", ".join(f'"{c}"' for c in constraints) + "]\n")
-        (stage / "pyproject.toml").write_text(_pyproject(name, dependency, extra),
-                                              encoding="utf-8")
+        (stage / "pyproject.toml").write_text(
+            _pyproject(name, dependency, min_age_days, extra), encoding="utf-8")
         (stage / ".gitignore").write_text(".venv/\n", encoding="utf-8")
         code, out = run([uv, "lock", "--no-build", "--default-index", INDEX], stage)
         if code != 0:
             raise Refused(2, f"uv could not lock {package} from {source}@{sha} without builds "
                              "(dynamic metadata such as setuptools-scm needs a build and cannot "
                              f"be locked this way):\n{_tail(out)}")
-        pin = _lockcheck.GitPin(normalize_pypi(package), f"https://github.com/{source}", sha, subdir)
+        pin = _lockcheck.GitPin(normalize_pypi(package), repo_url, sha, subdir)
         try:
             lock_bytes = (stage / LOCKFILE).read_bytes()
             entries = _lockcheck.uv_lock_entries(lock_bytes.decode("utf-8"), project_name(name),
@@ -423,7 +433,7 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
         except _lockcheck.NoVerdict as exc:
             raise Refused(2, f"NO VERDICT -- {exc}")
         if entries:
-            result = check(entries)
+            result = check(entries, min_age_days=min_age_days)
             for line in result.lines:
                 print(f"  {line}")
             if result.code:
@@ -447,7 +457,7 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
         installed = Installed(
             name=name, kind="git", package=package, requested=sha, command=uv, args=[],
             tree=target, lockfile_sha256=hashlib.sha256(lock_bytes).hexdigest(), overrides={},
-            override_reason=None, secrets=tuple(secrets), accepted=accepted)
+            override_reason=None, secrets=tuple(secrets), accepted=accepted, source=git_source)
         write_metadata(stage, installed)
         replace_tree(stage, target, finish=sync)
     installed.args = ["run", "--project", str(target), "--locked", "--no-dev", *chosen["tail"]]

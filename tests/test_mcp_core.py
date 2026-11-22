@@ -211,6 +211,41 @@ class Metadata(unittest.TestCase):
         self.assertEqual(meta["agent_guard"], (ROOT / "VERSION").read_text(encoding="utf-8").strip())
         self.assertIn("at", meta)
 
+    def test_metadata_has_tier_fast_lane_and_source(self):
+        fast_lane = [{"kind": "npm", "package": "dep", "version": "2.0.0"}]
+        source = "https://github.com/example/srv"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            values = {
+                "name": "srv", "kind": "npm", "package": "srv", "requested": "1.0.0",
+                "command": "node", "args": ["x.js"], "tree": root,
+                "lockfile_sha256": "ab" * 32, "overrides": {}, "override_reason": None,
+                "secrets": (), "accepted": None,
+            }
+            default = locked.Installed(**values)
+            custom = locked.Installed(**(values | {"tier": "s1", "fast_lane": fast_lane,
+                                                   "source": source}))
+            for installed, expected in ((default, ("s2", [], "")),
+                                        (custom, ("s1", fast_lane, source))):
+                with self.subTest(expected=expected):
+                    locked.write_metadata(root, installed)
+                    meta = json.loads((root / locked.METADATA).read_text(encoding="utf-8"))
+                    self.assertEqual((meta["tier"], meta["fast_lane"], meta["source"]), expected)
+
+
+class NeedsScan(unittest.TestCase):
+    def test_needs_scan_lists_commands(self):
+        items = [
+            {"kind": "npm", "package": "@scope/srv", "version": "1.2.3"},
+            {"kind": "pypi", "package": "server", "version": "4.5.6"},
+        ]
+        error = locked.NeedsScan(items)
+        self.assertIsInstance(error, locked.Refused)
+        self.assertEqual(error.code, 2)
+        self.assertEqual(error.items, items)
+        self.assertIn("python scripts/scan_url.py npm:@scope/srv@1.2.3", str(error).splitlines())
+        self.assertIn("python scripts/scan_url.py pypi:server==4.5.6", str(error).splitlines())
+
 
 class FakeRegister:
     def __init__(self, rc=0, exc=None):

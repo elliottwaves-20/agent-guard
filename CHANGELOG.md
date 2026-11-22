@@ -23,6 +23,9 @@
   npm tarballs are verified against their registry integrity.
 - `mcp-git` additionally requires the commit to be at least 7 days on the
   default branch and pins and checks the build tools from `[build-system]`.
+- Locked MCP installers accept `--min-age-days` for the waiting period and
+  accept the reserved `--trusted-days` and `--no-fast-lane` settings. `--json`
+  reports the result and identifies missing npm or PyPI scan receipts.
 - `install_skill.py mcp` refuses ad-hoc launchers (`npx`, `uvx`, `bunx`,
   `pipx run`, `uv tool run`, `uv run --with`, `pnpm dlx`, `yarn dlx`, …) with
   exit 2; `scan_url.py` offers only the locked installers.

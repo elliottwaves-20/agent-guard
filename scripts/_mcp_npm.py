@@ -1,8 +1,8 @@
 """Locked npm MCP installs (#48, A2).
 
 The server gets its own directory with an exact top-level pin in package.json.
-npm resolves the lockfile without running scripts and without versions younger
-than seven days; the lockfile is checked as a whole (advisories, age, the
+npm resolves the lockfile without running scripts and enforces the configured
+minimum age. The lockfile is checked as a whole (advisories, age, the
 scanned tarball as top-level package) before `npm ci` builds the tree. Only
 then is the tree swapped in. The agent starts `node <bin>` from that tree,
 never npx.
@@ -15,6 +15,7 @@ import re
 import shutil
 from pathlib import Path
 
+import _fastlane
 import _lockcheck
 from _mcp_locked import (Installed, Refused, Runner, check_name, check_secrets, replace_tree,
                          staged, stale_leftovers, write_metadata)
@@ -126,7 +127,8 @@ def _bin_path(stage: Path, package: str, version: str, bin_name: str | None) -> 
 def npm_install(*, name: str, package: str, version: str, overrides: dict,
                 override_reason: str | None, bin_name: str | None, secrets: tuple,
                 root: Path, receipt, accepted: dict | None, run: Runner,
-                check=_lockcheck.check, which=shutil.which, dry: bool = False) -> Installed:
+                check=_lockcheck.check, which=shutil.which, dry: bool = False,
+                policy: _fastlane.Policy = _fastlane.Policy()) -> Installed:
     """Build, check and swap in the locked tree of one npm MCP server."""
     overrides = dict(overrides or {})
     _validate(name, package, version, overrides, override_reason, bin_name, secrets)
@@ -137,10 +139,12 @@ def npm_install(*, name: str, package: str, version: str, overrides: dict,
     if not npm or not node:
         raise Refused(2, "npm and node must be on PATH for a locked npm MCP install")
     root = Path(root)
+    min_age_days = policy.min_age_days
+    min_release_age = f"--min-release-age={min_age_days}"
     if dry:
         target = Path(root).absolute() / name
         print(f"  [DRY] would build {target} from {package}@{version} "
-              f"(npm install --package-lock-only --ignore-scripts --min-release-age=7, "
+              f"(npm install --package-lock-only --ignore-scripts {min_release_age}, "
               f"lockfile check, npm ci --ignore-scripts)")
         return Installed(name=name, kind="npm", package=package, requested=version,
                          command=node, args=[str(target / "node_modules" / package / "<bin>")],
@@ -159,13 +163,13 @@ def npm_install(*, name: str, package: str, version: str, overrides: dict,
                                             encoding="utf-8")
         (stage / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
         code, out = run([npm, "install", "--package-lock-only", "--ignore-scripts",
-                         "--min-release-age=7", f"--registry={REGISTRY}", "--no-audit",
+                         min_release_age, f"--registry={REGISTRY}", "--no-audit",
                          "--no-fund"], stage)
         if code != 0:
             if any(c in (out or "") for c in YOUNG_CODES):
                 raise Refused(2, f"npm finds no {package}@{version} (or a dependency) older "
-                                 f"than 7 days: it is younger than 7 days; try again later\n"
-                                 f"{_tail(out)}")
+                                 f"than {min_age_days} days: it is younger than {min_age_days} "
+                                 f"days; try again later\n{_tail(out)}")
             raise Refused(2, f"npm could not resolve the lockfile:\n{_tail(out)}")
         lock_path = stage / LOCKFILE
         try:
@@ -180,7 +184,7 @@ def npm_install(*, name: str, package: str, version: str, overrides: dict,
         if integrity != receipt.integrity:
             raise Refused(2, f"the lockfile resolves {package}@{version} to a tarball other than "
                              f"the scanned one ({integrity} vs {receipt.integrity}); scan again")
-        result = check(entries)
+        result = check(entries, min_age_days=min_age_days)
         for line in result.lines:
             print(f"  {line}")
         if result.code:

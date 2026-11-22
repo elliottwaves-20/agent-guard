@@ -16,7 +16,7 @@ import secrets
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
-from _mcp_locked import Refused, normalize_pypi
+from _mcp_locked import NeedsScan, Refused, normalize_pypi, registry_scan_command
 
 KINDS = {"npm", "pypi", "git"}
 VERDICTS = {"SAFE", "BLOCK"}
@@ -74,10 +74,8 @@ def write_receipt(root: Path, receipt: Receipt) -> Path:
 
 
 def _scan_hint(kind: str, package: str, version: str) -> str:
-    if kind == "npm":
-        return f"python scripts/scan_url.py npm:{package}@{version}"
-    if kind == "pypi":
-        return f"python scripts/scan_url.py pypi:{package}=={version}"
+    if kind in ("npm", "pypi"):
+        return registry_scan_command(kind, package, version)
     repo, _, subdir = package.partition("#")
     return f"python scripts/scan_url.py https://github.com/{repo}/tree/{version}" + \
         (f"/{subdir}" if subdir else "")
@@ -100,8 +98,11 @@ def require_receipt(root: Path, kind: str, package: str, version: str,
     """(receipt, accepted) for exactly this package version, or Refused."""
     path = receipt_path(root, kind, package, version)
     if not path.is_file():
-        raise Refused(2, f"no scan verdict for {package} {version}; scan first: "
-                         f"{_scan_hint(kind, package, version)}")
+        prefix = f"no scan verdict for {package} {version}; scan first: "
+        if kind in ("npm", "pypi"):
+            raise NeedsScan([{"kind": kind, "package": package, "version": version}],
+                            prefix=prefix)
+        raise Refused(2, prefix + _scan_hint(kind, package, version))
     receipt = _load(path)
     if (receipt.kind != kind or identity(kind, receipt.package) != identity(kind, package)
             or receipt.version != version or receipt.verdict not in VERDICTS):

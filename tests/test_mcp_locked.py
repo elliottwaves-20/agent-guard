@@ -6,6 +6,7 @@ an existing install untouched and write no config.
 """
 import argparse
 import importlib
+import io
 import json
 import os
 import subprocess
@@ -13,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -420,6 +422,38 @@ class NpmCli(unittest.TestCase):
         self.assertNotIn("env", entry)
         self.assertFalse(dry)
 
+    def install_with_fake_npm(self, *options):
+        install_skill = importlib.import_module("install_skill")
+        root = self.base / "mcp"
+        receipts.write_receipt(root, receipt())
+        npm = FakeNpm()
+        cmd_mcp_npm = install_skill.cmd_mcp_npm
+
+        def install(args, **kwargs):
+            kwargs.update(config={"mcp": {"install_dir": str(root)}}, run=npm,
+                          which=which, check=stub_check(0), deliver=lambda *a, **k: None)
+            return cmd_mcp_npm(args, **kwargs)
+
+        argv = ["install_skill.py", "mcp-npm", "--package", PKG, "--version", "1.2.3", *options]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                install_skill, "cmd_mcp_npm", install):
+            install_skill.main()
+        return npm
+
+    def test_min_release_age_follows_the_setting(self):
+        npm = self.install_with_fake_npm("--min-age-days", "10")
+        resolution = next(command for command in npm.commands if "install" in command)
+        self.assertIn("--min-release-age=10", resolution)
+
+    def test_json_keeps_install_output_on_stderr(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(sys, "stdout", stdout), mock.patch.object(sys, "stderr", stderr):
+            self.install_with_fake_npm("--json", "--dry-run")
+        status = json.loads(stdout.getvalue())
+        self.assertEqual((status["code"], status["tier"]), (0, "s2"))
+        self.assertIn("[DRY]", stderr.getvalue())
+
     def test_register_setting_hands_over_instead_of_writing_configs(self):
         install_skill = importlib.import_module("install_skill")
         root = self.base / "mcp"
@@ -453,18 +487,86 @@ class NpmCli(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, 2)
 
     def test_cli_exits_with_the_refusal_code(self):
+        result = self.invoke_cli()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("scan first", result.stderr)
+
+    def invoke_cli(self, *options):
         env = dict(os.environ)
         env["AGENT_GUARD_NO_USER_CONFIG"] = "1"
         env["LOCALAPPDATA"] = str(self.base)
         env["XDG_DATA_HOME"] = str(self.base)
         for var in locked.ONEDRIVE_VARS:
             env.pop(var, None)
-        result = subprocess.run(
+        return subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "install_skill.py"), "mcp-npm",
-             "--package", PKG, "--version", "1.2.3"],
+             "--package", PKG, "--version", "1.2.3", *options],
             capture_output=True, text=True, env=env, timeout=120)
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+
+    def test_invalid_settings_are_refused(self):
+        cases = [("--trusted-days", "8", "--min-age-days", "7"),
+                 ("--min-age-days", "-1"), ("--trusted-days", "-1"),
+                 ("--min-age-days", "2.5")]
+        for options in cases:
+            with self.subTest(options=options):
+                result = self.invoke_cli(*options, "--json")
+                self.assertEqual(result.returncode, 2)
+                status = json.loads(result.stdout)
+                self.assertEqual(status["code"], 2)
+                self.assertIn("integers", status["message"])
+                self.assertEqual(status["needs_scan"], [])
+
+    def test_json_output_is_one_object(self):
+        result = self.invoke_cli("--json")
+        self.assertEqual(result.returncode, 2)
+        status = json.loads(result.stdout)
+        self.assertEqual(status, {
+            "code": 2, "message": status["message"],
+            "needs_scan": [{"kind": "npm", "package": PKG, "version": "1.2.3"}],
+            "fast_lane": [], "tier": "",
+        })
+        self.assertIn("scan first", status["message"])
+        self.assertIn(f"python scripts/scan_url.py npm:{PKG}@1.2.3", status["message"])
         self.assertIn("scan first", result.stderr)
+
+    def test_json_reports_a_block_receipt(self):
+        values = vars(receipt()) | {"verdict": "BLOCK"}
+        receipts.write_receipt(self.base / "agent-guard" / "mcp", receipts.Receipt(**values))
+        result = self.invoke_cli("--json")
+        self.assertEqual(result.returncode, 1)
+        status = json.loads(result.stdout)
+        self.assertEqual((status["code"], status["needs_scan"]), (1, []))
+        self.assertIn("BLOCK", status["message"])
+
+
+class UnexpectedErrorTests(unittest.TestCase):
+    """An unexpected exception is no verdict (2), never a finding (1)."""
+
+    def run_handler(self, as_json):
+        install_skill = importlib.import_module("install_skill")
+
+        def handler(args, **_kwargs):
+            raise KeyError("unexpected answer shape")
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "stdout", out), mock.patch.object(sys, "stderr", err):
+            with self.assertRaises(SystemExit) as raised:
+                install_skill._run_locked_mcp(argparse.Namespace(json=as_json), handler)
+        return raised.exception.code, out.getvalue(), err.getvalue()
+
+    def test_unexpected_error_is_no_verdict_in_json_mode(self):
+        code, out, err = self.run_handler(True)
+        self.assertEqual(code, 2)
+        status = json.loads(out)
+        self.assertEqual(status["code"], 2)
+        self.assertIn("unexpected answer shape", status["message"])
+        self.assertIn("KeyError", err)
+
+    def test_unexpected_error_is_no_verdict_without_json(self):
+        code, out, err = self.run_handler(False)
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("NO VERDICT", err)
 
 
 if __name__ == "__main__":

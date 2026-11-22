@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 METADATA = "agent-guard-mcp.json"
@@ -49,6 +49,20 @@ class Refused(Exception):
         self.code = code
 
 
+def registry_scan_command(kind: str, package: str, version: str) -> str:
+    separator = {"npm": "@", "pypi": "=="}[kind]
+    return f"python scripts/scan_url.py {kind}:{package}{separator}{version}"
+
+
+class NeedsScan(Refused):
+    """A locked install needs scan receipts for specific registry versions."""
+
+    def __init__(self, items: list[dict], *, prefix: str = "scan first:\n"):
+        self.items: list[dict] = items
+        commands = "\n".join(registry_scan_command(**item) for item in items)
+        super().__init__(2, prefix + commands)
+
+
 @dataclass(frozen=True)
 class Settings:
     install_dir: Path
@@ -70,6 +84,9 @@ class Installed:
     override_reason: str | None
     secrets: tuple
     accepted: dict | None
+    tier: str = "s2"
+    fast_lane: list = field(default_factory=list)
+    source: str = ""
 
 
 # ── Settings ─────────────────────────────────────────────────────────────────
@@ -270,7 +287,8 @@ def write_metadata(directory: Path, installed: Installed) -> None:
             "version": installed.requested, "overrides": installed.overrides,
             "override_reason": installed.override_reason,
             "lockfile_sha256": installed.lockfile_sha256, "at": now_iso(),
-            "agent_guard": agent_guard_version()}
+            "agent_guard": agent_guard_version(), "tier": installed.tier,
+            "fast_lane": installed.fast_lane, "source": installed.source}
     (directory / METADATA).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
