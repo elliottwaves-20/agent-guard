@@ -1,4 +1,4 @@
-"""Shared, offline fast lane contract also consumed by update-globals."""
+"""Shared, offline fast lane contract cases, readable by other tools that implement the same rules."""
 
 import importlib
 import json
