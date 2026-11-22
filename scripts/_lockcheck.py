@@ -11,7 +11,10 @@ tree, so the locked MCP installers check each lockfile entry here:
 - GitHub's advisory API knows no reviewed or malware advisory for it (GitHub's
   malware advisories are not part of the database OSV imports);
 - the version (npm) or every locked file (PyPI) was published at least
-  MIN_AGE_DAYS ago, and the registry's hash matches the locked one.
+  MIN_AGE_DAYS ago (younger means wait: no verdict with the date), and the
+  registry's hash matches the locked one;
+- a uv.lock may hold one Git entry only when the installer names it (GitPin):
+  the scanned repository at the scanned commit.
 
 Result codes follow the wrappers: 0 clean, 1 finding, 2 no verdict. A finding
 wins over a lookup failure; any lookup that fails, is rate limited or returns
@@ -22,6 +25,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -43,6 +47,8 @@ OSV_CHUNK = 500
 GITHUB_CHUNK = 40
 GITHUB_ECOSYSTEM = {"npm": "npm", "PyPI": "pip"}
 WORKERS = 8
+_PIN_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+_PIN_VERSION = re.compile(r"[0-9][0-9A-Za-z.+!-]*")
 
 
 class NoVerdict(Exception):
@@ -60,10 +66,20 @@ class Entry:
     version: str
     integrity: str = ""
     files: tuple = field(default=())  # PyPI: (filename, sha256) of every locked file
+    all_files: bool = False  # PyPI build tool without locked files: judge every file of the version
 
     @property
     def label(self) -> str:
         return f"{self.name}@{self.version}"
+
+
+@dataclass(frozen=True)
+class GitPin:
+    """The one Git entry a uv.lock may hold: the scanned repository at the scanned commit."""
+    name: str
+    url: str
+    sha: str
+    subdirectory: str = ""
 
 
 @dataclass
@@ -108,12 +124,84 @@ def npm_lock_entries(lock: dict) -> list[Entry]:
     return entries
 
 
+def npm_top_level(lock: dict, package: str, version: str, overrides: dict) -> str:
+    """Integrity of the requested top-level package; every override resolved exactly."""
+    top = (lock.get("packages") or {}).get(f"node_modules/{package}")
+    if not isinstance(top, dict) or top.get("version") != version:
+        found = top.get("version") if isinstance(top, dict) else None
+        raise NoVerdict(f"lockfile resolves {package} to {found!r}, not the pinned {version}")
+    integrity = top.get("integrity")
+    if not isinstance(integrity, str) or not integrity:
+        raise NoVerdict(f"lockfile has no integrity for {package}")
+    for name, wanted in overrides.items():
+        found = [entry.get("version") for key, entry in lock["packages"].items()
+                 if key and isinstance(entry, dict) and _npm_name(key, entry) == name]
+        if not found:
+            raise NoVerdict(f"override {name}={wanted} does not appear in the lockfile")
+        if any(v != wanted for v in found):
+            raise NoVerdict(f"override {name}={wanted} is not resolved exactly "
+                            f"(lockfile has {', '.join(sorted(set(map(str, found))))})")
+    return integrity
+
+
+def _github_repo(url: str) -> str | None:
+    """'owner/repo' (lower case) of an https://github.com URL, else None."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or parts.netloc.lower() != "github.com":
+        return None
+    path = parts.path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    segments = path.split("/")
+    if len(segments) != 2 or not all(segments):
+        return None
+    return "/".join(segments).lower()
+
+
+def _check_git_source(name: str, git_url: str, pin: GitPin) -> None:
+    parts = urllib.parse.urlsplit(git_url)
+    query = urllib.parse.parse_qs(parts.query)
+    base = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    if name != pin.name:
+        raise NoVerdict(f"git entry {name!r} is not the scanned package {pin.name!r}")
+    repo = _github_repo(base)
+    if repo is None or repo != _github_repo(pin.url):
+        raise NoVerdict(f"git entry {name} comes from {base}, not the scanned {pin.url}")
+    if query.get("rev") != [pin.sha] or parts.fragment != pin.sha:
+        raise NoVerdict(f"git entry {name} is not pinned to the scanned commit {pin.sha}")
+    if query.get("subdirectory", [""]) != [pin.subdirectory]:
+        raise NoVerdict(f"git entry {name} uses another subdirectory than the scanned one")
+    if set(query) - {"rev", "subdirectory"}:
+        raise NoVerdict(f"git entry {name} has unexpected options: {parts.query}")
+
+
+def pinned_entries(text: str) -> list[Entry]:
+    """Exact `name==version` lines of `uv pip compile` output (build tools)."""
+    entries = []
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        name, sep, version = line.partition("==")
+        if (not sep or not _PIN_NAME.fullmatch(name.strip())
+                or not _PIN_VERSION.fullmatch(version.strip())):
+            raise NoVerdict(f"build requirement is not an exact pin: {raw.strip()!r}")
+        entries.append(Entry("PyPI", name.strip(), version.strip(), all_files=True))
+    if not entries:
+        raise NoVerdict("the build requirements resolved to nothing")
+    return entries
+
+
 def _file_name(url: str) -> str:
     return urllib.parse.unquote(urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1])
 
 
-def uv_lock_entries(text: str, root_name: str) -> list[Entry]:
-    """Registry entries of a uv.lock; the virtual root project is skipped."""
+def uv_lock_entries(text: str, root_name: str, git: GitPin | None = None) -> list[Entry]:
+    """Registry entries of a uv.lock; the virtual root project is skipped.
+
+    With `git`, exactly one Git entry -- the scanned repository at the scanned
+    commit -- must be present; it is checked here and not returned (OSV and
+    GitHub know nothing about a commit, its age is checked by the installer)."""
     if tomllib is None:
         raise NoVerdict("reading uv.lock needs Python 3.11+ (tomllib)")
     try:
@@ -121,9 +209,16 @@ def uv_lock_entries(text: str, root_name: str) -> list[Entry]:
     except tomllib.TOMLDecodeError as exc:
         raise NoVerdict(f"unreadable uv.lock: {exc}") from exc
     entries = []
+    git_seen = 0
     for pkg in data.get("package", []):
         name, version, source = pkg.get("name"), pkg.get("version"), pkg.get("source") or {}
         if source.get("virtual") == "." and name == root_name:
+            continue
+        if git is not None and set(source) == {"git"} and isinstance(source["git"], str):
+            _check_git_source(name, source["git"], git)
+            git_seen += 1
+            if git_seen > 1:
+                raise NoVerdict("uv.lock holds more than one git entry")
             continue
         if source.get("registry") != PYPI_SIMPLE:
             raise NoVerdict(f"entry not from {PYPI_SIMPLE}: {name} ({source!r})")
@@ -138,7 +233,9 @@ def uv_lock_entries(text: str, root_name: str) -> list[Entry]:
         if not files:
             raise NoVerdict(f"entry without locked files: {name}")
         entries.append(Entry("PyPI", name, version, files=tuple(files)))
-    if not entries:
+    if git is not None and git_seen == 0:
+        raise NoVerdict(f"uv.lock has no git entry for the scanned package {git.name}")
+    if not entries and git_seen == 0:
         raise NoVerdict("uv.lock lists no packages")
     return entries
 
@@ -223,41 +320,60 @@ def _parse_time(value: str) -> dt.datetime:
     return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _too_young(label: str, what: str, published: str, cutoff: dt.datetime) -> str | None:
+    """A wait message when `published` is newer than the cutoff, else None."""
+    stamp = _parse_time(published)
+    if stamp <= cutoff:
+        return None
+    ready = (stamp + dt.timedelta(days=MIN_AGE_DAYS)).date().isoformat()
+    return (f"{label}: {what} {published}, younger than {MIN_AGE_DAYS} days; "
+            f"wait until {ready}")
+
+
 def _age_npm(entry, fetch, cutoff):
+    """(finding, wait) for one npm entry; a lookup problem raises."""
     body, _ = fetch(NPM_REGISTRY_URL + urllib.parse.quote(entry.name, safe="@"))
     published = (body.get("time") or {}).get(entry.version)
     integrity = ((body.get("versions") or {}).get(entry.version) or {}).get("dist", {}).get("integrity")
     if not published:
         raise LookupFailed(f"{entry.label}: registry has no publish time")
     if integrity != entry.integrity:
-        return f"{entry.label}: locked integrity differs from the registry"
-    if _parse_time(published) > cutoff:
-        return f"{entry.label}: published {published}, younger than {MIN_AGE_DAYS} days"
-    return None
+        return f"{entry.label}: locked integrity differs from the registry", None
+    return None, _too_young(entry.label, "published", published, cutoff)
 
 
 def _age_pypi(entry, fetch, cutoff):
+    """(finding, wait) for one PyPI entry; a lookup problem raises."""
     name = urllib.parse.quote(entry.name)
     body, _ = fetch(f"{PYPI_JSON_URL}{name}/{urllib.parse.quote(entry.version)}/json")
-    known = {f.get("filename"): f for f in body.get("urls") or []}
-    for filename, digest in entry.files:
+    listed = body.get("urls") or []
+    known = {f.get("filename"): f for f in listed}
+    if entry.all_files:
+        if not listed:
+            raise LookupFailed(f"{entry.label}: PyPI lists no files for this version")
+        wanted = [(f.get("filename"), None) for f in listed]
+    else:
+        wanted = list(entry.files)
+    wait = None
+    for filename, digest in wanted:
         info = known.get(filename)
         if info is None or not info.get("upload_time_iso_8601"):
             raise LookupFailed(f"{entry.label}: PyPI does not list {filename}")
-        if (info.get("digests") or {}).get("sha256") != digest:
-            return f"{entry.label}: {filename} hash differs from PyPI"
-        if _parse_time(info["upload_time_iso_8601"]) > cutoff:
-            return f"{entry.label}: {filename} uploaded {info['upload_time_iso_8601']}, " \
-                   f"younger than {MIN_AGE_DAYS} days"
-    return None
+        if digest is not None and (info.get("digests") or {}).get("sha256") != digest:
+            return f"{entry.label}: {filename} hash differs from PyPI", None
+        wait = wait or _too_young(entry.label, f"{filename} uploaded",
+                                  info["upload_time_iso_8601"], cutoff)
+    return None, wait
 
 
 def _ages(entries, fetch, cutoff, findings, failures):
     def one(entry):
         try:
             if entry.ecosystem == "npm":
-                return _age_npm(entry, fetch, cutoff), None
-            return _age_pypi(entry, fetch, cutoff), None
+                finding, wait = _age_npm(entry, fetch, cutoff)
+            else:
+                finding, wait = _age_pypi(entry, fetch, cutoff)
+            return finding, wait
         except (LookupFailed, AttributeError, TypeError, ValueError) as exc:
             return None, f"age of {entry.label}: {exc}"
     unique = list(dict.fromkeys(entries))
@@ -270,7 +386,10 @@ def _ages(entries, fetch, cutoff, findings, failures):
 
 
 def check(entries: list[Entry], *, now: dt.datetime | None = None, fetch=http_fetch) -> Result:
-    """Run every check over *entries*; 0 clean, 1 finding, 2 no verdict."""
+    """Run every check over *entries*; 0 clean, 1 finding, 2 no verdict.
+
+    An entry younger than MIN_AGE_DAYS is no finding but a reason to wait: it
+    gives no verdict (2) with the date it becomes eligible (#48, K10)."""
     if not entries:
         return Result(2, ["NO VERDICT -- the lockfile lists no packages"])
     now = now or dt.datetime.now(dt.timezone.utc)

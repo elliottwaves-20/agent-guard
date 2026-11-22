@@ -237,11 +237,18 @@ class Check(unittest.TestCase):
         net = clean_npm_net(ghsa={("reviewed", "@scope/dep@2.0.0"): ["GHSA-rev0-0000-0000"]})
         self.assertEqual(lockcheck.check(npm_entries(), now=NOW, fetch=net).code, 1)
 
-    def test_young_version_blocks(self):
+    def test_young_version_waits(self):
         net = clean_npm_net(npm_time={"srv": {"1.0.0": NEW}, "@scope/dep": {"2.0.0": OLD}})
         result = lockcheck.check(npm_entries(), now=NOW, fetch=net)
-        self.assertEqual(result.code, 1)
-        self.assertIn("srv@1.0.0", "\n".join(result.lines))
+        self.assertEqual(result.code, 2)
+        text = "\n".join(result.lines)
+        self.assertIn("srv@1.0.0", text)
+        self.assertIn("wait until 2026-11-27", text)
+
+    def test_advisory_wins_over_waiting(self):
+        net = clean_npm_net(npm_time={"srv": {"1.0.0": NEW}, "@scope/dep": {"2.0.0": OLD}},
+                            osv={("@scope/dep", "2.0.0"): ["GHSA-aaaa-bbbb-cccc"]})
+        self.assertEqual(lockcheck.check(npm_entries(), now=NOW, fetch=net).code, 1)
 
     def test_unknown_publish_time_has_no_verdict(self):
         net = clean_npm_net(npm_time={"srv": {}, "@scope/dep": {"2.0.0": OLD}})
@@ -304,9 +311,11 @@ class PypiCheck(unittest.TestCase):
         net = FakeNet(pypi_files={("srv", "1.0.0"): self.files()})
         self.assertEqual(lockcheck.check(self.entries(), now=NOW, fetch=net).code, 0)
 
-    def test_young_locked_file_blocks(self):
+    def test_young_locked_file_waits(self):
         net = FakeNet(pypi_files={("srv", "1.0.0"): self.files(wheel_time=NEW)})
-        self.assertEqual(lockcheck.check(self.entries(), now=NOW, fetch=net).code, 1)
+        result = lockcheck.check(self.entries(), now=NOW, fetch=net)
+        self.assertEqual(result.code, 2)
+        self.assertIn("wait until", "\n".join(result.lines))
 
     def test_hash_mismatch_blocks(self):
         net = FakeNet(pypi_files={("srv", "1.0.0"): self.files(wheel_hash="zz")})
@@ -320,6 +329,139 @@ class PypiCheck(unittest.TestCase):
         net = FakeNet(pypi_files={("srv", "1.0.0"): self.files()})
         lockcheck.check(self.entries(), now=NOW, fetch=net)
         self.assertTrue(any("ecosystem=pip" in c for c in net.calls if "api.github.com" in c))
+
+
+SHA = "0123456789abcdef0123456789abcdef01234567"
+OTHER_SHA = "f" * 40
+GIT_PKG = f"""
+[[package]]
+name = "gitsrv"
+version = "0.3.0"
+source = {{ git = "https://github.com/Owner/Repo?rev={SHA}#{SHA}" }}
+"""
+
+
+class GitPinParsing(unittest.TestCase):
+    pin = lockcheck.GitPin("gitsrv", "https://github.com/owner/repo", SHA)
+
+    def entries(self, text, pin=pin):
+        return lockcheck.uv_lock_entries(text, root_name="wrapper", git=pin)
+
+    def test_expected_git_entry_is_accepted(self):
+        entries = self.entries(UV_LOCK + GIT_PKG)
+        self.assertEqual([e.name for e in entries], ["srv"])
+
+    def test_git_entry_with_other_sha_has_no_verdict(self):
+        with self.assertRaises(lockcheck.NoVerdict):
+            self.entries(UV_LOCK + GIT_PKG.replace(f"#{SHA}", f"#{OTHER_SHA}"))
+        with self.assertRaises(lockcheck.NoVerdict):
+            self.entries(UV_LOCK + GIT_PKG.replace(f"rev={SHA}", f"rev={OTHER_SHA}"))
+
+    def test_git_entry_with_other_repo_has_no_verdict(self):
+        for repo in ("https://github.com/owner/other", "https://gitlab.com/owner/repo",
+                     "http://github.com/owner/repo", "https://github.com.evil.test/owner/repo"):
+            with self.subTest(repo=repo):
+                with self.assertRaises(lockcheck.NoVerdict):
+                    self.entries(UV_LOCK + GIT_PKG.replace("https://github.com/Owner/Repo", repo))
+
+    def test_git_entry_with_other_name_has_no_verdict(self):
+        with self.assertRaises(lockcheck.NoVerdict):
+            self.entries(UV_LOCK + GIT_PKG.replace('name = "gitsrv"', 'name = "other"'))
+
+    def test_git_entry_with_other_subdirectory_has_no_verdict(self):
+        text = UV_LOCK + GIT_PKG.replace("?rev=", "?subdirectory=x&rev=")
+        with self.assertRaises(lockcheck.NoVerdict):
+            self.entries(text, lockcheck.GitPin("gitsrv", "https://github.com/owner/repo", SHA, "y"))
+        with self.assertRaises(lockcheck.NoVerdict):
+            self.entries(text)
+        self.assertEqual(len(self.entries(
+            text, lockcheck.GitPin("gitsrv", "https://github.com/owner/repo", SHA, "x"))), 1)
+
+    def test_second_git_entry_has_no_verdict(self):
+        with self.assertRaises(lockcheck.NoVerdict):
+            self.entries(UV_LOCK + GIT_PKG + GIT_PKG.replace('"gitsrv"', '"gitsrv2"'))
+
+    def test_missing_git_entry_has_no_verdict(self):
+        with self.assertRaises(lockcheck.NoVerdict):
+            self.entries(UV_LOCK)
+
+    def test_git_entry_without_expectation_has_no_verdict(self):
+        with self.assertRaises(lockcheck.NoVerdict):
+            lockcheck.uv_lock_entries(UV_LOCK + GIT_PKG, root_name="wrapper")
+
+    def test_path_and_editable_entries_have_no_verdict(self):
+        for source in ('{ path = "../x" }', '{ editable = "../x" }', '{ directory = "../x" }',
+                       '{ url = "https://example.test/x.whl" }'):
+            with self.subTest(source=source):
+                text = UV_LOCK + GIT_PKG + (
+                    '\n[[package]]\nname = "local"\nversion = "1.0.0"\n'
+                    f"source = {source}\n")
+                with self.assertRaises(lockcheck.NoVerdict):
+                    self.entries(text)
+
+
+class BuildConstraints(unittest.TestCase):
+    def test_pinned_entries_reads_compile_output(self):
+        text = "# generated\nsetuptools==80.9.0\n    # via -r -\n\nWheel==0.45.1\n"
+        entries = lockcheck.pinned_entries(text)
+        self.assertEqual([(e.name, e.version, e.all_files) for e in entries],
+                         [("setuptools", "80.9.0", True), ("Wheel", "0.45.1", True)])
+
+    def test_pinned_entries_refuses_ranges(self):
+        for line in ("setuptools>=80", "setuptools", "x @ https://example.test/x.whl",
+                     "-e ./x", "a==1.0; python_version<'3'"):
+            with self.subTest(line=line):
+                with self.assertRaises(lockcheck.NoVerdict):
+                    lockcheck.pinned_entries(line + "\n")
+
+    def test_pinned_entries_refuses_empty_output(self):
+        with self.assertRaises(lockcheck.NoVerdict):
+            lockcheck.pinned_entries("# nothing\n")
+
+    def files(self, second_time=OLD):
+        return [{"filename": "setuptools-80.9.0.tar.gz", "upload_time_iso_8601": OLD,
+                 "digests": {"sha256": "aa"}},
+                {"filename": "setuptools-80.9.0-py3-none-any.whl",
+                 "upload_time_iso_8601": second_time, "digests": {"sha256": "bb"}}]
+
+    def test_build_constraint_checks_every_file_of_the_version(self):
+        entry = lockcheck.pinned_entries("setuptools==80.9.0\n")
+        net = FakeNet(pypi_files={("setuptools", "80.9.0"): self.files()})
+        self.assertEqual(lockcheck.check(entry, now=NOW, fetch=net).code, 0)
+        net = FakeNet(pypi_files={("setuptools", "80.9.0"): self.files(second_time=NEW)})
+        self.assertEqual(lockcheck.check(entry, now=NOW, fetch=net).code, 2)
+
+    def test_build_constraint_without_files_on_pypi_has_no_verdict(self):
+        entry = lockcheck.pinned_entries("setuptools==80.9.0\n")
+        net = FakeNet(pypi_files={("setuptools", "80.9.0"): []})
+        self.assertEqual(lockcheck.check(entry, now=NOW, fetch=net).code, 2)
+
+
+class NpmTopLevel(unittest.TestCase):
+    def lock(self, srv="1.0.0", dep="2.0.0", nested_dep=None):
+        packages = {"node_modules/srv": npm_pkg("srv", srv),
+                    "node_modules/dep": npm_pkg("dep", dep)}
+        if nested_dep:
+            packages["node_modules/srv/node_modules/dep"] = npm_pkg("dep", nested_dep)
+        return npm_lock(packages)
+
+    def test_top_level_integrity_is_returned(self):
+        self.assertEqual(lockcheck.npm_top_level(self.lock(), "srv", "1.0.0", {}),
+                         "sha512-srv-1.0.0")
+
+    def test_top_level_must_match_the_pin(self):
+        with self.assertRaises(lockcheck.NoVerdict):
+            lockcheck.npm_top_level(self.lock(srv="1.0.1"), "srv", "1.0.0", {})
+        with self.assertRaises(lockcheck.NoVerdict):
+            lockcheck.npm_top_level(self.lock(), "other", "1.0.0", {})
+
+    def test_override_must_be_resolved_exactly(self):
+        self.assertEqual(lockcheck.npm_top_level(self.lock(), "srv", "1.0.0", {"dep": "2.0.0"}),
+                         "sha512-srv-1.0.0")
+        with self.assertRaises(lockcheck.NoVerdict):
+            lockcheck.npm_top_level(self.lock(nested_dep="1.0.0"), "srv", "1.0.0", {"dep": "2.0.0"})
+        with self.assertRaises(lockcheck.NoVerdict):
+            lockcheck.npm_top_level(self.lock(), "srv", "1.0.0", {"absent": "1.0.0"})
 
 
 if __name__ == "__main__":
