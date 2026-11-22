@@ -232,6 +232,14 @@ def parse_git_url(url: str) -> tuple:
     return owner, repo, sha.lower(), subdir
 
 
+def git_scan_ids(source: str, subdir: str) -> list:
+    """Scanned parts that cover an install from `subdir`, narrowest first: the
+    subdirectory itself, each parent, the whole repository."""
+    parts = [p for p in subdir.split("/") if p]
+    ids = [f"{source}#{'/'.join(parts[:n])}" for n in range(len(parts), 0, -1)]
+    return ids + [source]
+
+
 def build_requires(pyproject_text: str) -> list:
     """[build-system].requires of the scanned pyproject.toml, or the PEP 517 default."""
     import tomllib
@@ -350,9 +358,9 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
     source = f"{owner}/{repo}"
     scanned_id = source + (f"#{subdir}" if subdir else "")
     import _mcp_receipts
+    covering = {_mcp_receipts.identity("git", c) for c in git_scan_ids(source, subdir)}
     if (receipt.kind != "git" or receipt.version != sha
-            or _mcp_receipts.identity("git", receipt.package)
-            != _mcp_receipts.identity("git", scanned_id)):
+            or _mcp_receipts.identity("git", receipt.package) not in covering):
         raise Refused(2, f"the scan receipt is for {receipt.package}@{receipt.version}, "
                          f"not {scanned_id}@{sha}")
     if not which("git"):

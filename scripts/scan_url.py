@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import shutil
@@ -17,6 +18,8 @@ from _skillspector import combine_verdicts, die, skipped_dynamic_verdict as _ski
 from _url_resolver import FetchError, ResolvedSource, resolve_url
 from install_skill import (
     TOOLS,
+    cmd_mcp_npm,
+    cmd_mcp_pypi,
     infer_python_project,
     install_mcp,
     install_mcp_git,
@@ -24,6 +27,8 @@ from install_skill import (
     workspace_default,
 )
 import _dynamic
+import _mcp_locked
+import _mcp_receipts
 from scan_mcp import fetch_npm, fetch_pypi, run_remote, run_sandbox
 from scan_mcp import run_skillspector as run_mcp_static
 from scan_skill import find_skill_dirs, scan_catalog
@@ -317,13 +322,39 @@ def offer_skill_install(path: Path, dry_run: bool) -> None:
     install_skill(path, name, workspace_default(), dry=False, selected=selected)
 
 
-def offer_mcp_install(name: str, command: str, args: list[str], dry_run: bool) -> None:
-    cmd = " ".join([
-        "python scripts/install_skill.py mcp",
-        f"--name {name}",
-        f"--command {command}",
-        *[f"--arg={arg}" for arg in args],
-    ])
+def receipt_root() -> Path:
+    """Where scan receipts go: the [mcp] install directory (Refused on a broken section)."""
+    import _skillspector
+    return _mcp_locked.settings(_skillspector.USER_CONFIG, os.environ, sys.platform).install_dir
+
+
+def record_receipt(kind: str, package: str, version: str, meta: dict, rc: int) -> None:
+    """Record a SAFE or BLOCK verdict for the exact scanned archive (#48, K1).
+
+    No verdict records nothing; a missing archive hash or a broken [mcp]
+    section is reported and leaves the scan result as it is."""
+    if rc not in (0, 1):
+        return
+    if not meta.get("archive_sha256"):
+        print("[WARN] no scan receipt: the scanned archive has no recorded hash")
+        return
+    try:
+        root = receipt_root()
+        path = _mcp_receipts.write_receipt(root, _mcp_receipts.Receipt(
+            kind=kind, package=package, version=version,
+            archive_sha256=meta["archive_sha256"], integrity=meta.get("integrity", ""),
+            verdict="SAFE" if rc == 0 else "BLOCK", at=_mcp_locked.now_iso(),
+            agent_guard=_mcp_locked.agent_guard_version()))
+    except (_mcp_locked.Refused, OSError) as exc:
+        print(f"[WARN] no scan receipt written: {exc}")
+        return
+    print(f"Scan receipt: {path}")
+
+
+def offer_locked_mcp_install(kind: str, package: str, version: str, dry_run: bool) -> None:
+    """After a SAFE package scan: the locked installer for exactly this version."""
+    sub = {"npm": "mcp-npm", "pypi": "mcp-pypi"}[kind]
+    cmd = f"python scripts/install_skill.py {sub} --package {package} --version {version}"
     if dry_run:
         print(f"Install after SAFE verdict: {cmd} --dry-run")
         return
@@ -334,7 +365,15 @@ def offer_mcp_install(name: str, command: str, args: list[str], dry_run: bool) -
         print("Install skipped by user.")
         return
     selected = choose_install_tools()
-    install_mcp(name, {"command": command, "args": args}, dry=False, selected=selected)
+    args = argparse.Namespace(package=package, version=version, name=None, override=[],
+                              override_reason=None, bin=None, executable=None, secret=[],
+                              accept=None, tools=selected, dry_run=False)
+    import _skillspector
+    try:
+        (cmd_mcp_npm if kind == "npm" else cmd_mcp_pypi)(
+            args, config=_skillspector.USER_CONFIG, env=os.environ, platform=sys.platform)
+    except _mcp_locked.Refused as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
 
 
 def offer_remote_mcp_install(name: str, url: str, dry_run: bool) -> None:
@@ -387,8 +426,11 @@ def offer_git_mcp_install(source: ResolvedSource, dry_run: bool) -> None:
         print("Install skipped by user.")
         return
     selected = choose_install_tools()
-    install_mcp_git(name, git_url, package, dry=False, selected=selected,
-                    executable=script)
+    try:
+        install_mcp_git(name, git_url, package, dry=False, selected=selected,
+                        executable=script, scanned_dir=source.source_path)
+    except _mcp_locked.Refused as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
 
 
 def package_page_from_command(command: str) -> tuple[str, str] | None:
@@ -656,22 +698,27 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
     print(f"Detected type: {kind}")
 
     if source.kind == "pypi":
+        meta: dict = {}
         with tempfile.TemporaryDirectory() as d:
-            pinned = fetch_pypi(source.install_hint, Path(d))
+            pinned = fetch_pypi(source.install_hint, Path(d), meta=meta, wheel=True)
             rc = run_mcp_static(Path(d))
         rc = combine_verdicts(rc, run_dynamic_stage("pypi", pinned, dynamic))
+        package, _, version = pinned.partition("==")
+        record_receipt("pypi", package, version, meta, rc)
         if rc == 0:
-            offer_mcp_install(source.install_hint.split("==")[0], "uvx", [pinned], dry_run)
+            offer_locked_mcp_install("pypi", package, version, dry_run)
         return rc
 
     if source.kind == "npm":
+        meta = {}
         with tempfile.TemporaryDirectory() as d:
-            pinned = fetch_npm(source.install_hint, Path(d))
+            pinned = fetch_npm(source.install_hint, Path(d), meta=meta)
             rc = run_mcp_static(Path(d))
         rc = combine_verdicts(rc, run_dynamic_stage("npm", pinned, dynamic))
+        package, _, version = pinned.rpartition("@")
+        record_receipt("npm", package, version, meta, rc)
         if rc == 0:
-            offer_mcp_install(pinned.rpartition("@")[0], "npx",
-                              ["--silent", "-y", pinned], dry_run)
+            offer_locked_mcp_install("npm", package, version, dry_run)
         return rc
 
     path = source.source_path
@@ -719,6 +766,12 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
 
     if kind == "mcp-source":
         rc = run_mcp_static(path)
+        match = re.fullmatch(r"https://github\.com/([^/@]+/[^/@]+)@([0-9a-f]{40})",
+                             source.install_hint or "")
+        if source.kind == "github" and match:
+            scanned = match.group(1).lower() + (f"#{source.subpath}" if source.subpath else "")
+            record_receipt("git", scanned, match.group(2),
+                           {"archive_sha256": source.archive_sha256}, rc)
         if rc == 0:
             offer_git_mcp_install(source, dry_run)
         return rc

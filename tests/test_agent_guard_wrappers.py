@@ -2078,17 +2078,20 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         scan_url = importlib.import_module("scan_url")
         calls = []
         original_interactive = scan_url.interactive
-        original_install = scan_url.install_mcp
+        original_install = scan_url.cmd_mcp_pypi
+        out = io.StringIO()
         try:
             scan_url.interactive = lambda: False
-            scan_url.install_mcp = lambda *args, **kwargs: calls.append((args, kwargs))
+            scan_url.cmd_mcp_pypi = lambda *args, **kwargs: calls.append((args, kwargs))
 
-            scan_url.offer_mcp_install("example-mcp", "uvx", ["example-mcp"], dry_run=False)
+            with contextlib.redirect_stdout(out):
+                scan_url.offer_locked_mcp_install("pypi", "example-mcp", "1.0.0", dry_run=False)
         finally:
             scan_url.interactive = original_interactive
-            scan_url.install_mcp = original_install
+            scan_url.cmd_mcp_pypi = original_install
 
         self.assertEqual(calls, [])
+        self.assertIn("mcp-pypi --package example-mcp --version 1.0.0", out.getvalue())
 
     def test_install_mcp_remote_writes_url_entries(self):
         installer = importlib.import_module("install_skill")

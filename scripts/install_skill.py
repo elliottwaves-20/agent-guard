@@ -442,8 +442,10 @@ def install_mcp_git(name: str, git_url: str, package: str, dry: bool,
                                     os.environ if env is None else env,
                                     sys.platform if platform is None else platform)
     owner, repo, sha, subdir = _mcp_uv.parse_git_url(git_url)
-    scanned_id = f"{owner}/{repo}" + (f"#{subdir}" if subdir else "")
     print(f"\n-- Git MCP '{name}' --")
+    candidates = _mcp_uv.git_scan_ids(f"{owner}/{repo}", subdir)
+    scanned_id = next((c for c in candidates if _mcp_receipts.receipt_path(
+        settings.install_dir, "git", c, sha).is_file()), candidates[0])
     receipt, accepted = _mcp_receipts.require_receipt(settings.install_dir, "git", scanned_id,
                                                       sha, accept)
     installed = _mcp_uv.git_install(
@@ -966,6 +968,12 @@ def main():
         mcp_args = list(args.arg or [])
         if args.args:
             mcp_args.extend(args.args[1:] if args.args[:1] == ["--"] else args.args)
+        if _mcp_locked.is_adhoc_launch(args.command, mcp_args):
+            print(f"ERROR: {args.command} resolves its package tree at every start, so what "
+                  "runs is never what was scanned. Install the scanned version from a locked "
+                  "tree instead: install_skill.py mcp-npm (npm), mcp-pypi (PyPI) or mcp-git "
+                  "(GitHub). Nothing was installed.", file=sys.stderr)
+            sys.exit(2)
         entry = {"command": args.command, "args": mcp_args}
         if env:
             entry["env"] = env

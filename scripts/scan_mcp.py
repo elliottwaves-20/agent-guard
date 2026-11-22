@@ -437,38 +437,75 @@ def safe_extract_zip(data: bytes, dest: Path):
 
 # -- source acquisition (NO package code executed) ----------------------------
 
-def fetch_pypi(spec: str, dest: Path) -> str:
+def _record(meta: dict | None, data: bytes, filename: str, integrity: str = "") -> None:
+    """What a scan receipt binds: the exact archive that was scanned (#48, K1)."""
+    if meta is not None:
+        meta.update({"archive_sha256": hashlib.sha256(data).hexdigest(),
+                     "integrity": integrity, "filename": filename})
+
+
+def fetch_pypi(spec: str, dest: Path, meta: dict | None = None, wheel: bool = False) -> str:
+    """Download and unpack one PyPI release file without running it.
+
+    With `wheel`, the single pure wheel (*-none-any.whl) is scanned when the
+    release has exactly one: that is the file `uv sync --no-build` installs.
+    Otherwise the sdist is scanned, as before."""
     name, _, version = spec.partition("==")
-    meta = http_json(f"https://pypi.org/pypi/{name}/json")
-    version = version or meta["info"]["version"]
-    files = meta.get("releases", {}).get(version)
+    info = http_json(f"https://pypi.org/pypi/{name}/json")
+    version = version or info["info"]["version"]
+    files = info.get("releases", {}).get(version)
     if not files:
         die(f"{name}=={version} has no release files on PyPI; refusing a different version.")
+    pure = [f for f in files if f.get("packagetype") == "bdist_wheel"
+            and str(f.get("filename", "")).endswith("-none-any.whl")]
+    if wheel and len(pure) == 1:
+        chosen = pure[0]
+        print(f"  fetching pure wheel: {chosen['url']}")
+        data = http_bytes(chosen["url"])
+        expected = (chosen.get("digests") or {}).get("sha256")
+        if not expected or hashlib.sha256(data).hexdigest() != expected:
+            die(f"{chosen.get('filename')} does not match the sha256 PyPI lists for it.")
+        safe_extract_zip(data, dest)
+        _record(meta, data, chosen["filename"])
+        return f"{name}=={version}"
     sdists = [f for f in files if f.get("packagetype") == "sdist"]
     if not sdists:
         die(f"{name}=={version} has no source distribution (sdist) on PyPI -- "
             "cannot scan source without executing a wheel. Try --sandbox instead.")
     url = sdists[0]["url"]
     print(f"  fetching sdist: {url}")
-    safe_extract_tar(http_bytes(url), dest)
+    data = http_bytes(url)
+    safe_extract_tar(data, dest)
+    _record(meta, data, sdists[0].get("filename") or url.rsplit("/", 1)[-1])
     return f"{name}=={version}"
 
 
-def fetch_npm(spec: str, dest: Path) -> str:
+def _sri_sha512(data: bytes) -> str:
+    import base64
+    return "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode("ascii")
+
+
+def fetch_npm(spec: str, dest: Path, meta: dict | None = None) -> str:
     if spec.startswith("@"):
         scope_name, _, version = spec[1:].partition("@")
         name, version = "@" + scope_name, version
     else:
         name, _, version = spec.partition("@")
-    meta = http_json(f"https://registry.npmjs.org/{name}")
-    version = version or meta.get("dist-tags", {}).get("latest")
-    version = meta.get("dist-tags", {}).get(version, version)
-    ver = meta.get("versions", {}).get(version)
+    doc = http_json(f"https://registry.npmjs.org/{name}")
+    version = version or doc.get("dist-tags", {}).get("latest")
+    version = doc.get("dist-tags", {}).get(version, version)
+    ver = doc.get("versions", {}).get(version)
     if not ver:
         die(f"{name}@{version} does not exist on npm; refusing a different version.")
     url = ver["dist"]["tarball"]
     print(f"  fetching npm tarball: {url}")
-    safe_extract_tar(http_bytes(url), dest)
+    data = http_bytes(url)
+    integrity = ver["dist"].get("integrity") or ""
+    if integrity.startswith("sha512-") and _sri_sha512(data) != integrity:
+        die(f"{name}@{version}: the tarball does not match the integrity npm lists for it.")
+    safe_extract_tar(data, dest)
+    _record(meta, data, url.rsplit("/", 1)[-1],
+            integrity if integrity.startswith("sha512-") else "")
     return f"{name}@{version}"
 
 

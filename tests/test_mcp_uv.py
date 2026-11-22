@@ -574,6 +574,27 @@ class GitInstall(unittest.TestCase):
         self.assertEqual(self.fetched, [f"https://raw.githubusercontent.com/example/mcp/{SHA}/"
                                         "servers/ex/pyproject.toml"])
 
+    def test_whole_repository_scan_covers_a_subdirectory(self):
+        url = f"https://github.com/example/mcp@{SHA}#subdirectory=servers/ex"
+        uv = FakeGitUv(lock_text=lambda root: git_lock(root, query_extra="subdirectory=servers/ex&"))
+        for scanned in ("example/mcp", "example/mcp#servers", "Example/MCP#servers/ex"):
+            with self.subTest(scanned=scanned):
+                self.install(uv=uv, git_url=url, receipt=git_receipt(package=scanned))
+
+    def test_narrower_or_other_scan_does_not_cover_the_install(self):
+        cases = [(GIT_URL, "example/mcp#servers"),
+                 (f"https://github.com/example/mcp@{SHA}#subdirectory=servers/ex",
+                  "example/mcp#servers/other"),
+                 (f"https://github.com/example/mcp@{SHA}#subdirectory=servers",
+                  "example/mcp#servers/ex")]
+        for url, scanned in cases:
+            with self.subTest(url=url, scanned=scanned):
+                uv = FakeGitUv()
+                with self.assertRaises(locked.Refused) as ctx:
+                    self.install(uv=uv, git_url=url, receipt=git_receipt(package=scanned))
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertEqual(uv.commands, [])
+
     def test_receipt_must_be_for_this_commit(self):
         uv = FakeGitUv()
         with self.assertRaises(locked.Refused) as ctx:

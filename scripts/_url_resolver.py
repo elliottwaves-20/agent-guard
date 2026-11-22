@@ -8,6 +8,7 @@ install anything from the page itself.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import html
@@ -70,6 +71,8 @@ class ResolvedSource:
     source_urls: list[str] | None = None
     remote_urls: list[str] | None = None
     install_commands: list[str] | None = None
+    archive_sha256: str = ""  # sha256 of the downloaded GitHub ZIP (scan receipt, #48)
+    subpath: str = ""  # part of the repository that was scanned ("" = all of it)
 
 
 class CompactHTMLText(HTMLParser):
@@ -292,7 +295,8 @@ def resolve_github(url: str, dest: Path) -> ResolvedSource:
     owner, repo, ref, subpath = github_parts(url)
     sha = github_ref_sha(owner, repo, ref) if ref else github_default_sha(owner, repo)
     archive = f"https://github.com/{owner}/{repo}/archive/{sha}.zip"
-    safe_extract_zip(http_bytes(archive), dest)
+    data = http_bytes(archive)
+    safe_extract_zip(data, dest)
     root = first_child_dir(dest)
     source = root.joinpath(*subpath) if subpath else root
     try:
@@ -306,7 +310,9 @@ def resolve_github(url: str, dest: Path) -> ResolvedSource:
         label += "/" + "/".join(subpath)
     return ResolvedSource(kind="github", source_path=source, label=label,
                           pinned_ref=sha,
-                          install_hint=f"https://github.com/{owner}/{repo}@{sha}")
+                          install_hint=f"https://github.com/{owner}/{repo}@{sha}",
+                          archive_sha256=hashlib.sha256(data).hexdigest(),
+                          subpath="/".join(subpath or ()))
 
 
 def resolve_archive(url: str, dest: Path) -> ResolvedSource:
