@@ -5,12 +5,19 @@ published advisory (OSV, GitHub reviewed and malware) and be at least
 MIN_AGE_DAYS old. Anything that cannot be checked ends in no verdict.
 """
 import datetime as dt
+import http.client
 import importlib
+import io
 import json
 import os
 import sys
 import unittest
+import urllib.error
+import urllib.request
+import urllib.response
+from email.message import Message
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -20,6 +27,7 @@ lockcheck = importlib.import_module("_lockcheck")
 NOW = dt.datetime(2026, 11, 22, 12, 0, tzinfo=dt.timezone.utc)
 OLD = "2026-10-01T00:00:00.000Z"
 NEW = "2026-11-20T00:00:00.000Z"
+OSV_DETAIL_URL = "https://api.osv.dev/v1/vulns/"
 
 
 def npm_lock(packages):
@@ -40,13 +48,14 @@ class FakeNet:
     """Answers the registry, OSV and GitHub requests from tables."""
 
     def __init__(self, osv=None, ghsa=None, npm_time=None, npm_integrity=None,
-                 pypi_files=None, fail=None):
+                 pypi_files=None, fail=None, osv_details=None):
         self.osv = osv or {}
         self.ghsa = ghsa or {}
         self.npm_time = npm_time or {}
         self.npm_integrity = npm_integrity or {}
         self.pypi_files = pypi_files or {}
         self.fail = fail
+        self.osv_details = osv_details or {}
         self.calls = []
 
     def __call__(self, url, payload=None):
@@ -60,6 +69,15 @@ class FakeNet:
                 ids = self.osv.get(key, [])
                 results.append({"vulns": [{"id": i} for i in ids]} if ids else {})
             return {"results": results}, None
+        if url.startswith(OSV_DETAIL_URL):
+            advisory_id = url.removeprefix(OSV_DETAIL_URL)
+            if advisory_id in self.osv_details:
+                return self.osv_details[advisory_id], None
+            affected = [
+                {"package": {"name": name, "ecosystem": "npm"}, "versions": [version]}
+                for (name, version), ids in self.osv.items() if advisory_id in ids
+            ]
+            return {"id": advisory_id, "affected": affected}, None
         if url.startswith(lockcheck.GITHUB_ADVISORIES_URL):
             query = url.split("?", 1)[1]
             params = dict(p.split("=", 1) for p in query.split("&"))
@@ -67,10 +85,10 @@ class FakeNet:
             affects = [a for a in params["affects"].replace("%40", "@").replace("%2F", "/").split("%2C")]
             hits = []
             for item in affects:
-                for ghsa in self.ghsa.get((kind, item), []):
-                    name = item.rpartition("@")[0]
-                    hits.append({"ghsa_id": ghsa,
-                                 "vulnerabilities": [{"package": {"name": name}}]})
+                for advisory in self.ghsa.get((kind, item), []):
+                    name, _, version = item.rpartition("@")
+                    hits.append(github_advisory(advisory, name, f"= {version}", None)
+                                if isinstance(advisory, str) else advisory)
             return hits, None
         if url.startswith(lockcheck.NPM_REGISTRY_URL):
             name = url[len(lockcheck.NPM_REGISTRY_URL):].replace("%2F", "/")
@@ -87,6 +105,38 @@ class FakeNet:
                 raise lockcheck.LookupFailed("404")
             return {"urls": files}, None
         raise AssertionError(f"unexpected url {url}")
+
+
+def github_advisory(advisory_id="GHSA-review", name="srv", version_range=">= 1.0.0, < 1.0.3",
+                    fixed="1.0.3", ecosystem="npm"):
+    return {
+        "ghsa_id": advisory_id,
+        "severity": "high",
+        "cve_id": "CVE-2026-1234",
+        "identifiers": [
+            {"type": "GHSA", "value": advisory_id},
+            {"type": "CVE", "value": "CVE-2026-1234"},
+        ],
+        "withdrawn_at": None,
+        "vulnerabilities": [
+            {"package": {"name": name, "ecosystem": ecosystem},
+             "vulnerable_version_range": version_range, "first_patched_version": fixed},
+        ],
+    }
+
+
+def osv_advisory(advisory_id="OSV-review", events=None, severity=None):
+    return {
+        "id": advisory_id,
+        "aliases": ["CVE-2026-1234"],
+        "database_specific": {"severity": severity} if severity else {},
+        "affected": [
+            {"package": {"ecosystem": "npm", "name": "srv"},
+             "ranges": [{"type": "SEMVER", "events": events if events is not None else [
+                 {"introduced": "0"}, {"fixed": "1.0.3"},
+             ]}]},
+        ],
+    }
 
 
 class NpmLockParsing(unittest.TestCase):
@@ -295,6 +345,342 @@ class Check(unittest.TestCase):
 
     def test_no_entries_has_no_verdict(self):
         self.assertEqual(lockcheck.check([], now=NOW, fetch=FakeNet()).code, 2)
+
+
+class StructuredCheck(unittest.TestCase):
+    def github(self, advisory, version="1.0.0", kind="reviewed"):
+        entry = lockcheck.Entry("npm", "srv", version, f"sha512-srv-{version}")
+        net = FakeNet(ghsa={(kind, entry.label): [advisory]}, npm_time={"srv": {version: OLD}})
+        return lockcheck.check([entry], now=NOW, fetch=net)
+
+    def osv(self, advisory, version="1.0.0"):
+        entry = lockcheck.Entry("npm", "srv", version, f"sha512-srv-{version}")
+        advisory_id = advisory["id"]
+        net = FakeNet(osv={("srv", version): [advisory_id]},
+                      osv_details={advisory_id: advisory}, npm_time={"srv": {version: OLD}})
+        return lockcheck.check([entry], now=NOW, fetch=net)
+
+    def advisory(self, result):
+        advisories = getattr(result, "advisories", [])
+        self.assertEqual(len(advisories), 1)
+        return advisories[0]
+
+    def test_github_advisory_is_structured(self):
+        result = self.github(github_advisory())
+        self.assertEqual(result.code, 1)
+        advisory = self.advisory(result)
+        self.assertEqual(advisory.entry, npm_entries()[0])
+        self.assertEqual(set(advisory.aliases), {"CVE-2026-1234", "GHSA-review"})
+        expected = {
+            "id": "GHSA-review", "source": "github-reviewed", "severity": "high",
+            "aliases": list(advisory.aliases), "withdrawn": False,
+            "affected": [{"lower": "1.0.0", "lower_inclusive": True,
+                          "upper": "1.0.3", "upper_inclusive": False, "fixed": "1.0.3"}],
+        }
+        self.assertEqual(json.loads(json.dumps(advisory.as_case())), expected)
+        self.assertEqual(advisory.affected, tuple(expected["affected"]))
+        self.assertEqual(result.failures, [])
+
+    def test_github_medium_is_moderate(self):
+        result = self.github({**github_advisory(), "severity": "medium"})
+        self.assertEqual(self.advisory(result).severity, "moderate")
+
+    def test_github_withdrawn_is_flagged(self):
+        result = self.github({**github_advisory(), "withdrawn_at": OLD})
+        self.assertTrue(self.advisory(result).withdrawn)
+
+    def test_github_unknown_range_is_a_failure(self):
+        for bad_range in ("~1.0", ">= 1.0, >= 2.0", ">= 1.0.0, > 2.0.0", "> 1.0"):
+            with self.subTest(bad_range=bad_range):
+                advisory = github_advisory(version_range=bad_range)
+                advisory["vulnerabilities"].extend(github_advisory()["vulnerabilities"])
+                result = self.github(advisory)
+                self.assertEqual(result.code, 1)
+                self.assertIn("[BLOCK] lockfile finding: GitHub reviewed GHSA-review (srv)",
+                              result.lines)
+                self.assertTrue(getattr(result, "failures", []))
+                self.assertTrue(any(a.entry is not None and a.affected
+                                    for a in result.advisories))
+
+    def test_github_exclusive_and_equal_bounds(self):
+        cases = [
+            ("> 1.0.0, <= 1.2.0", "1.2.0", "1.0.0", False, "1.2.0", True),
+            ("= 1.2.3", "1.2.3", "1.2.3", True, "1.2.3", True),
+        ]
+        for expression, version, lower, lower_inc, upper, upper_inc in cases:
+            with self.subTest(expression=expression):
+                result = self.github(github_advisory(version_range=expression, fixed=None),
+                                     version)
+                advisory = self.advisory(result)
+                self.assertEqual(advisory.entry.version, version)
+                self.assertEqual(advisory.affected, ({"lower": lower, "lower_inclusive": lower_inc,
+                                                     "upper": upper, "upper_inclusive": upper_inc,
+                                                     "fixed": None},))
+
+    def test_github_upper_differs_from_first_patched(self):
+        advisory = github_advisory(version_range="< 1.0.5", fixed={"identifier": "1.0.4"})
+        result = self.github(advisory, "1.0.4")
+        match = self.advisory(result)
+        self.assertEqual(match.entry.version, "1.0.4")
+        self.assertEqual(match.affected[0]["upper"], "1.0.5")
+        self.assertEqual(match.affected[0]["fixed"], "1.0.4")
+        self.assertIsNone(self.advisory(self.github(advisory, "1.0.5")).entry)
+
+    def test_github_malware_source(self):
+        result = self.github(github_advisory("GHSA-malware"), kind="malware")
+        self.assertEqual(self.advisory(result).source, "github-malware")
+
+    def test_osv_details_are_fetched_only_for_hits(self):
+        net = clean_npm_net(osv={("srv", "1.0.0"): ["OSV-review"]})
+        result = lockcheck.check(npm_entries(), now=NOW, fetch=net)
+        self.assertEqual([url for url in net.calls if url.startswith(OSV_DETAIL_URL)],
+                         [OSV_DETAIL_URL + "OSV-review"])
+        self.assertEqual(self.advisory(result).id, "OSV-review")
+
+    def test_osv_severity_from_database_specific(self):
+        result = self.osv(osv_advisory(severity="HIGH"))
+        advisory = self.advisory(result)
+        self.assertEqual(advisory.source, "osv")
+        self.assertEqual(advisory.severity, "high")
+        self.assertEqual(advisory.aliases, ("CVE-2026-1234",))
+
+    def test_osv_cvss_only_has_no_severity(self):
+        advisory = osv_advisory()
+        advisory["severity"] = [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]
+        self.assertIsNone(self.advisory(self.osv(advisory)).severity)
+
+    def test_osv_last_affected_closes_inclusive(self):
+        result = self.osv(osv_advisory(events=[{"introduced": "0"}, {"last_affected": "1.0.0"}]))
+        interval, = self.advisory(result).affected
+        self.assertIsNone(interval["lower"])
+        self.assertEqual(interval["upper"], "1.0.0")
+        self.assertTrue(interval["upper_inclusive"])
+        self.assertIsNone(interval["fixed"])
+
+    def test_osv_two_separate_intervals(self):
+        advisory = osv_advisory(events=[{"introduced": "0"}, {"fixed": "1.0.3"},
+                                       {"introduced": "2.0.0"}])
+        first, second = self.advisory(self.osv(advisory)).affected
+        self.assertIsNone(first["lower"])
+        self.assertEqual(first["upper"], "1.0.3")
+        self.assertIs(first["upper_inclusive"], False)
+        self.assertEqual(first["fixed"], "1.0.3")
+        self.assertEqual(second["lower"], "2.0.0")
+        self.assertIs(second["lower_inclusive"], True)
+        self.assertIsNone(second["upper"])
+        self.assertIsNone(second["fixed"])
+
+    def test_failures_kept_next_to_findings(self):
+        net = clean_npm_net(osv={("srv", "1.0.0"): ["OSV-review"]}, fail="api.github.com")
+        result = lockcheck.check(npm_entries(), now=NOW, fetch=net)
+        self.assertEqual(result.code, 1)
+        self.assertTrue(any(f.startswith("GitHub ") for f in getattr(result, "failures", [])))
+        self.assertEqual(self.advisory(result).entry, npm_entries()[0])
+
+    def test_osv_mal_prefix_is_malware(self):
+        self.assertEqual(self.advisory(self.osv(osv_advisory("MAL-2026-1"))).source,
+                         "osv-malware")
+
+    def test_osv_detail_failure_is_recorded(self):
+        net = clean_npm_net(osv={("srv", "1.0.0"): ["OSV-broken", "OSV-review"]},
+                            fail="vulns/OSV-broken")
+        result = lockcheck.check(npm_entries(), now=NOW, fetch=net)
+        self.assertEqual(result.code, 1)
+        self.assertIn("[BLOCK] lockfile finding: srv@1.0.0: OSV OSV-broken, OSV-review",
+                      result.lines)
+        self.assertTrue(any("OSV-broken" in f for f in getattr(result, "failures", [])))
+        self.assertTrue(any(a.id == "OSV-review" and a.entry is not None
+                            for a in result.advisories))
+
+    def test_truncated_osv_detail_keeps_the_batch_finding(self):
+        advisory_id = "OSV-truncated"
+        net = clean_npm_net(osv={("srv", "1.0.0"): [advisory_id]})
+
+        class TruncatedBody(io.BytesIO):
+            def read(self, size=-1):
+                raise http.client.IncompleteRead(b'{"id":', 20)
+
+        def response(handler, request):
+            reply = urllib.response.addinfourl(TruncatedBody(), Message(), request.full_url, 200)
+            reply.msg = "OK"
+            return reply
+
+        def fetch(url, payload=None):
+            if url == OSV_DETAIL_URL + advisory_id:
+                return lockcheck.http_fetch(url, payload)
+            return net(url, payload)
+
+        with patch.object(urllib.request.HTTPSHandler, "https_open", response):
+            result = lockcheck.check(npm_entries(), now=NOW, fetch=fetch)
+        self.assertEqual(result.code, 1)
+        self.assertIn(f"[BLOCK] lockfile finding: srv@1.0.0: OSV {advisory_id}", result.lines)
+        self.assertTrue(any(advisory_id in failure for failure in result.failures))
+
+    def test_unmatched_advisory_has_no_entry(self):
+        entry = npm_entries()[0]
+        net = FakeNet(ghsa={("reviewed", entry.label): [github_advisory(name="another")]})
+        self.assertTrue(hasattr(lockcheck, "advisories_for"))
+        advisories, failures = lockcheck.advisories_for([entry], fetch=net)
+        self.assertEqual(failures, [])
+        self.assertEqual([a.id for a in advisories], ["GHSA-review"])
+        self.assertIsNone(advisories[0].entry)
+
+    def test_age_limit_per_entry(self):
+        published = "2026-11-19T12:00:00Z"
+        top, dep = npm_entries()
+        net = clean_npm_net(npm_time={"srv": {"1.0.0": published},
+                                     "@scope/dep": {"2.0.0": published}})
+        self.assertTrue(hasattr(lockcheck, "entry_key"))
+        self.assertEqual(lockcheck.entry_key(top), ("npm", "srv", "1.0.0"))
+        self.assertEqual(lockcheck.entry_key(lockcheck.Entry("PyPI", "Test_Pkg.Name", "1.0")),
+                         ("PyPI", "test-pkg-name", "1.0"))
+        result = lockcheck.check([top, dep], now=NOW, fetch=net,
+                                 age_limits={lockcheck.entry_key(top): 2})
+        self.assertEqual(result.code, 2)
+        self.assertEqual(result.failures, [])
+        self.assertEqual(result.young, [lockcheck.Young(dep, published, 7, "2026-11-26")])
+
+    def test_min_age_days_setting(self):
+        net = clean_npm_net(npm_time={"srv": {"1.0.0": "2026-11-18T12:00:00Z"},
+                                     "@scope/dep": {"2.0.0": OLD}})
+        result = lockcheck.check(npm_entries(), now=NOW, fetch=net, min_age_days=3)
+        self.assertEqual(result.code, 0)
+        self.assertEqual(result.young, [])
+
+    def test_ages_false_skips_registry(self):
+        net = FakeNet()
+        result = lockcheck.check(npm_entries(), now=NOW, fetch=net, ages=False)
+        self.assertEqual(result.code, 0)
+        self.assertFalse(any(url.startswith(lockcheck.NPM_REGISTRY_URL) for url in net.calls))
+
+    def test_hashes_must_be_files_of_the_version(self):
+        old_hash, young_hash, other_version_hash = "a" * 64, "b" * 64, "c" * 64
+        old_file, young_file = "srv-1.0.0.tar.gz", "srv-1.0.0-py3-none-any.whl"
+        net = FakeNet(pypi_files={
+            ("srv", "1.0.0"): [
+                {"filename": old_file, "upload_time_iso_8601": OLD,
+                 "digests": {"sha256": old_hash}},
+                {"filename": young_file, "upload_time_iso_8601": NEW,
+                 "digests": {"sha256": young_hash}},
+            ],
+            ("srv", "1.0.1"): [
+                {"filename": "srv-1.0.1-py3-none-any.whl", "upload_time_iso_8601": OLD,
+                 "digests": {"sha256": other_version_hash}},
+            ],
+        })
+        for hashes, code in (((old_hash,), 0), ((old_hash, young_hash), 2),
+                             ((old_hash, other_version_hash), 1)):
+            with self.subTest(hashes=hashes):
+                entry = lockcheck.Entry("PyPI", "srv", "1.0.0", hashes=hashes)
+                result = lockcheck.check([entry], now=NOW, fetch=net)
+                self.assertEqual(result.code, code)
+                if code == 1:
+                    self.assertIn("hash differs", "\n".join(result.lines))
+                if code == 2:
+                    self.assertEqual(result.young, [lockcheck.Young(entry, NEW, 7, "2026-11-27")])
+
+        entry = lockcheck.Entry("PyPI", "srv", "1.0.0", hashes=(old_hash,))
+        malformed_inventories = (
+            {},
+            {"urls": [{"filename": old_file, "upload_time_iso_8601": OLD, "digests": {}}]},
+            {"urls": [{"filename": old_file, "upload_time_iso_8601": OLD,
+                       "digests": {"sha256": "z" * 64}}]},
+        )
+        for inventory in malformed_inventories:
+            with self.subTest(inventory=inventory):
+                def fetch(url, payload=None):
+                    if url.startswith(lockcheck.PYPI_JSON_URL):
+                        return inventory, None
+                    return net(url, payload)
+
+                result = lockcheck.check([entry], now=NOW, fetch=fetch)
+                self.assertEqual(result.code, 2)
+                self.assertTrue(result.failures)
+                self.assertFalse(any(line.startswith("[BLOCK]") for line in result.lines))
+
+    def test_existing_lines_unchanged(self):
+        entries = npm_entries()
+        cases = (
+            (clean_npm_net(), [
+                "Lockfile check passed: 2 entries, no advisory, all at least 7 days old.",
+            ]),
+            (clean_npm_net(npm_time={"srv": {"1.0.0": NEW}, "@scope/dep": {"2.0.0": OLD}}), [
+                "NO VERDICT -- srv@1.0.0: published 2026-11-20T00:00:00.000Z,"
+                " younger than 7 days; wait until 2026-11-27",
+            ]),
+            (clean_npm_net(
+                osv={("srv", "1.0.0"): ["OSV-review"]},
+                ghsa={("reviewed", "srv@1.0.0"): ["GHSA-review"]},
+                npm_integrity={("srv", "1.0.0"): "unmatched"},
+                npm_time={"srv": {"1.0.0": OLD}, "@scope/dep": {"2.0.0": NEW}}), [
+                "[BLOCK] lockfile finding: srv@1.0.0: OSV OSV-review",
+                "[BLOCK] lockfile finding: GitHub reviewed GHSA-review (srv)",
+                "[BLOCK] lockfile finding: srv@1.0.0: locked integrity differs from the registry",
+                "(also unchecked: @scope/dep@2.0.0: published "
+                "2026-11-20T00:00:00.000Z, younger than 7 days; wait until 2026-11-27)",
+            ]),
+        )
+        for net, expected in cases:
+            self.assertEqual(lockcheck.check(entries, now=NOW, fetch=net).lines, expected)
+
+
+class HttpFetch(unittest.TestCase):
+    def test_cross_host_redirect_is_refused(self):
+        start = "https://registry.npmjs.org/srv"
+        target = "https://another.example.test/srv"
+        calls = []
+
+        def response(handler, request):
+            url = request.full_url
+            calls.append(url)
+            headers = Message()
+            status = 404
+            if url == start:
+                headers["Location"] = target
+                status = 302
+            reply = urllib.response.addinfourl(io.BytesIO(b"{}"), headers, url, status)
+            reply.msg = "fake response"
+            return reply
+
+        with patch.object(urllib.request.HTTPSHandler, "https_open", response):
+            with self.assertRaises(lockcheck.LookupFailed) as failed:
+                lockcheck.http_fetch(start)
+        self.assertEqual(calls, [start])
+        self.assertIsNone(failed.exception.status)
+
+    def http_error(self, requested, responding):
+        error = urllib.error.HTTPError(responding, 404, "Not Found", Message(), None)
+        with patch.object(urllib.request, "build_opener") as build, patch.object(
+                urllib.request, "urlopen", side_effect=error):
+            build.return_value.open.side_effect = error
+            with self.assertRaises(lockcheck.LookupFailed) as failed:
+                lockcheck.http_fetch(requested)
+        return failed.exception
+
+    def test_404_host_is_the_responding_host(self):
+        error = self.http_error("https://registry.npmjs.org/srv", "https://example.test/srv")
+        self.assertEqual(getattr(error, "host", None), "example.test")
+        self.assertEqual(error.status, 404)
+
+    def test_lookup_failed_carries_status(self):
+        url = "https://registry.npmjs.org/srv"
+        error = self.http_error(url, url)
+        self.assertEqual(getattr(error, "status", None), 404)
+        self.assertEqual(error.host, "registry.npmjs.org")
+
+    def test_partial_response_with_valid_json_is_refused(self):
+        responding = "https://example.test/srv"
+
+        def response(handler, request):
+            reply = urllib.response.addinfourl(io.BytesIO(b"{}"), Message(), responding, 206)
+            reply.msg = "Partial Content"
+            return reply
+
+        with patch.object(urllib.request.HTTPSHandler, "https_open", response):
+            with self.assertRaises(lockcheck.LookupFailed) as failed:
+                lockcheck.http_fetch("https://registry.npmjs.org/srv")
+        self.assertEqual(failed.exception.status, 206)
+        self.assertEqual(failed.exception.host, "example.test")
 
 
 class PypiCheck(unittest.TestCase):
