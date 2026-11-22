@@ -203,3 +203,244 @@ def pypi_install(*, name: str, package: str, version: str, executable: str | Non
         replace_tree(stage, target, finish=sync)
     installed.args = ["run", "--project", str(target), "--locked", "--no-dev", chosen["entry"]]
     return installed
+
+
+# ── Git sources (A4) ─────────────────────────────────────────────────────────
+
+GIT_URL_RE = re.compile(r"(?:git\+)?https://github\.com/([A-Za-z0-9][A-Za-z0-9-]*)/"
+                        r"([A-Za-z0-9_.-]+?)(?:\.git)?@([0-9a-fA-F]{40})"
+                        r"(?:#subdirectory=([A-Za-z0-9_./-]+))?")
+DEFAULT_BUILD_REQUIRES = ["setuptools>=40.8.0"]  # PEP 517 fallback without [build-system]
+# A build requirement as PEP 508 name, extras, specifiers and markers -- no
+# direct URL, no option line, nothing that changes where uv looks.
+BUILD_REQ_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._, -]*\])?"
+                          r"[ ]*(?:[<>=!~][<>=!~ ,.*A-Za-z0-9+-]*)?(?:;[ A-Za-z0-9_.<>=!~'\"()-]*)?")
+BUILD_IN, BUILD_OUT = "build-requires.in", "build-constraints.txt"
+
+
+def parse_git_url(url: str) -> tuple:
+    """(owner, repo, sha, subdirectory) of a commit-pinned GitHub source, else Refused(2)."""
+    match = GIT_URL_RE.fullmatch((url or "").strip())
+    if not match:
+        raise Refused(2, f"unsupported Git source {url!r}: only https://github.com/<owner>/<repo>"
+                         "@<full 40-character commit SHA>[#subdirectory=...] is installed")
+    owner, repo, sha, subdir = match.groups()
+    subdir = subdir or ""
+    if subdir and (subdir.startswith("/") or subdir.endswith("/")
+                   or any(part in ("", ".", "..") for part in subdir.split("/"))):
+        raise Refused(2, "the Git subdirectory must stay inside the scanned repository")
+    return owner, repo, sha.lower(), subdir
+
+
+def build_requires(pyproject_text: str) -> list:
+    """[build-system].requires of the scanned pyproject.toml, or the PEP 517 default."""
+    import tomllib
+    try:
+        data = tomllib.loads(pyproject_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise Refused(2, f"unreadable pyproject.toml of the scanned commit: {exc}")
+    system = data.get("build-system")
+    if system is None or "requires" not in system:
+        return list(DEFAULT_BUILD_REQUIRES)
+    requires = system["requires"]
+    if not isinstance(requires, list) or not requires:
+        raise Refused(2, "[build-system].requires of the scanned commit is not a list")
+    for req in requires:
+        if not isinstance(req, str) or not BUILD_REQ_RE.fullmatch(req.strip()):
+            raise Refused(2, f"NO VERDICT -- build requirement {req!r} is not a plain PyPI "
+                             "requirement (no URLs or options)")
+    return [req.strip() for req in requires]
+
+
+def build_constraints(requires: list, stage: Path, run: Runner, uv: str, check) -> list:
+    """Resolve the build tools exactly, check them, return `name==version` pins."""
+    (stage / BUILD_IN).write_text("\n".join(requires) + "\n", encoding="utf-8")
+    code, out = run([uv, "pip", "compile", BUILD_IN, "--no-build", "--exclude-newer", "7 days",
+                     "--default-index", INDEX, "-o", BUILD_OUT], stage)
+    if code != 0:
+        raise Refused(2, f"uv could not resolve the build tools {', '.join(requires)}:\n{_tail(out)}")
+    try:
+        entries = _lockcheck.pinned_entries((stage / BUILD_OUT).read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise Refused(2, f"cannot read the resolved build tools: {exc}")
+    except _lockcheck.NoVerdict as exc:
+        raise Refused(2, f"NO VERDICT -- {exc}")
+    result = check(entries)
+    for line in result.lines:
+        print(f"  {line}")
+    if result.code:
+        raise Refused(result.code, "check of the build tools failed (see above); "
+                                   "the installed tree is unchanged")
+    for name in (BUILD_IN, BUILD_OUT):
+        (stage / name).unlink()
+    return [f"{e.name}=={e.version}" for e in entries]
+
+
+def _github_json(url: str):
+    import _url_resolver
+    try:
+        return _url_resolver.http_json(url)
+    except _url_resolver.FetchError as exc:
+        raise Refused(2, f"GitHub lookup failed: {exc}")
+
+
+def github_branch_head(source: str) -> tuple:
+    """(default branch, its head commit) from the GitHub API."""
+    repo = _github_json(f"https://api.github.com/repos/{source}")
+    branch = repo.get("default_branch") if isinstance(repo, dict) else None
+    if not isinstance(branch, str) or not branch:
+        raise Refused(2, f"{source}: GitHub names no default branch")
+    import urllib.parse
+    data = _github_json(f"https://api.github.com/repos/{source}/branches/"
+                        f"{urllib.parse.quote(branch, safe='')}")
+    head = (data.get("commit") or {}).get("sha") if isinstance(data, dict) else None
+    if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise Refused(2, f"{source}: GitHub names no head commit for {branch}")
+    return branch, head
+
+
+def github_compare(source: str, base: str, head: str) -> str:
+    data = _github_json(f"https://api.github.com/repos/{source}/compare/{base}...{head}")
+    status = data.get("status") if isinstance(data, dict) else None
+    if not isinstance(status, str):
+        raise Refused(2, f"{source}: GitHub compare gave no status")
+    return status
+
+
+def raw_text(url: str) -> str:
+    import _url_resolver
+    try:
+        return _url_resolver.http_bytes(url).decode("utf-8")
+    except (_url_resolver.FetchError, UnicodeDecodeError) as exc:
+        raise Refused(2, f"cannot read {url}: {exc}")
+
+
+def _settled_commit(source: str, sha: str, settled, branch_head, compare) -> None:
+    """K4: the commit is in the newest state of the default branch that is 7 days old."""
+    import _staging
+    branch, head = branch_head(source)
+    try:
+        base, _when = settled(source, branch, head)
+    except _staging.StageError as exc:
+        raise Refused(2, f"NO VERDICT -- {exc}")
+    status = compare(source, base, sha)
+    if status not in ("identical", "behind"):
+        raise Refused(2, f"commit {sha} is not in the state of {branch} from 7 days ago "
+                         f"(GitHub compare: {status}); it is younger than 7 days or not on "
+                         f"{branch} -- retry later")
+
+
+def git_install(*, name: str, git_url: str, package: str, executable: str | None,
+                module: str | None, secrets: tuple, root: Path, receipt, accepted: dict | None,
+                scanned_dir: Path | None, run: Runner, check=_lockcheck.check,
+                which=shutil.which, fetch_text=raw_text, settled=None,
+                branch_head=github_branch_head, compare=github_compare,
+                dry: bool = False) -> Installed:
+    """Build, check and swap in the locked tree of one Git-backed Python MCP server."""
+    require_python_311()
+    check_name(name)
+    owner, repo, sha, subdir = parse_git_url(git_url)
+    check_package(package)
+    if executable is not None and module is not None:
+        raise Refused(2, "choose either --executable or --module, not both")
+    for value, what in ((executable, "--executable"), (module, "--module")):
+        if value is not None and not ENTRY_RE.fullmatch(value):
+            raise Refused(2, f"invalid {what} {value!r}")
+    check_secrets(secrets)
+    source = f"{owner}/{repo}"
+    scanned_id = source + (f"#{subdir}" if subdir else "")
+    import _mcp_receipts
+    if (receipt.kind != "git" or receipt.version != sha
+            or _mcp_receipts.identity("git", receipt.package)
+            != _mcp_receipts.identity("git", scanned_id)):
+        raise Refused(2, f"the scan receipt is for {receipt.package}@{receipt.version}, "
+                         f"not {scanned_id}@{sha}")
+    if not which("git"):
+        raise Refused(2, "git must be on PATH for a locked Git MCP install (uv builds the "
+                         "package from the commit)")
+    uv = which("uv")
+    if not uv:
+        raise Refused(2, "uv must be on PATH for a locked Git MCP install")
+    root = Path(root)
+    tail = ["python", "-m", module] if module else [executable or "<entry point>"]
+    if dry:
+        target = root.absolute() / name
+        print(f"  [DRY] would check that {sha} is at least 7 days on the default branch, pin "
+              f"and check the build tools, lock and check {package} from {source}, swap, "
+              "uv sync --locked --no-dev --no-build-package <each registry package>")
+        return Installed(name=name, kind="git", package=package, requested=sha, command=uv,
+                         args=["run", "--project", str(target), "--locked", "--no-dev", *tail],
+                         tree=target, lockfile_sha256="", overrides={}, override_reason=None,
+                         secrets=tuple(secrets), accepted=accepted)
+    if settled is None:
+        import _staging
+        settled = _staging.settled_ref
+    _settled_commit(source, sha, settled, branch_head, compare)
+    if scanned_dir is not None:
+        try:
+            pyproject = (Path(scanned_dir) / subdir / "pyproject.toml").read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise Refused(2, f"the scanned source has no readable pyproject.toml: {exc}")
+    else:
+        pyproject = fetch_text(f"https://raw.githubusercontent.com/{source}/{sha}/"
+                               f"{subdir + '/' if subdir else ''}pyproject.toml")
+    requires = build_requires(pyproject)
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    target = root / name
+    for leftover in stale_leftovers(root, name):
+        print(f"  note: leftover of an aborted run, not used: {leftover}")
+    chosen = {}
+    with staged(root, name) as stage:
+        constraints = build_constraints(requires, stage, run, uv, check)
+        dependency = (f"{package} @ git+https://github.com/{source}@{sha}"
+                      + (f"#subdirectory={subdir}" if subdir else ""))
+        extra = ("build-constraint-dependencies = ["
+                 + ", ".join(f'"{c}"' for c in constraints) + "]\n")
+        (stage / "pyproject.toml").write_text(_pyproject(name, dependency, extra),
+                                              encoding="utf-8")
+        (stage / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+        code, out = run([uv, "lock", "--no-build", "--default-index", INDEX], stage)
+        if code != 0:
+            raise Refused(2, f"uv could not lock {package} from {source}@{sha} without builds "
+                             "(dynamic metadata such as setuptools-scm needs a build and cannot "
+                             f"be locked this way):\n{_tail(out)}")
+        pin = _lockcheck.GitPin(normalize_pypi(package), f"https://github.com/{source}", sha, subdir)
+        try:
+            lock_bytes = (stage / LOCKFILE).read_bytes()
+            entries = _lockcheck.uv_lock_entries(lock_bytes.decode("utf-8"), project_name(name),
+                                                 git=pin)
+        except (OSError, UnicodeDecodeError) as exc:
+            raise Refused(2, f"cannot read {LOCKFILE}: {exc}")
+        except _lockcheck.NoVerdict as exc:
+            raise Refused(2, f"NO VERDICT -- {exc}")
+        if entries:
+            result = check(entries)
+            for line in result.lines:
+                print(f"  {line}")
+            if result.code:
+                raise Refused(result.code, f"lockfile check for {package} failed (see above); "
+                                           "the installed tree is unchanged")
+        no_build = [arg for e in entries for arg in ("--no-build-package", e.name)]
+
+        def sync(tree: Path) -> None:
+            code, out = run([uv, "sync", "--locked", "--no-dev", *no_build], tree)
+            if code != 0:
+                raise Refused(2, f"uv sync failed:\n{_tail(out)}")
+            if (tree / LOCKFILE).read_bytes() != lock_bytes:
+                raise Refused(2, "uv sync changed uv.lock; the checked tree is not what was built")
+            if module:
+                dist_info(tree / ".venv", package)
+                chosen["tail"] = ["python", "-m", module]
+            else:
+                chosen["tail"] = [entry_point(console_scripts(tree / ".venv", package),
+                                              package, executable)]
+
+        installed = Installed(
+            name=name, kind="git", package=package, requested=sha, command=uv, args=[],
+            tree=target, lockfile_sha256=hashlib.sha256(lock_bytes).hexdigest(), overrides={},
+            override_reason=None, secrets=tuple(secrets), accepted=accepted)
+        write_metadata(stage, installed)
+        replace_tree(stage, target, finish=sync)
+    installed.args = ["run", "--project", str(target), "--locked", "--no-dev", *chosen["tail"]]
+    return installed

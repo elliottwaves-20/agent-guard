@@ -410,26 +410,6 @@ def normalize_git_source(url: str) -> str:
     return f"git+{url}"
 
 
-def uv_tool_dir() -> Path:
-    uv = shutil.which("uv")
-    if uv:
-        r = subprocess.run([uv, "tool", "dir"], capture_output=True, text=True)
-        if r.returncode == 0 and r.stdout.strip():
-            return Path(r.stdout.strip())
-    if os.name == "nt":
-        return APPDATA / "uv" / "tools"
-    return HOME / ".local" / "share" / "uv" / "tools"
-
-
-def tool_scripts_dir(package: str) -> Path:
-    base = uv_tool_dir() / package
-    return base / "Scripts" if os.name == "nt" else base / "bin"
-
-
-def executable_name(name: str) -> str:
-    return f"{name}.exe" if os.name == "nt" and not name.lower().endswith(".exe") else name
-
-
 def infer_python_project(path: Path) -> tuple[str | None, str | None]:
     pyproject = path / "pyproject.toml"
     if tomllib is None or not pyproject.is_file():
@@ -447,37 +427,38 @@ def infer_python_project(path: Path) -> tuple[str | None, str | None]:
 
 def install_mcp_git(name: str, git_url: str, package: str, dry: bool,
                     selected: list = None, executable: str | None = None,
-                    module: str | None = None):
-    """Install a Git-backed Python MCP using uv's isolated tool environment,
-    then register the resulting local executable/interpreter with agents."""
-    git_source = normalize_git_source(git_url)
-    cmd = ["uv", "tool", "install", "--from", git_source, package]
+                    module: str | None = None, *, secrets: tuple = (), accept: str | None = None,
+                    scanned_dir: Path | None = None, config: dict | None = None, env=None,
+                    platform: str | None = None, run=None, which=shutil.which, check=None,
+                    deliver=None, **network):
+    """Install a Git-backed Python MCP from a checked uv.lock in its own directory
+    (scan receipt, 7-day rule, pinned build tools), then hand the start command
+    `uv run --project <tree> --locked --no-dev ...` to the agents."""
+    import _lockcheck
+    import _mcp_receipts
+    import _mcp_uv
+    _mcp_locked.require_python_311()
+    settings = _mcp_locked.settings(_skillspector.USER_CONFIG if config is None else config,
+                                    os.environ if env is None else env,
+                                    sys.platform if platform is None else platform)
+    owner, repo, sha, subdir = _mcp_uv.parse_git_url(git_url)
+    scanned_id = f"{owner}/{repo}" + (f"#{subdir}" if subdir else "")
     print(f"\n-- Git MCP '{name}' --")
-    log(f"  run: {' '.join(cmd)}", dry)
-    if not dry:
-        uv = shutil.which("uv")
-        if uv is None:
-            sys.exit("ERROR: uv not found on PATH. Install uv before installing Git-backed MCPs.")
-        r = subprocess.run([uv, "tool", "install", "--from", git_source, package])
-        if r.returncode != 0:
-            sys.exit(f"ERROR: uv tool install failed for {git_source}")
-
-    scripts = tool_scripts_dir(package)
-    if module:
-        python_name = "python.exe" if os.name == "nt" else "python"
-        entry = {"command": str(scripts / python_name), "args": ["-m", module]}
-    else:
-        exe = executable_name(executable or package)
-        entry = {"command": str(scripts / exe), "args": []}
-        if not dry and not Path(entry["command"]).exists():
-            candidates = sorted(p.name for p in scripts.glob("*")) if scripts.exists() else []
-            sys.exit(
-                "ERROR: installed uv tool executable not found: "
-                f"{entry['command']}\n"
-                "Pass --executable or --module. Candidates: "
-                f"{', '.join(candidates) or 'none'}"
-            )
-    install_mcp(name, entry, dry=dry, selected=selected)
+    receipt, accepted = _mcp_receipts.require_receipt(settings.install_dir, "git", scanned_id,
+                                                      sha, accept)
+    installed = _mcp_uv.git_install(
+        name=_mcp_locked.check_name(name), git_url=git_url, package=package,
+        executable=executable, module=module, secrets=tuple(secrets),
+        root=settings.install_dir, receipt=receipt, accepted=accepted, scanned_dir=scanned_dir,
+        run=run or _mcp_locked.run_tool, check=check or _lockcheck.check, which=which,
+        dry=dry, **network)
+    if accepted:
+        print(f"   Installed despite the BLOCK verdict: {accepted['grund']}")
+    _report_secrets(installed)
+    (deliver or install_mcp)(installed.name, {"command": installed.command,
+                                              "args": list(installed.args)},
+                             dry, selected=selected)
+    return installed
 
 
 # ── Subcommands ───────────────────────────────────────────────────────────────
@@ -873,15 +854,22 @@ def main():
     p_remote.add_argument("--dry-run", action="store_true")
 
     # Git-backed Python MCP
-    p_git = sub.add_parser("mcp-git", help="Install a Git-backed Python MCP through uv tool")
+    p_git = sub.add_parser("mcp-git", help="Install a Git-backed Python MCP from a checked "
+                                           "uv.lock in its own directory (after scan_url.py)")
     p_git.add_argument("--name", required=True, help="Server name in configs")
-    p_git.add_argument("--git-url", required=True, help="Git URL pinned with the full scanned @commit-SHA")
+    p_git.add_argument("--git-url", required=True,
+                       help="https://github.com/<owner>/<repo>@<full scanned commit SHA>"
+                            "[#subdirectory=...]")
     p_git.add_argument("--package", required=True,
-                       help="Python package name passed to uv tool install")
+                       help="Python package name of the repository")
     p_git.add_argument("--executable",
-                       help="Executable created by uv tool install (default: package name)")
+                       help="Entry point of the package (default: package name, or the only one)")
     p_git.add_argument("--module",
-                       help="Use the uv tool Python interpreter with -m MODULE instead of an executable")
+                       help="Start the tree's Python with -m MODULE instead of an entry point")
+    p_git.add_argument("--secret", action="append", default=[], metavar="NAME",
+                       help="Name of a key the server needs (never a value); repeatable")
+    p_git.add_argument("--accept", metavar="REASON",
+                       help="Install this exact commit despite a BLOCK verdict, with a reason")
     p_git.add_argument("--tools", nargs="*", choices=tool_choices, default=None,
                        metavar="TOOL",
                        help=f"Limit installation to specific tools "
@@ -997,11 +985,14 @@ def main():
         install_mcp(args.name, entry, args.dry_run, selected=args.tools)
 
     elif args.mode == "mcp-git":
-        if args.executable and args.module:
-            sys.exit("ERROR: choose either --executable or --module, not both")
-        install_mcp_git(args.name, args.git_url, args.package, args.dry_run,
-                        selected=args.tools, executable=args.executable,
-                        module=args.module)
+        try:
+            install_mcp_git(args.name, args.git_url, args.package, args.dry_run,
+                            selected=args.tools, executable=args.executable,
+                            module=args.module, secrets=tuple(args.secret or ()),
+                            accept=args.accept)
+        except _mcp_locked.Refused as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(exc.code)
 
 
 if __name__ == "__main__":

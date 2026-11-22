@@ -2129,36 +2129,47 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         self.assertIn(("json", "remote-api", {"url": "https://api.example.com/mcp"}, False), calls)
         self.assertIn(("json", "remote-api", {"url": "https://api.example.com/mcp"}, True), calls)
 
-    def test_install_mcp_git_uses_uv_tool_executable(self):
+    def test_install_mcp_git_starts_the_locked_tree_through_uv_run(self):
         installer = importlib.import_module("install_skill")
+        receipts = importlib.import_module("_mcp_receipts")
+        sha = "a" * 40
         calls = []
-        original_install = installer.install_mcp
-        original_tool_dir = installer.uv_tool_dir
-        try:
-            with tempfile.TemporaryDirectory() as tools_dir:
-                installer.uv_tool_dir = lambda: Path(tools_dir)
-                installer.install_mcp = lambda name, entry, dry, selected=None: calls.append(
-                    (name, entry, dry, selected)
-                )
-
+        with tempfile.TemporaryDirectory() as root:
+            receipts.write_receipt(Path(root), receipts.Receipt(
+                kind="git", package="example/mcp", version=sha, archive_sha256="ab" * 32,
+                integrity="", verdict="SAFE", at="2026-11-22T00:00:00+00:00",
+                agent_guard="0.5.2"))
+            with contextlib.redirect_stdout(io.StringIO()):
                 installer.install_mcp_git(
-                    "example-mcp",
-                    "git+https://github.com/example/mcp@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "example-mcp",
-                    dry=True,
-                    selected=["codex"],
-                    executable="example-server",
-                )
-        finally:
-            installer.install_mcp = original_install
-            installer.uv_tool_dir = original_tool_dir
+                    "example-mcp", f"git+https://github.com/example/mcp@{sha}", "example-mcp",
+                    dry=True, selected=["codex"], executable="example-server",
+                    config={"mcp": {"install_dir": root}}, env={}, platform="win32",
+                    which={"uv": "C:/uv/uv.exe", "git": "C:/git/git.exe"}.get,
+                    deliver=lambda name, entry, dry, selected=None: calls.append(
+                        (name, entry, dry, selected)))
+            tree = str(Path(root).absolute() / "example-mcp")
 
         name, entry, dry, selected = calls[0]
         self.assertEqual(name, "example-mcp")
-        self.assertIn("example-server", entry["command"])
-        self.assertEqual(entry["args"], [])
+        self.assertEqual(entry, {"command": "C:/uv/uv.exe",
+                                 "args": ["run", "--project", tree, "--locked", "--no-dev",
+                                          "example-server"]})
         self.assertTrue(dry)
         self.assertEqual(selected, ["codex"])
+
+    def test_install_mcp_git_without_a_scan_receipt_installs_nothing(self):
+        installer = importlib.import_module("install_skill")
+        locked = importlib.import_module("_mcp_locked")
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(locked.Refused) as ctx, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                installer.install_mcp_git(
+                    "example-mcp", "https://github.com/example/mcp@" + "a" * 40, "example-mcp",
+                    dry=False, config={"mcp": {"install_dir": root}}, env={}, platform="win32",
+                    run=lambda cmd, cwd: self.fail("ran a tool"),
+                    deliver=lambda *a, **k: self.fail("delivered"))
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("scan first", str(ctx.exception))
 
     def test_scan_url_remote_candidate_without_sandbox_is_no_verdict_but_not_a_block_loss(self):
         scan_url = importlib.import_module("scan_url")
