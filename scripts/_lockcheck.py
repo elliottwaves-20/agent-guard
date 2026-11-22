@@ -136,6 +136,7 @@ class Result:
     advisories: list = field(default_factory=list)
     young: list = field(default_factory=list)
     failures: list = field(default_factory=list)
+    blocking: list = field(default_factory=list)  # findings that are not advisories (hash, integrity)
 
 
 # ── Lockfile parsing ─────────────────────────────────────────────────────────
@@ -787,7 +788,7 @@ def check(entries: list[Entry], *, now: dt.datetime | None = None, fetch=http_fe
         return Result(2, ["NO VERDICT -- the lockfile lists no packages"])
     findings, advisories, failures = _advisory_checks(entries, fetch)
     notes = list(failures)
-    young = []
+    young, blocking = [], []
     limits = age_limits if age_limits is not None else {}
     if ages:
         try:
@@ -799,6 +800,7 @@ def check(entries: list[Entry], *, now: dt.datetime | None = None, fetch=http_fe
             for age in _ages(entries, fetch, now or dt.datetime.now(dt.timezone.utc),
                              min_age_days, limits):
                 findings.extend(age.findings)
+                blocking.extend(age.findings)
                 failures.extend(age.failures)
                 if age.young is not None:
                     young.append(age.young)
@@ -808,7 +810,7 @@ def check(entries: list[Entry], *, now: dt.datetime | None = None, fetch=http_fe
     if findings:
         return Result(1, [f"[BLOCK] lockfile finding: {f}" for f in findings]
                       + [f"(also unchecked: {f})" for f in notes],
-                      advisories, young, failures)
+                      advisories, young, failures, blocking)
     if notes:
         return Result(2, [f"NO VERDICT -- {f}" for f in notes], advisories, young, failures)
     summary = f"Lockfile check passed: {len(entries)} entries, no advisory"

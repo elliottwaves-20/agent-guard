@@ -5,14 +5,18 @@ would write; the lockfile check is replaced by a stub. Every failure must leave
 an existing install untouched and write no config.
 """
 import argparse
+import datetime as dt
+import hashlib
 import importlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 
@@ -23,9 +27,56 @@ locked = importlib.import_module("_mcp_locked")
 lockcheck = importlib.import_module("_lockcheck")
 receipts = importlib.import_module("_mcp_receipts")
 npm_mod = importlib.import_module("_mcp_npm")
+fastlane = importlib.import_module("_fastlane")
 
 PKG = "@scope/server-files"
 INTEGRITY = "sha512-x"
+NOW = dt.datetime(2026, 11, 22, 12, 0, tzinfo=dt.timezone.utc)
+SLSA = "https://slsa.dev/provenance/v1"
+REPO = "github.com/o/r"
+
+
+def stamp(days):
+    return (NOW - dt.timedelta(days=days)).isoformat().replace("+00:00", "Z")
+
+
+class Times(dict):
+    """Publish times of one registry document; every version is old unless listed."""
+
+    def __init__(self, listed, default_days):
+        super().__init__(listed)
+        self.default_days = default_days
+
+    def __missing__(self, version):
+        return stamp(self.default_days)
+
+
+class FakeRegistry:
+    """Answers the npm registry document of any package (no network)."""
+
+    def __init__(self, ages=None, default_days=100):
+        self.ages = dict(ages or {})  # (name, version): days since publication
+        self.default_days = default_days
+        self.requests = []
+
+    def __call__(self, url, payload=None):
+        prefix = "https://registry.npmjs.org/"
+        if not url.startswith(prefix):
+            raise AssertionError(f"unexpected request: {url}")
+        self.requests.append(url)
+        name = urllib.parse.unquote(url[len(prefix):])
+        listed = {version: stamp(days) for (pkg, version), days in self.ages.items()
+                  if pkg == name}
+        return {"time": Times(listed, self.default_days)}, None
+
+
+def audit_json(verified=(), invalid=(), missing=(), predicate=SLSA):
+    rows = [{"name": name, "version": version, "location": f"node_modules/{name}",
+             "registry": "https://registry.npmjs.org/",
+             "attestations": {"url": "https://registry.npmjs.org/x",
+                              "provenance": {"predicateType": predicate}}}
+            for name, version in verified]
+    return json.dumps({"invalid": list(invalid), "missing": list(missing), "verified": rows})
 
 
 def lock_for(pkg, version, integrity=INTEGRITY):
@@ -41,7 +92,9 @@ def lock_for(pkg, version, integrity=INTEGRITY):
 class FakeNpm:
     def __init__(self, version="12.2.2", bin_field=None, write_bin=True, lock_version=None,
                  install_rc=0, install_output="npm ERR! simulated", ci_rc=0,
-                 installed_version=None, integrity=INTEGRITY, overrides_resolved=True):
+                 installed_version=None, integrity=INTEGRITY, overrides_resolved=True,
+                 extra=None, integrities=None, top_integrity=None, etarget_unless_excluded=None,
+                 audit=None):
         self.version = version
         self.bin_field = bin_field
         self.write_bin = write_bin
@@ -52,7 +105,15 @@ class FakeNpm:
         self.installed_version = installed_version
         self.integrity = integrity
         self.overrides_resolved = overrides_resolved
+        self.extra = dict(extra or {})  # name: (version, integrity) of further lockfile entries
+        self.integrities = list(integrities or [])  # top-level integrity per resolution
+        self.top_integrity = dict(top_integrity or {})  # top-level integrity per version
+        self.etarget_unless_excluded = etarget_unless_excluded
+        self.audit = audit  # (return code, output) of npm audit signatures
         self.commands = []
+        self.seeds = []  # whether a lockfile was present at each resolution
+        self.install_dirs = []
+        self.installs = 0
 
     def __call__(self, cmd, cwd):
         self.commands.append(list(cmd))
@@ -61,10 +122,25 @@ class FakeNpm:
             return 0, self.version + "\n"
         manifest = json.loads((Path(cwd) / "package.json").read_text(encoding="utf-8"))
         pkg, version = next(iter(manifest["dependencies"].items()))
+        if args[0] == "audit":
+            return self.audit if self.audit is not None else (0, audit_json())
         if args[0] == "install":
+            self.seeds.append((Path(cwd) / "package-lock.json").exists())
+            self.install_dirs.append(str(cwd))
+            index, self.installs = self.installs, self.installs + 1
             if self.install_rc:
                 return self.install_rc, self.install_output
-            lock = lock_for(pkg, self.lock_version or version, self.integrity)
+            if (self.etarget_unless_excluded is not None
+                    and f"--min-release-age-exclude={self.etarget_unless_excluded}" not in args):
+                return 1, "npm error code ETARGET\nnpm error notarget"
+            integrity = self.integrities[index] if index < len(self.integrities) else (
+                self.top_integrity.get(version, self.integrity))
+            lock = lock_for(pkg, self.lock_version or version, integrity)
+            for name, (extra_version, extra_integrity) in self.extra.items():
+                lock["packages"][f"node_modules/{name}"] = {
+                    "version": extra_version,
+                    "resolved": f"https://registry.npmjs.org/{name}/-/x-{extra_version}.tgz",
+                    "integrity": extra_integrity}
             for name, wanted in manifest.get("overrides", {}).items():
                 lock["packages"][f"node_modules/{name}"] = {
                     "version": wanted if self.overrides_resolved else "0.0.1",
@@ -120,7 +196,8 @@ class NpmInstall(unittest.TestCase):
                 "override_reason": None, "bin_name": None, "secrets": (),
                 "root": self.root, "receipt": receipt(), "accepted": None,
                 "run": npm if npm is not None else FakeNpm(),
-                "check": check or stub_check(0), "which": which}
+                "check": check or stub_check(0), "which": which,
+                "fetch": FakeRegistry(), "now": NOW}
         opts.update(kwargs)
         return npm_mod.npm_install(**opts)
 
@@ -415,7 +492,8 @@ class NpmCli(unittest.TestCase):
             self.args(override=["dep=1.0.1"], override_reason="advisory",
                       secret=["API_TOKEN"]),
             config=config, env={}, platform="win32", run=FakeNpm(), which=which,
-            check=stub_check(0), deliver=lambda *a, **k: delivered.append((a, k)))
+            check=stub_check(0), fetch=FakeRegistry(),
+            deliver=lambda *a, **k: delivered.append((a, k)))
         (name, entry, dry), kwargs = delivered[0]
         self.assertEqual(name, "server-files")
         self.assertEqual(entry["command"], "C:/node/node.exe")
@@ -567,6 +645,583 @@ class UnexpectedErrorTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
         self.assertIn("NO VERDICT", err)
+
+
+class ScriptedCheck:
+    """Returns the scripted results one by one (the last one repeats) and records calls."""
+
+    def __init__(self, *results):
+        self.results = list(results)
+        self.calls = []
+
+    def __call__(self, entries, **kwargs):
+        self.calls.append((list(entries), kwargs))
+        return self.results[min(len(self.calls) - 1, len(self.results) - 1)]
+
+
+def high_advisory(name="dep", version="1.0.0", fixed="1.0.3", ident="GHSA-aaaa-bbbb-cccc",
+                  severity="high"):
+    entry = lockcheck.Entry("npm", name, version, integrity="sha512-d")
+    interval = {"lower": None, "lower_inclusive": True, "upper": fixed,
+                "upper_inclusive": False, "fixed": fixed}
+    return lockcheck.Advisory(entry, ident, "github-reviewed", aliases=("CVE-2026-0001",),
+                              severity=severity, affected=(interval,))
+
+
+def finding(*advisories, failures=()):
+    lines = [f"[BLOCK] lockfile finding: {a.id}" for a in advisories]
+    return lockcheck.Result(1, lines, list(advisories), [], list(failures))
+
+
+class FastLaneBase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "mcp"
+        self.continuity_calls = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def lookups(self, provenance=None, kev=frozenset(), continuity="same"):
+        """Fixed answers for KEV, fix advisories, provenance and continuity (no network)."""
+        table = dict(provenance or {})
+
+        def npm_provenance(name, version, fetch):
+            answer = table[(name, version)]
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        def continuity_of(ecosystem, name, old, new, fetch):
+            self.continuity_calls.append((name, old, new))
+            return continuity
+
+        for target, replacement in (("kev_cves", lambda fetch: kev),
+                                    ("advisories_for", lambda entries, fetch=None: ([], [])),
+                                    ("npm_provenance", npm_provenance),
+                                    ("continuity", continuity_of)):
+            patcher = mock.patch.object(fastlane, target, replacement)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def scan(self, name, version, integrity, package_root=None):
+        receipts.write_receipt(package_root or self.root, receipts.Receipt(
+            kind="npm", package=name, version=version, archive_sha256="cd" * 32,
+            integrity=integrity, verdict="SAFE", at="2026-11-22T00:00:00+00:00",
+            agent_guard="0.5.2"))
+
+    def install(self, npm=None, check=None, **kwargs):
+        opts = {"name": "files", "package": PKG, "version": "1.2.3", "overrides": {},
+                "override_reason": None, "bin_name": None, "secrets": (),
+                "root": self.root, "receipt": receipt(), "accepted": None,
+                "run": npm if npm is not None else FakeNpm(),
+                "check": check or stub_check(0), "which": which,
+                "fetch": FakeRegistry(), "now": NOW}
+        opts.update(kwargs)
+        buffer = io.StringIO()
+        with mock.patch.object(sys, "stderr", buffer):
+            try:
+                return npm_mod.npm_install(**opts)
+            finally:
+                self.stderr = buffer.getvalue()
+
+    def old_tree(self, version, package=PKG, tier="s2", with_tier=True, lock_matches=True):
+        target = self.root / "files"
+        target.mkdir(parents=True)
+        lock = json.dumps(lock_for(package, version)).encode()
+        (target / "package-lock.json").write_bytes(lock)
+        meta = {"kind": "npm", "package": package, "version": version,
+                "lockfile_sha256": hashlib.sha256(lock if lock_matches else b"x").hexdigest()}
+        if with_tier:
+            meta["tier"] = tier
+        (target / locked.METADATA).write_text(json.dumps(meta), encoding="utf-8")
+        (target / "marker.txt").write_text("old tree", encoding="utf-8")
+        return target
+
+    def assert_old_untouched(self):
+        target = self.root / "files"
+        self.assertEqual((target / "marker.txt").read_text(encoding="utf-8"), "old tree")
+        self.assertEqual(sorted(p.name for p in self.root.iterdir() if p.name != ".receipts"),
+                         ["files"])
+
+    def refused(self, code, **kwargs):
+        with self.assertRaises(locked.Refused) as ctx:
+            self.install(**kwargs)
+        self.assertEqual(ctx.exception.code, code, str(ctx.exception))
+        return ctx.exception
+
+
+class FastLaneInstall(FastLaneBase):
+    """Security fixes that are younger than the waiting period (#48, 15.2)."""
+
+    def fix_setup(self, provenance=None, scanned=True, **kwargs):
+        provenance = provenance if provenance is not None else {
+            ("dep", "1.0.0"): REPO, ("dep", "1.0.3"): REPO}
+        self.lookups(provenance=provenance)
+        if scanned:
+            self.scan("dep", "1.0.3", "sha512-o")
+        npm = kwargs.pop("npm", None) or FakeNpm(
+            extra={"dep": ("1.0.0", "sha512-d")},
+            audit=(0, audit_json(verified=[("dep", "1.0.3")])))
+        check = kwargs.pop("check", None) or ScriptedCheck(
+            finding(high_advisory()), lockcheck.Result(0, ["ok"]))
+        return npm, check
+
+    def test_fast_lane_installs_scanned_fix_of_transitive_high(self):
+        npm, check = self.fix_setup()
+        installed = self.install(npm=npm, check=check)
+        manifest = json.loads((self.root / "files" / "package.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["overrides"], {"dep": "1.0.3"})
+        self.assertEqual(manifest["_overrides"], "agent-guard fast lane: GHSA-aaaa-bbbb-cccc")
+        expected = [{"package": "dep", "from": "1.0.0", "to": "1.0.3",
+                     "advisories": ["GHSA-aaaa-bbbb-cccc"], "repo": REPO,
+                     "receipt_integrity": "sha512-o", "tier": "fast_lane"}]
+        self.assertEqual(installed.fast_lane, expected)
+        meta = json.loads((self.root / "files" / locked.METADATA).read_text(encoding="utf-8"))
+        self.assertEqual(meta["fast_lane"], expected)
+        self.assertEqual(check.calls[1][1]["age_limits"], {("npm", "dep", "1.0.3"): 0})
+        self.assertIn("fast lane: dep 1.0.0 -> 1.0.3 (GHSA-aaaa-bbbb-cccc, provenance "
+                      f"{REPO}, receipt sha512-o)", self.stderr)
+        self.assertTrue(any(c[1:3] == ["audit", "signatures"] for c in npm.commands))
+
+    def test_fast_lane_excludes_only_the_fix_packages(self):
+        npm, check = self.fix_setup()
+        self.install(npm=npm, check=check)
+        installs = [c for c in npm.commands if c[1] == "install"]
+        self.assertEqual(len(installs), 2)
+        rebuild = installs[1]
+        self.assertIn("--min-release-age=7", rebuild)
+        self.assertEqual([a for a in rebuild if a.startswith("--min-release-age-exclude")],
+                         ["--min-release-age-exclude=dep"])
+        self.assertNotIn("--min-release-age=0", rebuild)
+        self.assertEqual(npm.seeds, [False, True])
+        self.assertEqual(len(set(npm.install_dirs)), 2)
+
+    def test_fast_lane_without_receipt_needs_scan(self):
+        npm, check = self.fix_setup(scanned=False)
+        self.old_tree("1.2.2")
+        exc = self.refused(2, npm=npm, check=check)
+        self.assertIsInstance(exc, locked.NeedsScan)
+        self.assertEqual(exc.items, [{"kind": "npm", "package": "dep", "version": "1.0.3"}])
+        self.assertIn("python scripts/scan_url.py npm:dep@1.0.3", str(exc))
+        self.assertEqual(len([c for c in npm.commands if c[1] == "install"]), 1)
+        self.assertEqual(len(set(npm.install_dirs)), 1)
+        self.assert_old_untouched()
+
+    def test_missing_provenance_reports_with_override_hint(self):
+        npm, check = self.fix_setup(provenance={("dep", "1.0.0"): REPO,
+                                                ("dep", "1.0.3"): "missing"})
+        exc = self.refused(1, npm=npm, check=check)
+        self.assertIn("--override dep=1.0.3", str(exc) + self.stderr)
+        self.assertIn("--override-reason", str(exc) + self.stderr)
+        self.assertEqual(len([c for c in npm.commands if c[1] == "install"]), 1)
+
+    def test_provenance_lookup_failure_has_no_verdict(self):
+        failed = lockcheck.LookupFailed("registry down", 500)
+        npm, check = self.fix_setup(provenance={("dep", "1.0.0"): REPO,
+                                                ("dep", "1.0.3"): failed})
+        self.refused(2, npm=npm, check=check)
+        self.assertEqual(len([c for c in npm.commands if c[1] == "install"]), 1)
+
+    def test_receipt_hash_differs_from_lockfile(self):
+        npm, check = self.fix_setup(scanned=False)
+        self.scan("dep", "1.0.3", "sha512-other")
+        self.old_tree("1.2.2")
+        self.refused(2, npm=npm, check=check)
+        self.assertFalse(any(c[1] == "ci" for c in npm.commands))
+        self.assert_old_untouched()
+
+    def user_override_setup(self, provenance, audit_verified=(), audit_invalid=()):
+        self.lookups(provenance=provenance)
+        self.scan("dep", "1.0.3", "sha512-o")
+        npm = FakeNpm(extra={"dep": ("1.0.0", "sha512-d")},
+                      audit=(0, audit_json(verified=audit_verified, invalid=audit_invalid)))
+        check = ScriptedCheck(finding(high_advisory()), lockcheck.Result(0, ["ok"]))
+        options = {"overrides": {"dep": "1.0.3"}, "override_reason": "own reason",
+                   "fetch": FakeRegistry(ages={("dep", "1.0.3"): 3})}
+        return npm, check, options
+
+    def test_user_override_installs_when_provenance_missing(self):
+        npm, check, options = self.user_override_setup(
+            {("dep", "1.0.0"): REPO, ("dep", "1.0.3"): "missing"})
+        installed = self.install(npm=npm, check=check, **options)
+        manifest = json.loads((self.root / "files" / "package.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["overrides"], {"dep": "1.0.3"})
+        self.assertEqual(manifest["_overrides"],
+                         "own reason; agent-guard fast lane: GHSA-aaaa-bbbb-cccc")
+        self.assertEqual([item["tier"] for item in installed.fast_lane], ["override"])
+        self.assertEqual(npm.seeds, [False, True])
+
+    def test_audit_signatures_override_fix_needs_no_attestation(self):
+        npm, check, options = self.user_override_setup(
+            {("dep", "1.0.0"): REPO, ("dep", "1.0.3"): "missing"})
+        self.install(npm=npm, check=check, **options)
+        self.assertTrue(any(c[1:3] == ["audit", "signatures"] for c in npm.commands))
+        npm, check, options = self.user_override_setup(
+            {("dep", "1.0.0"): REPO, ("dep", "1.0.3"): "missing"},
+            audit_invalid=[{"name": "dep", "version": "1.0.3"}])
+        (self.root / "files").rename(self.root / "done")
+        self.refused(2, npm=npm, check=check, **options)
+
+    def test_user_override_does_not_help_a_failed_lookup(self):
+        failed = lockcheck.LookupFailed("registry down", 500)
+        npm, check, options = self.user_override_setup(
+            {("dep", "1.0.0"): REPO, ("dep", "1.0.3"): failed})
+        self.refused(2, npm=npm, check=check, **options)
+        self.assertEqual(len([c for c in npm.commands if c[1] == "install"]), 1)
+
+    def test_user_override_does_not_help_a_changed_repo(self):
+        npm, check, options = self.user_override_setup(
+            {("dep", "1.0.0"): REPO, ("dep", "1.0.3"): "github.com/x/y"})
+        self.refused(1, npm=npm, check=check, **options)
+        self.assertEqual(len([c for c in npm.commands if c[1] == "install"]), 1)
+
+    def test_no_fast_lane_option_reports(self):
+        npm, check = self.fix_setup(scanned=False)
+        self.refused(1, npm=npm, check=check, policy=fastlane.policy(None, None, True))
+        self.assertEqual(len([c for c in npm.commands if c[1] == "install"]), 1)
+
+    def test_old_npm_has_no_fast_lane(self):
+        npm, check = self.fix_setup(scanned=False)
+        npm.version = "11.16.0"
+        exc = self.refused(1, npm=npm, check=check)
+        self.assertIn("fast lane not available for npm trees on this npm", str(exc) + self.stderr)
+        self.assertEqual(len([c for c in npm.commands if c[1] == "install"]), 1)
+
+    def test_new_young_dependency_of_fix_waits(self):
+        young = lockcheck.Young(lockcheck.Entry("npm", "newdep", "2.0.0"), stamp(1), 7,
+                                "2026-11-28")
+        npm, check = self.fix_setup(check=ScriptedCheck(
+            finding(high_advisory()),
+            lockcheck.Result(2, ["NO VERDICT -- newdep young"], [], [young], [])))
+        self.old_tree("1.2.2")
+        self.refused(2, npm=npm, check=check)
+        self.assertFalse(any(c[1] == "ci" for c in npm.commands))
+        self.assert_old_untouched()
+
+    def test_lookup_failure_next_to_fixable_finding_blocks_rebuild(self):
+        npm, check = self.fix_setup(check=ScriptedCheck(
+            finding(high_advisory(), failures=["GitHub reviewed: unreadable"])))
+        self.refused(2, npm=npm, check=check)
+        self.assertEqual(len([c for c in npm.commands if c[1] == "install"]), 1)
+
+    def test_kev_unavailable_blocks_fast_lane(self):
+        npm, check = self.fix_setup()
+        self.lookups(provenance={("dep", "1.0.0"): REPO, ("dep", "1.0.3"): REPO}, kev=None)
+        self.refused(2, npm=npm, check=check)
+        self.assertEqual(len([c for c in npm.commands if c[1] == "install"]), 1)
+
+    def test_rebuild_checks_top_receipt(self):
+        npm, check = self.fix_setup(npm=FakeNpm(
+            extra={"dep": ("1.0.0", "sha512-d")}, integrities=[INTEGRITY, "sha512-changed"]))
+        exc = self.refused(2, npm=npm, check=check)
+        self.assertIn("scanned", str(exc))
+        self.assertFalse(any(c[1] == "ci" for c in npm.commands))
+
+    def test_conflicting_user_override_is_refused(self):
+        self.lookups(provenance={("dep", "1.0.1"): REPO, ("dep", "1.0.3"): REPO})
+        self.scan("dep", "1.0.3", "sha512-o")
+        npm = FakeNpm()
+        check = ScriptedCheck(finding(high_advisory(version="1.0.1")))
+        self.refused(2, npm=npm, check=check, overrides={"dep": "1.0.1"},
+                     override_reason="pinned for compatibility")
+        self.assertEqual(len([c for c in npm.commands if c[1] == "install"]), 1)
+
+    def test_pending_override_without_advisory_waits(self):
+        npm = FakeNpm()
+        exc = self.refused(2, npm=npm, overrides={"dep": "1.0.3"}, override_reason="r",
+                           fetch=FakeRegistry(ages={("dep", "1.0.3"): 3}))
+        self.assertIn("younger than 7 days", str(exc))
+        self.assertIn("2026-11-26", str(exc))
+        self.assertEqual(len([c for c in npm.commands if c[1] == "install"]), 1)
+
+    def test_fix_of_top_package_pins_the_fix_version(self):
+        self.lookups(provenance={(PKG, "1.2.3"): REPO, (PKG, "1.2.4"): REPO})
+        self.scan(PKG, "1.2.4", "sha512-top2")
+        npm = FakeNpm(top_integrity={"1.2.4": "sha512-top2"},
+                      audit=(0, audit_json(verified=[(PKG, "1.2.4")])))
+        advisory = high_advisory(name=PKG, version="1.2.3", fixed="1.2.4")
+        check = ScriptedCheck(finding(advisory), lockcheck.Result(0, ["ok"]))
+        installed = self.install(npm=npm, check=check)
+        manifest = json.loads((self.root / "files" / "package.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["dependencies"], {PKG: "1.2.4"})
+        self.assertNotIn("overrides", manifest)
+        self.assertEqual(installed.requested, "1.2.4")
+        meta = json.loads((self.root / "files" / locked.METADATA).read_text(encoding="utf-8"))
+        self.assertEqual(meta["version"], "1.2.4")
+        self.assertEqual((installed.fast_lane[0]["from"], installed.fast_lane[0]["to"]),
+                         ("1.2.3", "1.2.4"))
+        self.assertEqual(check.calls[1][1]["age_limits"], {("npm", PKG, "1.2.4"): 0})
+        rebuild = [c for c in npm.commands if c[1] == "install"][1]
+        self.assertIn(f"--min-release-age-exclude={PKG}", rebuild)
+        self.assertTrue(Path(installed.args[0]).is_file())
+
+    def test_audit_signatures_failure_has_no_verdict(self):
+        cases = {"exit code": (1, audit_json(verified=[("dep", "1.0.3")])),
+                 "unreadable": (0, "npm warn something\nnot json"),
+                 "no verified key": (0, json.dumps({"invalid": [], "missing": []})),
+                 "invalid": (0, audit_json(verified=[("dep", "1.0.3")],
+                                           invalid=[{"name": "x"}])),
+                 "missing": (0, audit_json(verified=[("dep", "1.0.3")],
+                                           missing=[{"name": "x"}]))}
+        for label, audit in cases.items():
+            with self.subTest(case=label):
+                npm, check = self.fix_setup(npm=FakeNpm(
+                    extra={"dep": ("1.0.0", "sha512-d")}, audit=audit))
+                self.refused(2, npm=npm, check=check)
+                self.assertFalse((self.root / "files").exists())
+
+    def test_audit_signatures_without_verified_attestation_for_fix_has_no_verdict(self):
+        cases = {"empty": audit_json(),
+                 "other version": audit_json(verified=[("dep", "1.0.2")]),
+                 "other package": audit_json(verified=[("other", "1.0.3")]),
+                 "no slsa": audit_json(verified=[("dep", "1.0.3")],
+                                       predicate="https://example.invalid/other")}
+        for label, output in cases.items():
+            with self.subTest(case=label):
+                npm, check = self.fix_setup(npm=FakeNpm(
+                    extra={"dep": ("1.0.0", "sha512-d")}, audit=(0, output)))
+                self.refused(2, npm=npm, check=check)
+                self.assertFalse((self.root / "files").exists())
+
+    def test_audit_signatures_invalid_or_missing_has_no_verdict(self):
+        self.old_tree("1.2.2")
+        self.lookups(continuity="same")
+        for audit in (audit_json(verified=[(PKG, "1.2.3")], invalid=[{"name": "x"}]),
+                      audit_json(verified=[(PKG, "1.2.3")], missing=[{"name": "x"}])):
+            with self.subTest(audit=audit):
+                self.refused(2, npm=FakeNpm(audit=(0, audit)),
+                             fetch=FakeRegistry(ages={(PKG, "1.2.3"): 3}))
+                self.assert_old_untouched()
+
+    def test_audit_json_followed_by_npm_warnings_is_read(self):
+        output = audit_json(verified=[("dep", "1.0.3")]) + "\nnpm warn config something odd\n"
+        npm, check = self.fix_setup(npm=FakeNpm(extra={"dep": ("1.0.0", "sha512-d")},
+                                                audit=(0, output)))
+        installed = self.install(npm=npm, check=check)
+        self.assertEqual([item["to"] for item in installed.fast_lane], ["1.0.3"])
+
+    def test_plain_s2_install_runs_no_audit(self):
+        npm = FakeNpm()
+        installed = self.install(npm=npm)
+        self.assertFalse(any(c[1] == "audit" for c in npm.commands))
+        self.assertEqual((installed.tier, installed.fast_lane), ("s2", []))
+        self.assertEqual(self.continuity_calls, [])
+
+
+class TrustedPeriod(FastLaneBase):
+    """S1: the top package may be younger than the waiting period (#48, 15.1)."""
+
+    def s1_options(self, top_age=3):
+        return {"fetch": FakeRegistry(ages={(PKG, "1.2.3"): top_age})}
+
+    def s1_npm(self, **kwargs):
+        kwargs.setdefault("etarget_unless_excluded", PKG)
+        kwargs.setdefault("audit", (0, audit_json(verified=[(PKG, "1.2.3")])))
+        return FakeNpm(**kwargs)
+
+    def test_s1_top_package_with_same_provenance(self):
+        self.lookups(continuity="same")
+        self.old_tree("1.2.2")
+        npm, check = self.s1_npm(), ScriptedCheck(lockcheck.Result(0, ["ok"]))
+        installed = self.install(npm=npm, check=check, **self.s1_options())
+        self.assertEqual(installed.tier, "s1")
+        self.assertEqual(self.continuity_calls, [(PKG, "1.2.2", "1.2.3")])
+        self.assertEqual(npm.seeds, [True])
+        self.assertEqual(check.calls[0][1]["age_limits"], {("npm", PKG, "1.2.3"): 2})
+        meta = json.loads((self.root / "files" / locked.METADATA).read_text(encoding="utf-8"))
+        self.assertEqual(meta["tier"], "s1")
+        self.assertTrue(any(c[1:3] == ["audit", "signatures"] for c in npm.commands))
+
+    def test_s1_uses_release_age_exclude_for_the_top_package(self):
+        self.lookups(continuity="same")
+        self.old_tree("1.2.2")
+        npm = self.s1_npm()
+        self.install(npm=npm, **self.s1_options())
+        resolution = next(c for c in npm.commands if c[1] == "install")
+        self.assertIn("--min-release-age=7", resolution)
+        self.assertIn(f"--min-release-age-exclude={PKG}", resolution)
+        self.assertNotIn("--min-release-age=2", resolution)
+
+    def test_s1_needs_previous_tree(self):
+        self.lookups(continuity="same")
+        exc = self.refused(2, npm=self.s1_npm(), **self.s1_options())
+        self.assertIn("younger than 7 days", str(exc))
+        self.assertEqual(self.continuity_calls, [])
+
+    def test_s1_does_not_cover_dependencies(self):
+        self.lookups(continuity="same")
+        self.old_tree("1.2.2")
+        young = lockcheck.Young(lockcheck.Entry("npm", "dep", "1.0.0"), stamp(3), 7, "2026-11-26")
+        check = ScriptedCheck(lockcheck.Result(2, ["NO VERDICT -- dep is young"], [], [young], []))
+        self.refused(2, npm=self.s1_npm(), check=check, **self.s1_options())
+        self.assertEqual(check.calls[0][1]["age_limits"], {("npm", PKG, "1.2.3"): 2})
+        self.assert_old_untouched()
+
+    def test_s1_needs_an_npm_with_the_exclude_option(self):
+        self.lookups(continuity="same")
+        self.old_tree("1.2.2")
+        npm = self.s1_npm(version="11.16.0")
+        self.refused(2, npm=npm, **self.s1_options())
+        self.assertFalse(any("--min-release-age-exclude=" + PKG in c for c in npm.commands))
+
+    def test_s1_needs_the_same_repository(self):
+        self.old_tree("1.2.2")
+        for value in ("different", "missing", "failed", "none"):
+            with self.subTest(continuity=value):
+                self.lookups(continuity=value)
+                npm = self.s1_npm()
+                self.refused(2, npm=npm, **self.s1_options())
+                self.assertFalse(any(a.startswith("--min-release-age-exclude")
+                                     for c in npm.commands for a in c))
+                self.assert_old_untouched()
+
+    def test_old_top_package_needs_no_trusted_period(self):
+        self.lookups(continuity="same")
+        self.old_tree("1.2.2")
+        installed = self.install(npm=FakeNpm(), **self.s1_options(top_age=30))
+        self.assertEqual(installed.tier, "s2")
+        self.assertEqual(self.continuity_calls, [])
+
+    def test_old_metadata_of_other_package_gives_s2(self):
+        self.lookups(continuity="same")
+        variants = {"other package": {"package": "@scope/other"},
+                    "before the tier field": {"with_tier": False},
+                    "lockfile changed since": {"lock_matches": False}}
+        for label, options in variants.items():
+            with self.subTest(case=label):
+                target = self.root / "files"
+                if target.exists():
+                    shutil.rmtree(target)
+                self.old_tree("1.2.2", **options)
+                npm = self.s1_npm()
+                exc = self.refused(2, npm=npm, **self.s1_options())
+                self.assertIn("younger than 7 days", str(exc))
+                self.assertEqual(self.continuity_calls, [])
+                self.assertEqual(npm.seeds, [False])
+
+
+class JudgeTree(FastLaneBase):
+    def judge(self, entries, advisories, check=None, **kwargs):
+        opts = {"receipts_root": self.root, "kind": "npm", "user_overrides": {},
+                "policy": fastlane.Policy(), "fetch": FakeRegistry(), "now": NOW,
+                "check": check or ScriptedCheck(finding(*advisories))}
+        opts.update(kwargs)
+        return fastlane.judge_tree(entries, {}, **opts)
+
+    def test_judge_tree_turns_any_exception_into_no_verdict(self):
+        advisory = high_advisory()
+        for exc in (KeyError("k"), TypeError("t"), ValueError("v")):
+            with self.subTest(exception=type(exc).__name__):
+                self.lookups(provenance={("dep", "1.0.0"): REPO, ("dep", "1.0.3"): REPO})
+                with mock.patch.object(fastlane, "gather", side_effect=exc):
+                    verdict = self.judge([advisory.entry], [advisory])
+                self.assertEqual(verdict.code, 2)
+                self.assertEqual((verdict.decisions[0]["action"], verdict.decisions[0]["reason"]),
+                                 ("no_verdict", "lookup_failed"))
+                self.assertEqual(verdict.fixes, {})
+        self.lookups(provenance={("dep", "1.0.0"): REPO, ("dep", "1.0.3"): REPO})
+        for target in ("advisories_for", "kev_cves"):
+            with self.subTest(lookup=target):
+                with mock.patch.object(fastlane, target, side_effect=KeyError("shape")):
+                    verdict = self.judge([advisory.entry], [advisory])
+                self.assertEqual(verdict.code, 2)
+                self.assertEqual(verdict.fixes, {})
+
+    def test_two_instances_with_different_fixes_have_no_verdict(self):
+        first = high_advisory(version="1.0.0", fixed="1.0.3")
+        second = high_advisory(version="2.0.0", fixed="2.0.1", ident="GHSA-dddd-eeee-ffff")
+        self.lookups(provenance={("dep", v): REPO for v in ("1.0.0", "1.0.3", "2.0.0", "2.0.1")})
+        self.scan("dep", "1.0.3", "sha512-o")
+        self.scan("dep", "2.0.1", "sha512-o")
+        verdict = self.judge([first.entry, second.entry], [first, second])
+        self.assertEqual(verdict.code, 2)
+        self.assertEqual(verdict.fixes, {})
+        self.assertTrue(any("several versions of dep need different fixes" in line
+                            for line in verdict.lines))
+
+    def test_unaffected_instance_of_the_same_name_has_no_verdict(self):
+        affected = high_advisory(version="1.0.0")
+        clean = lockcheck.Entry("npm", "dep", "2.0.0", integrity="sha512-e")
+        self.lookups(provenance={("dep", "1.0.0"): REPO, ("dep", "1.0.3"): REPO})
+        self.scan("dep", "1.0.3", "sha512-o")
+        verdict = self.judge([affected.entry, clean], [affected])
+        self.assertEqual(verdict.code, 2)
+        self.assertEqual(verdict.fixes, {})
+
+    def test_judge_tree_returns_fix_and_receipt(self):
+        advisory = high_advisory()
+        self.lookups(provenance={("dep", "1.0.0"): REPO, ("dep", "1.0.3"): REPO})
+        self.scan("dep", "1.0.3", "sha512-o")
+        verdict = self.judge([advisory.entry], [advisory])
+        self.assertEqual(verdict.code, 0)
+        version, found, decision = verdict.fixes["dep"]
+        self.assertEqual((version, found.integrity, decision["tier"], decision["repo"]),
+                         ("1.0.3", "sha512-o", "fast_lane", REPO))
+        self.assertEqual(verdict.needs_scan, [])
+
+    def test_judge_tree_keeps_a_finding_without_advisory(self):
+        advisory = high_advisory()
+        self.lookups(provenance={("dep", "1.0.0"): REPO, ("dep", "1.0.3"): REPO})
+        self.scan("dep", "1.0.3", "sha512-o")
+        result = finding(advisory)
+        result.blocking.append("other@1.0.0: locked integrity differs from the registry")
+        verdict = self.judge([advisory.entry], [advisory], check=ScriptedCheck(result))
+        self.assertEqual(verdict.code, 1)
+        self.assertEqual((verdict.fixes, verdict.decisions), ({}, []))
+
+    def test_judge_tree_young_entry_next_to_a_fix_waits(self):
+        advisory = high_advisory()
+        self.lookups(provenance={("dep", "1.0.0"): REPO, ("dep", "1.0.3"): REPO})
+        self.scan("dep", "1.0.3", "sha512-o")
+        result = finding(advisory)
+        result.young.append(lockcheck.Young(lockcheck.Entry("npm", "other", "1.0.0"),
+                                            stamp(3), 7, "2026-11-26"))
+        verdict = self.judge([advisory.entry], [advisory], check=ScriptedCheck(result))
+        self.assertEqual(verdict.code, 2)
+        self.assertEqual(verdict.fixes, {})
+
+    def test_judge_tree_report_wins_over_no_verdict(self):
+        reported = high_advisory()
+        other = high_advisory(name="other", ident="GHSA-gggg-hhhh-iiii")
+        self.lookups(provenance={("dep", "1.0.0"): REPO, ("dep", "1.0.3"): "missing",
+                                 ("other", "1.0.0"): REPO,
+                                 ("other", "1.0.3"): lockcheck.LookupFailed("down", 500)})
+        verdict = self.judge([reported.entry, other.entry], [reported, other])
+        self.assertEqual(verdict.code, 1)
+
+    def test_block_receipt_of_a_fix_is_a_finding(self):
+        advisory = high_advisory()
+        self.lookups(provenance={("dep", "1.0.0"): REPO, ("dep", "1.0.3"): REPO})
+        receipts.write_receipt(self.root, receipts.Receipt(
+            kind="npm", package="dep", version="1.0.3", archive_sha256="cd" * 32,
+            integrity="sha512-o", verdict="BLOCK", at="2026-11-22T00:00:00+00:00",
+            agent_guard="0.5.2"))
+        verdict = self.judge([advisory.entry], [advisory])
+        self.assertEqual(verdict.code, 1)
+        self.assertEqual(verdict.fixes, {})
+
+
+class HelpTexts(unittest.TestCase):
+    def help_of(self, mode):
+        result = subprocess.run([sys.executable, str(ROOT / "scripts" / "install_skill.py"),
+                                 mode, "--help"], capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return " ".join(result.stdout.split())
+
+    def test_npm_options_describe_their_effect(self):
+        text = self.help_of("mcp-npm")
+        self.assertNotIn("Reserved", text)
+        self.assertIn("--trusted-days", text)
+        self.assertIn("--no-fast-lane", text)
+
+    def test_pypi_options_stay_reserved_until_the_pypi_fast_lane(self):
+        self.assertIn("Reserved", self.help_of("mcp-pypi"))
+
+    def test_git_options_say_they_have_no_effect(self):
+        text = self.help_of("mcp-git")
+        self.assertNotIn("Reserved", text)
+        self.assertIn("no effect for Git sources", text)
 
 
 if __name__ == "__main__":

@@ -744,7 +744,7 @@ def _mcp_policy(args) -> _fastlane.Policy:
 
 
 def cmd_mcp_npm(args, *, config: dict, env, platform: str, run=None, which=shutil.which,
-                check=None, deliver=None, register_run=None):
+                check=None, deliver=None, register_run=None, fetch=None):
     """mcp-npm: scan receipt, locked tree, then hand the start command to the agents."""
     import _lockcheck
     import _mcp_npm
@@ -763,7 +763,7 @@ def cmd_mcp_npm(args, *, config: dict, env, platform: str, run=None, which=shuti
         override_reason=args.override_reason, bin_name=args.bin,
         secrets=tuple(args.secret or ()), root=settings.install_dir, receipt=receipt,
         accepted=accepted, run=run or _mcp_locked.run_tool, check=check or _lockcheck.check,
-        which=which, dry=args.dry_run, policy=policy)
+        which=which, dry=args.dry_run, policy=policy, fetch=fetch or _lockcheck.http_fetch)
     if accepted:
         print(f"   Installed despite the BLOCK verdict: {accepted['grund']}")
     _mcp_locked.deliver(installed, settings, dry=args.dry_run, selected=args.tools,
@@ -825,13 +825,23 @@ def _age_arg(value: str) -> int | str:
         return value
 
 
-def _add_mcp_policy_options(parser):
+_POLICY_HELP = {
+    "npm": ("Age in days of the top package when the installed version came from the same "
+            "source repository (default: 2; at most --min-age-days)",
+            "Never rebuild the tree with a younger scanned security fix; report the advisory"),
+    "pypi": ("Reserved age setting for trusted releases (default: 2)",
+             "Reserved switch to disable the security-fix fast lane"),
+    "git": ("Accepted; no effect for Git sources (default: 2)",
+            "Accepted; no effect for Git sources"),
+}
+
+
+def _add_mcp_policy_options(parser, kind: str):
+    trusted_help, fast_lane_help = _POLICY_HELP[kind]
     parser.add_argument("--min-age-days", type=_age_arg, metavar="N",
                         help="Minimum age in days (default: 7)")
-    parser.add_argument("--trusted-days", type=_age_arg, metavar="N",
-                        help="Reserved age setting for trusted releases (default: 2)")
-    parser.add_argument("--no-fast-lane", action="store_true",
-                        help="Reserved switch to disable the security-fix fast lane")
+    parser.add_argument("--trusted-days", type=_age_arg, metavar="N", help=trusted_help)
+    parser.add_argument("--no-fast-lane", action="store_true", help=fast_lane_help)
     parser.add_argument("--json", action="store_true",
                         help="Print one JSON result on stdout and diagnostics on stderr")
 
@@ -943,7 +953,7 @@ def main():
                        help=f"Limit installation to specific tools "
                             f"(default: all detected). Choices: {', '.join(tool_choices)}")
     p_git.add_argument("--dry-run", action="store_true")
-    _add_mcp_policy_options(p_git)
+    _add_mcp_policy_options(p_git, "git")
 
     # Locked npm MCP
     p_npm = sub.add_parser("mcp-npm", help="Install an npm MCP server from a checked lockfile "
@@ -966,7 +976,7 @@ def main():
                        help=f"Limit installation to specific tools "
                             f"(default: all detected). Choices: {', '.join(tool_choices)}")
     p_npm.add_argument("--dry-run", action="store_true")
-    _add_mcp_policy_options(p_npm)
+    _add_mcp_policy_options(p_npm, "npm")
 
     # Locked PyPI MCP
     p_pypi = sub.add_parser("mcp-pypi", help="Install a PyPI MCP server from a checked uv.lock "
@@ -985,7 +995,7 @@ def main():
                         help=f"Limit installation to specific tools "
                              f"(default: all detected). Choices: {', '.join(tool_choices)}")
     p_pypi.add_argument("--dry-run", action="store_true")
-    _add_mcp_policy_options(p_pypi)
+    _add_mcp_policy_options(p_pypi, "pypi")
 
     # Repeat a failed handoff
     p_reg = sub.add_parser("mcp-register", help="Hand an installed locked MCP tree to the "

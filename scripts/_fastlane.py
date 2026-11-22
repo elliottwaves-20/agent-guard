@@ -5,13 +5,16 @@ import base64
 import datetime as dt
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import quote, urlsplit
 
+import _lockcheck
 import _versions
 from _lockcheck import (NPM_REGISTRY_URL, PYPI_JSON_URL, Advisory, Entry, LookupFailed,
                         _array, _github_repo, _sha256, _text, advisories_for, entry_key)
-from _mcp_locked import Refused, normalize_pypi
+from _mcp_locked import NeedsScan, Refused, normalize_pypi
+from _mcp_receipts import require_receipt
 
 
 @dataclass(frozen=True)
@@ -534,3 +537,174 @@ def continuity(ecosystem: str, name: str, old: str | None, new: str, fetch) -> s
     if "missing" in (old_repo, new_repo):
         return "missing"
     return "same" if old_repo == new_repo else "different"
+
+
+@dataclass
+class TreeVerdict:
+    """Outcome of judging one resolved tree.
+
+    code 0 with fixes means: rebuild the tree with these scanned fixes; code 0
+    without fixes means the tree is clean. fixes maps a package name to
+    (version, receipt, decision)."""
+    code: int
+    lines: list = field(default_factory=list)
+    advisories: list = field(default_factory=list)
+    decisions: list = field(default_factory=list)
+    needs_scan: list = field(default_factory=list)
+    young: list = field(default_factory=list)
+    fixes: dict = field(default_factory=dict)
+    notes: list = field(default_factory=list)
+
+
+def _record(entry: Entry, decision: dict, repo: str | None) -> dict:
+    return {"package": entry.name, "installed": entry.version, "action": decision["action"],
+            "version": decision["version"], "tier": decision["tier"],
+            "reason": decision["reason"], "advisories": list(decision["advisories"] or []),
+            "repo": repo}
+
+
+def _decide_entry(entry: Entry, advisories: list, kev, policy: Policy, override, fetch) -> dict:
+    """One decision per entry; any unexpected failure of a lookup is no verdict."""
+    repo = None
+    try:
+        case = gather(entry, advisories,
+                      installed_files=entry.files if entry.ecosystem == "PyPI" else (),
+                      kev=kev, policy=policy, override=override, fetch=fetch)
+        decision = decide(case)
+        if decision["version"] is not None:
+            repo = case["input"]["versions"].get(decision["version"], {}).get("provenance")
+    except Exception:  # a different answer shape is no verdict, never a pass
+        decision = _decision("no_verdict", reason="lookup_failed")
+    record = _record(entry, decision, repo if isinstance(repo, str) else None)
+    # A user override that names another version than the fix is never mixed in silently.
+    if record["action"] == "install" and override not in (None, record["version"]):
+        if override == entry.version:
+            record.update(action="no_verdict", reason="override_conflict")
+        else:
+            record.update(action="report", reason="override_differs")
+    return record
+
+
+def _decision_line(record: dict) -> str:
+    label = f"{record['package']}@{record['installed']}"
+    ids = ", ".join(record["advisories"]) or "no id"
+    reason = record["reason"]
+    if record["action"] == "no_verdict":
+        return f"NO VERDICT -- {label}: advisory {ids}; the fast lane could not decide ({reason})"
+    line = f"[BLOCK] {label}: advisory {ids}; the fast lane gives no install ({reason})"
+    if reason == "provenance_missing" and record["version"]:
+        line += (f"; to accept {record['version']} anyway scan it, then run with "
+                 f"--override {record['package']}={record['version']} --override-reason TEXT")
+    if reason == "override_differs" and record["version"]:
+        line += f"; the fix to use is {record['version']}"
+    return line
+
+
+def judge_tree(entries: list[Entry], previous: dict, *, receipts_root: Path, kind: str,
+               user_overrides: dict, policy: Policy, fetch, now=None, age_limits=None,
+               check=_lockcheck.check, unavailable: str | None = None) -> TreeVerdict:
+    """The one rule for a resolved tree: lockfile check, then a decision per affected entry.
+
+    Exit mapping: any report gives 1; otherwise any no verdict, lookup failure or
+    missing receipt gives 2. A fix is used only after a complete run with a SAFE
+    receipt. `unavailable` turns every install decision into a report (the
+    caller cannot rebuild a tree with a fix). `previous` is accepted for the
+    callers that judge a list against an installed state; the build path of
+    npm_install does not use it."""
+    try:
+        result = check(entries, now=now, fetch=fetch, min_age_days=policy.min_age_days,
+                       age_limits=age_limits)
+    except Exception as exc:
+        return TreeVerdict(2, [f"NO VERDICT -- lockfile check failed: {type(exc).__name__}: {exc}"])
+    verdict = TreeVerdict(result.code, list(result.lines), list(result.advisories),
+                          young=list(result.young))
+    # A finding that is no advisory (hash or integrity differs) has no fast lane.
+    if result.code != 1 or not result.advisories or result.blocking:
+        return verdict
+
+    try:
+        kev = kev_cves(fetch)
+    except Exception:
+        kev = None
+    groups: dict = {}
+    unmatched = []
+    for advisory in result.advisories:
+        if advisory.entry is None:
+            unmatched.append(advisory.id)
+        else:
+            groups.setdefault(entry_key(advisory.entry), (advisory.entry, []))[1].append(advisory)
+    for entry, advisories in groups.values():
+        verdict.decisions.append(_decide_entry(entry, advisories, kev, policy,
+                                               user_overrides.get(entry.name), fetch))
+    incomplete = bool(result.failures)
+    for record in verdict.decisions:
+        if record["action"] == "install" and unavailable:
+            record.update(action="report", reason="fast_lane_unavailable")
+        elif record["action"] == "install" and incomplete:
+            record.update(action="no_verdict", reason="incomplete_lookup")
+
+    _check_same_name(entries, verdict)
+    for record in verdict.decisions:
+        if record["action"] != "install":
+            line = _decision_line(record)
+            if record["reason"] == "fast_lane_unavailable":
+                line += f"; {unavailable}"
+            verdict.notes.append(line)
+    for advisory_id in unmatched:
+        verdict.notes.append(f"[BLOCK] advisory {advisory_id} names no entry of this tree")
+    verdict.lines.extend(verdict.notes)
+
+    actions = [record["action"] for record in verdict.decisions]
+    if unmatched or "report" in actions:
+        verdict.code = 1
+    elif any(action != "install" for action in actions) or incomplete or result.young:
+        verdict.code = 2  # a young entry next to the fixes waits; it is not a fix
+    else:
+        verdict.code = 0
+        _collect_fixes(verdict, receipts_root, kind)
+    return verdict
+
+
+def _same_name(entry: Entry, name: str) -> bool:
+    return entry_key(entry)[:2] == entry_key(Entry(entry.ecosystem, name, ""))[:2]
+
+
+def _check_same_name(entries: list[Entry], verdict: TreeVerdict) -> None:
+    """One override per name changes every instance: all must need the same fix."""
+    installs = [record for record in verdict.decisions if record["action"] == "install"]
+    for name in sorted({record["package"] for record in installs}):
+        named = [record for record in installs if record["package"] == name]
+        versions = {record["version"] for record in named}
+        present = {entry.version for entry in entries if _same_name(entry, name)}
+        if len(versions) > 1 or present != {record["installed"] for record in named}:
+            for record in named:
+                record.update(action="no_verdict", reason="several_versions")
+            verdict.notes.append(f"NO VERDICT -- several versions of {name} need different fixes")
+
+
+def _collect_fixes(verdict: TreeVerdict, receipts_root: Path, kind: str) -> None:
+    blocked = failed = False
+    seen = set()
+    for record in verdict.decisions:
+        name, version = record["package"], record["version"]
+        if (name, version) in seen:
+            if name in verdict.fixes:
+                known = verdict.fixes[name][2]["advisories"]
+                known.extend(i for i in record["advisories"] if i not in known)
+            continue
+        seen.add((name, version))
+        try:
+            receipt, _ = require_receipt(receipts_root, kind, name, version, None)
+        except NeedsScan as exc:
+            verdict.needs_scan.extend(item for item in exc.items
+                                      if item not in verdict.needs_scan)
+            continue
+        except Refused as exc:
+            verdict.lines.append(f"{'[BLOCK]' if exc.code == 1 else 'NO VERDICT --'} {exc}")
+            blocked, failed = blocked or exc.code == 1, True
+            continue
+        verdict.fixes[name] = (version, receipt, record)
+    if blocked:
+        verdict.code, verdict.fixes = 1, {}
+    elif failed or verdict.needs_scan:
+        verdict.code, verdict.fixes = 2, {}

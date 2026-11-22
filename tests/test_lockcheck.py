@@ -623,6 +623,16 @@ class StructuredCheck(unittest.TestCase):
         for net, expected in cases:
             self.assertEqual(lockcheck.check(entries, now=NOW, fetch=net).lines, expected)
 
+    def test_findings_without_advisory_are_kept_apart(self):
+        only_advisory = lockcheck.check(npm_entries(), now=NOW, fetch=clean_npm_net(
+            osv={("srv", "1.0.0"): ["OSV-review"]}))
+        self.assertEqual((only_advisory.code, only_advisory.blocking), (1, []))
+        both = lockcheck.check(npm_entries(), now=NOW, fetch=clean_npm_net(
+            osv={("srv", "1.0.0"): ["OSV-review"]},
+            npm_integrity={("srv", "1.0.0"): "unmatched"}))
+        self.assertEqual(both.code, 1)
+        self.assertEqual(both.blocking, ["srv@1.0.0: locked integrity differs from the registry"])
+
 
 class HttpFetch(unittest.TestCase):
     def test_cross_host_redirect_is_refused(self):
