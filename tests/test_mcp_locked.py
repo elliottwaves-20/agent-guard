@@ -420,6 +420,26 @@ class NpmCli(unittest.TestCase):
         self.assertNotIn("env", entry)
         self.assertFalse(dry)
 
+    def test_register_setting_hands_over_instead_of_writing_configs(self):
+        install_skill = importlib.import_module("install_skill")
+        root = self.base / "mcp"
+        receipts.write_receipt(root, receipt())
+        calls = []
+
+        def register_run(cmd, *, env=None, timeout=None, cwd=None):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        config = {"mcp": {"install_dir": str(root), "register": ["pwsh", "-File", "r.ps1"]}}
+        install_skill.cmd_mcp_npm(self.args(secret=["API_TOKEN"]), config=config, env={},
+                                  platform="win32", run=FakeNpm(), which=which,
+                                  check=stub_check(0),
+                                  deliver=lambda *a, **k: self.fail("wrote agent configs"),
+                                  register_run=register_run)
+        path = root.resolve() / "server-files" / locked.REGISTER_FILE
+        self.assertEqual(calls, [["pwsh", "-File", "r.ps1", str(path)]])
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual((payload["kind"], payload["secrets"]), ("npm", ["API_TOKEN"]))
+
     def test_bad_override_syntax_is_refused(self):
         install_skill = importlib.import_module("install_skill")
         for override in (["dep"], ["dep=1.0.0", "dep=1.0.1"]):

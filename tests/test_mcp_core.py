@@ -212,5 +212,167 @@ class Metadata(unittest.TestCase):
         self.assertIn("at", meta)
 
 
+class FakeRegister:
+    def __init__(self, rc=0, exc=None):
+        self.rc = rc
+        self.exc = exc
+        self.calls = []
+
+    def __call__(self, cmd, *, env=None, timeout=None, cwd=None):
+        import subprocess
+        self.calls.append({"cmd": list(cmd), "env": env, "timeout": timeout})
+        if self.exc is not None:
+            raise self.exc
+        return subprocess.CompletedProcess(cmd, self.rc, "registered", "")
+
+
+class Register(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tree = Path(self.tmp.name) / "with space" / "srv"
+        self.tree.mkdir(parents=True)
+        self.installs = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def installed(self, accepted=None, secrets=("API_TOKEN",)):
+        return locked.Installed(
+            name="srv", kind="npm", package="@s/srv", requested="1.0.0",
+            command="C:/Program Files/nodejs/node.exe", args=[str(self.tree / "x.js")],
+            tree=self.tree, lockfile_sha256="ab" * 32, overrides={"dep": "2.0.0"},
+            override_reason="CVE fix", secrets=secrets, accepted=accepted)
+
+    def settings(self, register=("pwsh", "-File", "C:/tools/mcp register.ps1"), timeout=300):
+        return locked.Settings(install_dir=self.tree.parent, register=register,
+                               register_timeout=timeout)
+
+    def install(self, name, entry, dry, selected=None):
+        self.installs.append((name, entry, dry, selected))
+
+    def deliver(self, settings, run=None, dry=False, installed=None):
+        return locked.deliver(installed or self.installed(), settings, dry=dry,
+                              selected=["codex"], install=self.install, run=run or FakeRegister())
+
+    def test_without_register_writes_agent_configs(self):
+        run = FakeRegister()
+        self.assertEqual(self.deliver(self.settings(register=None), run=run), 0)
+        self.assertEqual(self.installs, [("srv", {"command": "C:/Program Files/nodejs/node.exe",
+                                                  "args": [str(self.tree / "x.js")]},
+                                          False, ["codex"])])
+        self.assertEqual(run.calls, [])
+        self.assertFalse((self.tree / locked.REGISTER_FILE).exists())
+
+    def test_with_register_never_calls_install_mcp(self):
+        run = FakeRegister()
+        self.assertEqual(self.deliver(self.settings(), run=run), 0)
+        self.assertEqual(self.installs, [])
+        self.assertEqual(len(run.calls), 1)
+
+    def test_register_payload_fields(self):
+        payload = locked.register_payload(self.installed())
+        self.assertEqual(payload, {
+            "version": 1, "name": "srv", "kind": "npm", "package": "@s/srv",
+            "requested": "1.0.0", "command": "C:/Program Files/nodejs/node.exe",
+            "args": [str(self.tree / "x.js")], "tree": str(self.tree),
+            "lockfile_sha256": "ab" * 32, "overrides": {"dep": "2.0.0"},
+            "override_reason": "CVE fix",
+            "scan": {"verdict": "SAFE", "agent_guard": locked.agent_guard_version()},
+            "secrets": ["API_TOKEN"]})
+        accepted = {"version": "1.0.0", "at": "2026-11-22", "grund": "reviewed"}
+        payload = locked.register_payload(self.installed(accepted=accepted))
+        self.assertEqual(payload["accepted"], accepted)
+        self.assertEqual(payload["scan"]["verdict"], "BLOCK")
+
+    def test_register_gets_the_file_written_into_the_tree(self):
+        run = FakeRegister()
+        self.deliver(self.settings(), run=run)
+        path = self.tree / locked.REGISTER_FILE
+        self.assertEqual(run.calls[0]["cmd"], ["pwsh", "-File", "C:/tools/mcp register.ps1",
+                                               str(path)])
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")),
+                         locked.register_payload(self.installed()))
+        self.assertEqual(run.calls[0]["timeout"], 300)
+
+    def test_register_argv_keeps_spaces(self):
+        run = FakeRegister()
+        self.deliver(self.settings(), run=run)
+        cmd = run.calls[0]["cmd"]
+        self.assertEqual(len(cmd), 4)
+        self.assertIn(" ", cmd[-1])
+        self.assertTrue(Path(cmd[-1]).is_file())
+
+    def test_register_failure_keeps_tree_and_names_retry(self):
+        with self.assertRaises(locked.Refused) as ctx:
+            self.deliver(self.settings(), run=FakeRegister(rc=3))
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("installed but not registered", str(ctx.exception))
+        self.assertIn(f"mcp-register {self.tree}", str(ctx.exception))
+        self.assertTrue((self.tree / locked.REGISTER_FILE).is_file())
+        self.assertEqual(self.installs, [])
+
+    def test_register_timeout_is_no_verdict(self):
+        import subprocess
+        for exc in (subprocess.TimeoutExpired(["pwsh"], 300), OSError("not found")):
+            with self.subTest(exc=type(exc).__name__):
+                with self.assertRaises(locked.Refused) as ctx:
+                    self.deliver(self.settings(), run=FakeRegister(exc=exc))
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertIn("mcp-register", str(ctx.exception))
+
+    def test_register_runs_without_credentials(self):
+        run = FakeRegister()
+        secret_env = {"ANTHROPIC_API_KEY": "sk-test", "GITHUB_TOKEN": "ghp-test"}
+        with mock.patch.dict(os.environ, secret_env):
+            self.deliver(self.settings(), run=run)
+        env = run.calls[0]["env"]
+        self.assertIsNotNone(env)
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("GITHUB_TOKEN", env)
+
+    def test_dry_run_shows_and_writes_nothing(self):
+        run = FakeRegister()
+        self.deliver(self.settings(), run=run, dry=True)
+        self.assertEqual(run.calls, [])
+        self.assertEqual(self.installs, [])
+        self.assertFalse((self.tree / locked.REGISTER_FILE).exists())
+
+    def test_mcp_register_repeats_the_handoff(self):
+        with self.assertRaises(locked.Refused):
+            self.deliver(self.settings(), run=FakeRegister(rc=1))
+        run = FakeRegister()
+        self.assertEqual(locked.rerun_register(self.tree, self.settings(), run=run), 0)
+        self.assertEqual(run.calls[0]["cmd"][-1], str(self.tree / locked.REGISTER_FILE))
+
+    def test_mcp_register_checks_the_file(self):
+        path = self.tree / locked.REGISTER_FILE
+        for content in ("not json", json.dumps({"version": 2, "tree": str(self.tree)}),
+                        json.dumps({"version": 1, "tree": str(self.tree.parent)})):
+            with self.subTest(content=content):
+                path.write_text(content, encoding="utf-8")
+                run = FakeRegister()
+                with self.assertRaises(locked.Refused) as ctx:
+                    locked.rerun_register(self.tree, self.settings(), run=run)
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertEqual(run.calls, [])
+        path.unlink()
+        with self.assertRaises(locked.Refused):
+            locked.rerun_register(self.tree, self.settings(), run=FakeRegister())
+
+    def test_mcp_register_without_register_setting_is_refused(self):
+        self.deliver(self.settings(), run=FakeRegister())
+        with self.assertRaises(locked.Refused) as ctx:
+            locked.rerun_register(self.tree, self.settings(register=None), run=FakeRegister())
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_secret_names_only(self):
+        for names in (("sk-abc",), ("lower",), ("A B",), ("",)):
+            with self.subTest(names=names):
+                with self.assertRaises(locked.Refused) as ctx:
+                    locked.check_secrets(names)
+                self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(locked.check_secrets(("DATAFORSEO_LOGIN",)), ("DATAFORSEO_LOGIN",))
+
+
 if __name__ == "__main__":
     unittest.main()

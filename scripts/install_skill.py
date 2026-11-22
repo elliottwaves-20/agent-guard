@@ -430,7 +430,7 @@ def install_mcp_git(name: str, git_url: str, package: str, dry: bool,
                     module: str | None = None, *, secrets: tuple = (), accept: str | None = None,
                     scanned_dir: Path | None = None, config: dict | None = None, env=None,
                     platform: str | None = None, run=None, which=shutil.which, check=None,
-                    deliver=None, **network):
+                    deliver=None, register_run=None, **network):
     """Install a Git-backed Python MCP from a checked uv.lock in its own directory
     (scan receipt, 7-day rule, pinned build tools), then hand the start command
     `uv run --project <tree> --locked --no-dev ...` to the agents."""
@@ -454,10 +454,8 @@ def install_mcp_git(name: str, git_url: str, package: str, dry: bool,
         dry=dry, **network)
     if accepted:
         print(f"   Installed despite the BLOCK verdict: {accepted['grund']}")
-    _report_secrets(installed)
-    (deliver or install_mcp)(installed.name, {"command": installed.command,
-                                              "args": list(installed.args)},
-                             dry, selected=selected)
+    _mcp_locked.deliver(installed, settings, dry=dry, selected=selected,
+                        install=deliver or install_mcp, run=register_run)
     return installed
 
 
@@ -733,14 +731,8 @@ def _parse_overrides(pairs: list) -> dict:
     return overrides
 
 
-def _report_secrets(installed) -> None:
-    if installed.secrets:
-        print(f"   This server needs {', '.join(installed.secrets)}; start it through your "
-              "secret manager (agent-guard stores no key values).")
-
-
 def cmd_mcp_npm(args, *, config: dict, env, platform: str, run=None, which=shutil.which,
-                check=None, deliver=None):
+                check=None, deliver=None, register_run=None):
     """mcp-npm: scan receipt, locked tree, then hand the start command to the agents."""
     import _lockcheck
     import _mcp_npm
@@ -761,15 +753,13 @@ def cmd_mcp_npm(args, *, config: dict, env, platform: str, run=None, which=shuti
         which=which, dry=args.dry_run)
     if accepted:
         print(f"   Installed despite the BLOCK verdict: {accepted['grund']}")
-    _report_secrets(installed)
-    (deliver or install_mcp)(installed.name, {"command": installed.command,
-                                              "args": list(installed.args)},
-                             args.dry_run, selected=args.tools)
+    _mcp_locked.deliver(installed, settings, dry=args.dry_run, selected=args.tools,
+                        install=deliver or install_mcp, run=register_run)
     return installed
 
 
 def cmd_mcp_pypi(args, *, config: dict, env, platform: str, run=None, which=shutil.which,
-                 check=None, deliver=None):
+                 check=None, deliver=None, register_run=None):
     """mcp-pypi: scan receipt, locked uv project, then hand the start command to the agents."""
     import _lockcheck
     import _mcp_receipts
@@ -789,11 +779,15 @@ def cmd_mcp_pypi(args, *, config: dict, env, platform: str, run=None, which=shut
         which=which, dry=args.dry_run)
     if accepted:
         print(f"   Installed despite the BLOCK verdict: {accepted['grund']}")
-    _report_secrets(installed)
-    (deliver or install_mcp)(installed.name, {"command": installed.command,
-                                              "args": list(installed.args)},
-                             args.dry_run, selected=args.tools)
+    _mcp_locked.deliver(installed, settings, dry=args.dry_run, selected=args.tools,
+                        install=deliver or install_mcp, run=register_run)
     return installed
+
+
+def cmd_mcp_register(args, *, config: dict, env, platform: str, register_run=None):
+    """mcp-register: repeat the handoff of an installed tree to [mcp] register."""
+    settings = _mcp_locked.settings(config, env, platform)
+    return _mcp_locked.rerun_register(args.tree, settings, run=register_run)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -916,10 +910,16 @@ def main():
                              f"(default: all detected). Choices: {', '.join(tool_choices)}")
     p_pypi.add_argument("--dry-run", action="store_true")
 
+    # Repeat a failed handoff
+    p_reg = sub.add_parser("mcp-register", help="Hand an installed locked MCP tree to the "
+                                                "[mcp] register command again")
+    p_reg.add_argument("tree", type=Path, help="Directory of the installed server")
+
     args = parser.parse_args()
     workspace = args.workspace or workspace_default()
 
-    locked_modes = {"mcp-npm": cmd_mcp_npm, "mcp-pypi": cmd_mcp_pypi}
+    locked_modes = {"mcp-npm": cmd_mcp_npm, "mcp-pypi": cmd_mcp_pypi,
+                    "mcp-register": cmd_mcp_register}
     if args.mode in locked_modes:
         try:
             locked_modes[args.mode](args, config=_skillspector.USER_CONFIG, env=os.environ,

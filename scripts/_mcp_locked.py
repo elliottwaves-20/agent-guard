@@ -274,6 +274,95 @@ def write_metadata(directory: Path, installed: Installed) -> None:
     (directory / METADATA).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
+# ── Handoff (A5) ─────────────────────────────────────────────────────────────
+
+def register_payload(installed: Installed) -> dict:
+    """What a configured register command receives: the start command and its provenance."""
+    payload = {"version": 1, "name": installed.name, "kind": installed.kind,
+               "package": installed.package, "requested": installed.requested,
+               "command": installed.command, "args": list(installed.args),
+               "tree": str(installed.tree), "lockfile_sha256": installed.lockfile_sha256,
+               "overrides": dict(installed.overrides),
+               "override_reason": installed.override_reason,
+               "scan": {"verdict": "BLOCK" if installed.accepted else "SAFE",
+                        "agent_guard": agent_guard_version()},
+               "secrets": list(installed.secrets)}
+    if installed.accepted is not None:
+        payload["accepted"] = dict(installed.accepted)
+    return payload
+
+
+def _retry_hint(tree: Path) -> str:
+    return f"python scripts/install_skill.py mcp-register {tree}"
+
+
+def _call_register(register: tuple, path: Path, timeout: float, tree: Path, run) -> None:
+    from _skills_cli import hardened_env
+    if run is None:
+        from _skillspector import run_bounded as run
+    cmd = list(register) + [str(path)]
+    try:
+        result = run(cmd, env=hardened_env(), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise Refused(2, f"installed but not registered: the register command did not finish "
+                         f"within {timeout}s; retry: {_retry_hint(tree)}")
+    except OSError as exc:
+        raise Refused(2, f"installed but not registered: the register command could not start "
+                         f"({exc}); retry: {_retry_hint(tree)}")
+    output = ((result.stdout or "") + (result.stderr or "")).strip()
+    if output:
+        print("\n".join(f"   {line}" for line in output.splitlines()[-20:]))
+    if result.returncode != 0:
+        raise Refused(2, f"installed but not registered: the register command exited with "
+                         f"{result.returncode}; retry: {_retry_hint(tree)}")
+
+
+def deliver(installed: Installed, settings: Settings, *, dry: bool, selected, install,
+            run=None) -> int:
+    """Hand the start command to the agents: install(...) by default, the register command
+    when [mcp] register is set (then no agent config is written here)."""
+    if settings.register is None:
+        if installed.secrets:
+            print(f"   This server needs {', '.join(installed.secrets)}; start it through your "
+                  "secret manager (agent-guard stores no key values).")
+        install(installed.name, {"command": installed.command, "args": list(installed.args)},
+                dry, selected=selected)
+        return 0
+    path = Path(installed.tree) / REGISTER_FILE
+    payload = register_payload(installed)
+    if dry:
+        print(f"  [DRY] would write {path}:\n{json.dumps(payload, indent=2)}")
+        print(f"  [DRY] would run: {' '.join(list(settings.register) + [str(path)])}")
+        return 0
+    tmp = path.with_name(f".{REGISTER_FILE}.{secrets.token_hex(4)}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    _call_register(settings.register, path, settings.register_timeout, Path(installed.tree), run)
+    print(f"[OK] MCP '{installed.name}' handed to the register command.")
+    return 0
+
+
+def rerun_register(tree: Path, settings: Settings, run=None) -> int:
+    """Repeat the handoff of an installed tree (after a failed register command)."""
+    if settings.register is None:
+        raise Refused(2, "[mcp] register is not set; nothing to repeat")
+    tree = Path(tree)
+    path = tree / REGISTER_FILE
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise Refused(2, f"cannot read {path}: {exc}")
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise Refused(2, f"{path} is not a version 1 handoff file")
+    recorded = payload.get("tree")
+    if (not isinstance(recorded, str)
+            or os.path.normcase(str(Path(recorded).resolve())) != os.path.normcase(str(tree.resolve()))):
+        raise Refused(2, f"{path} belongs to {recorded!r}, not {tree}")
+    _call_register(settings.register, path, settings.register_timeout, tree, run)
+    print(f"[OK] MCP '{payload.get('name')}' handed to the register command again.")
+    return 0
+
+
 def run_tool(cmd: list, cwd: Path) -> tuple:
     """Run npm or uv without credentials and without lifecycle scripts."""
     from _skillspector import run_bounded
