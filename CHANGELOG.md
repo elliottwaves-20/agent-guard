@@ -2,7 +2,43 @@
 
 ## Unreleased
 
+### Security
+
+- Local MCP servers no longer run through `npx`/`uvx`, which pin only the top
+  package and resolve the rest of the tree again at every start, unchecked
+  (#48). New `install_skill.py mcp-npm` and `mcp-pypi`, and a new inside for
+  `mcp-git`, give each server its own directory under `[mcp] install_dir` with
+  an exact pin and a lockfile: resolved without lifecycle scripts or builds
+  and without anything younger than 7 days, every entry checked against OSV,
+  GitHub advisories, its age and its registry hash, built in a staging
+  directory and swapped in only when every step passed. Agents start
+  `node <bin>` or `uv run --project <tree> --locked`. An advisory is exit 1;
+  anything unchecked or too young is exit 2 and the installed tree stays.
+- Scan receipts bind an install to the scanned archive: `scan_url.py` records
+  each SAFE or BLOCK verdict with the archive hash (npm tarball and its
+  integrity, the pure PyPI wheel, the GitHub ZIP), and the locked installers
+  run only for a version with a receipt; a BLOCK needs `--accept "<reason>"`
+  for exactly that version. PyPI scans now check the pure wheel that
+  `uv sync` installs instead of the sdist when the release has exactly one;
+  npm tarballs are verified against their registry integrity.
+- `mcp-git` additionally requires the commit to be at least 7 days on the
+  default branch and pins and checks the build tools from `[build-system]`.
+- `install_skill.py mcp` refuses ad-hoc launchers (`npx`, `uvx`, `bunx`,
+  `pipx run`, `uv tool run`, `uv run --with`, `pnpm dlx`, `yarn dlx`, …) with
+  exit 2; `scan_url.py` offers only the locked installers.
+
+### Added
+
+- `[mcp] register`: hand a finished locked install to your own command
+  (argv, no shell, no credentials in its environment) instead of writing
+  agent configs, and `install_skill.py mcp-register <tree>` to repeat a
+  failed handoff. `--secret NAME` names keys a server needs (names only,
+  never values).
+
 ### Changed
+
+- `mcp-pypi` and `mcp-git` need Python 3.11 or newer; `mcp-npm` needs npm
+  11.10 or newer.
 
 - SkillSpector is pinned to main `c816150` (14 Nov 2026, package version
   2.12.0), the newest main push at least 7 days old. It adds #1077, #1092,

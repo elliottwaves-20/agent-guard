@@ -208,9 +208,10 @@ After a SAFE scan of an installable skill or MCP, interactive runs ask whether
 to install. The default target is selected agents, not all agents; installing
 for all detected agents must be explicitly chosen. In non-interactive shells,
 print the safe install command instead of modifying configs.
-MCP install prompts always use isolated launchers to avoid dependency
-conflicts: PyPI via `uvx`, npm via `npx --silent -y`, GitHub-only Python MCPs
-via `uv tool install --from`, and remote HTTP/SSE MCPs as URL-only config.
+MCP install prompts always offer the locked installers for exactly the
+scanned version (`mcp-npm`, `mcp-pypi`, `mcp-git`; remote HTTP/SSE MCPs as
+URL-only config) and never `npx` or `uvx`. Every package scan writes a receipt
+for its SAFE or BLOCK verdict; the locked installers run only with one.
 
 Without any usable SkillSpector provider, skill/static scans run static-only
 (patterns, taint, YARA, OSV.dev still run), but the verdict is exit 2 (no
@@ -602,41 +603,41 @@ commit** → checkout the new SHA.
 
 ### Installing an MCP server
 
-```bash
-python "$INSTALLER" mcp \
-  --name "server-name" \
-  --command "uvx" \
-  --arg "package-name" \
-  --env "API_KEY=xyz"
+Local MCP servers get their own directory under `[mcp] install_dir` with an
+exact pin and a lockfile. The installer needs the scan receipt of exactly this
+version, resolves the lockfile without scripts or builds and without packages
+younger than 7 days, checks every entry (OSV, GitHub advisories, age, registry
+hash, top-level = the scanned archive), builds the tree in a staging directory
+and only then swaps it in. Any failure leaves the installed tree as it was
+(exit 1 finding, exit 2 no verdict or wait).
 
+```bash
 # Always dry-run first:
-python "$INSTALLER" mcp --name foo --command uvx --arg bar --dry-run
-```
+python "$INSTALLER" mcp-npm --package @scope/server --version 1.2.3 --dry-run
 
-For npm MCPs, keep the launch isolated with `npx`:
+# npm: agents start node with the package bin from the tree
+python "$INSTALLER" mcp-npm --package @scope/server --version 1.2.3
 
-```bash
-python "$INSTALLER" mcp \
-  --name "server-name" \
-  --command "npx" \
-  --arg=--silent \
-  --arg=-y \
-  --arg="@scope/package-name"
-```
+# PyPI: agents start the entry point through uv run --locked
+python "$INSTALLER" mcp-pypi --package mcp-server-time --version 2025.9.25
 
-For GitHub-only Python MCPs that are not available on PyPI, use `mcp-git`.
-It runs `uv tool install --from` in uv's isolated tool environment first, then
-writes the resulting local executable/interpreter path into each selected
-agent config. This avoids dependency conflicts and avoids relying on `git`
-being available inside GUI agent processes:
-
-```bash
+# GitHub-only Python MCP, commit at least 7 days on the default branch
 python "$INSTALLER" mcp-git \
   --name "server-name" \
-  --git-url "git+https://github.com/user/repo@<scanned-sha>" \
+  --git-url "https://github.com/user/repo@<scanned-sha>" \
   --package "package-name" \
   --executable "server-executable"
 ```
+
+Options: `--name`, `--bin`/`--executable`/`--module`, `--override NAME=VERSION`
+with `--override-reason` (npm), `--secret NAME` (key name only, never a value),
+`--accept "<reason>"` for a reviewed BLOCK of exactly this version, `--tools`,
+`--dry-run`. With `[mcp] register = [...]` in the config the installer writes
+no agent config but hands `agent-guard-register.json` to that command; a
+failed handoff is repeated with `python "$INSTALLER" mcp-register <tree>`.
+Packages younger than 7 days give exit 2 with the date to retry: wait, do not
+work around it. `mcp` refuses `npx`, `uvx`, `bunx`, `pipx run`, `uv tool run`,
+`uv run --with`, `pnpm dlx`, `yarn dlx` as launch commands (exit 2).
 
 For remote HTTP/SSE MCPs, no local dependency installation is needed:
 
@@ -659,27 +660,25 @@ their configs blindly.
 
 ## MCP isolation rules (check before every installation)
 
-No MCP server may install global Python dependencies. Always isolate MCP
-servers so one server's dependencies cannot conflict with another server or
-with the user's system Python/Node installation:
+No MCP server may install global dependencies, and no agent config may start a
+launcher that resolves the package tree at every start: what runs must be
+the tree that was checked. Each local server runs from its own locked tree:
 
-| Source | Command | Config entry |
-|--------|---------|--------------|
-| PyPI (own MCP entrypoint) | `uvx package-name==1.2.3` | `{"command":"uvx","args":["package-name"]}` |
-| PyPI (module start) | `uv run --with dep1 --with dep2 python -m module` | one `--with` flag per dep |
-| GitHub (not on PyPI) | `uv tool install --from "git+URL" name` | binary lands in uv's tool dir |
-| npm | `npx --silent -y package-name@1.2.3` | `{"command":"npx","args":["--silent","-y","package"]}` |
-| Remote/HTTP | URL directly in config | no local code needed |
+| Source | Installer | Config entry |
+|--------|-----------|--------------|
+| npm | `mcp-npm --package P --version V` | command: absolute node path; args: the package bin inside the tree |
+| PyPI | `mcp-pypi --package P --version V` | command: absolute uv path; args: run, --project, the tree, --locked, --no-dev, the entry point |
+| GitHub (not on PyPI) | `mcp-git --git-url https://github.com/o/r@SHA --package P` | as PyPI; with `--module M` the tree Python runs the module |
+| Remote/HTTP | `mcp-remote --url URL` | URL directly in config, no local code |
 
-**Synced folders (OneDrive, Dropbox):** if your workspace or uv cache lives in
-a synced folder, add `--link-mode=copy`:
+Keep `install_dir` out of synced folders (OneDrive paths are refused).
 
-```bash
-uv tool install package-name --link-mode=copy
-```
-
-**Never:** `pip install` for MCP dependencies. Never global node modules when
-`npx` suffices.
+**Never:** `pip install` for MCP dependencies, global node modules, or `npx` /
+`uvx` / `bunx` / `pipx run` / `uv tool run` / `uv run --with` / `dlx` in an
+agent config. Limits: transitive packages and build tools get the lockfile
+check (advisories, age, hash), not a code scan; PyPI packages with only
+platform wheels and Git packages with dynamic metadata cannot be installed
+this way (no verdict).
 
 ## Analyzer behavior (scan_skill.py / SkillSpector)
 

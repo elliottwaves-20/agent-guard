@@ -53,7 +53,7 @@ agent-guard never writes its own detection — it routes every install target to
 - **Fail-closed workflow** — scanner errors are never silently treated as "no findings".
 - **Prompt-injection aware** — content of scanned repos is treated as data, never as instructions to the reviewing agent.
 - **Clear verdicts** — ✅ SAFE / ⚠ REVIEW / 🚫 DO NOT INSTALL, with a risk score and file/line for every finding.
-- **Universal installer included** — after a SAFE verdict, one command installs the skill or MCP server to every agent detected on the machine. Skills are distributed by the pinned `skills` CLI (vercel-labs/skills), which maintains the directory layout of 80+ agents, so a scanned skill reaches all of them; MCP servers and a built-in fallback linker cover Claude Code, Claude Desktop, Codex, Antigravity, Gemini CLI, Hermes and OpenClaw. Restrict the targets with `--tools` — our own ids or any agent name the CLI knows (`cursor`, `windsurf`, …). Local MCP servers are installed through isolated launchers (`uvx`, `uv tool`, `npx`) so one server's dependencies do not pollute or break another.
+- **Universal installer included** — after a SAFE verdict, one command installs the skill or MCP server to every agent detected on the machine. Skills are distributed by the pinned `skills` CLI (vercel-labs/skills), which maintains the directory layout of 80+ agents, so a scanned skill reaches all of them; MCP servers and a built-in fallback linker cover Claude Code, Claude Desktop, Codex, Antigravity, Gemini CLI, Hermes and OpenClaw. Restrict the targets with `--tools` — our own ids or any agent name the CLI knows (`cursor`, `windsurf`, …). Local MCP servers (npm, PyPI, GitHub) each get their own directory with an exact pin and a lockfile that is checked as a whole before anything is installed; agents start that fixed tree (`node <bin>` or `uv run --project <tree> --locked`), never `npx`/`uvx`, so what runs is what was checked and one server's dependencies cannot break another.
 
 ## One scan, every agent
 
@@ -121,9 +121,10 @@ Optional, depending on what you scan or install:
 
 - [Docker](https://docs.docker.com/get-docker/) — needed for the dynamic install analysis that npm/PyPI scans run by default (`scan_cli.py npm|pypi`, `scan_mcp.py npm|pypi`, the package path of `scan_url.py`; without Docker they end in no verdict unless you pass `--no-dynamic`), for Docker-isolated live stdio MCP checks (`scan_mcp.py ... --sandbox`), for GuardDog package scans (`scan_cli.py npm/pypi/go`) on Windows where Docker is GuardDog's only supported install (Linux/macOS can use a native `guarddog` on PATH instead), and for the optional malcontent binary analysis (`scan_cli.py binary --deep`). Skill scans, `scan_mcp.py local|remote`, and `scan_cli.py script` do not need Docker; Cargo uses GuardDog and needs Docker on Windows. The Docker daemon must be **running** first (on Windows/macOS: start Docker Desktop); `failed to connect to the docker API` means it is not. Disk: the dynamic analysis image is about 1 GB and its package cache volume (`agent-guard-dynamic-cache`) grows to a few GB; that analysis runs a **privileged** container (`--privileged --cgroupns=host`), which gVisor needs to build its own sandbox inside it.
 - `VIRUSTOTAL_API_KEY` — required for `scan_cli.py binary` (release-binary hash reputation) and optional malware-reputation checks for bundled binaries, archives, PDFs, images, and similar non-source files in MCP scans. VirusTotal's Public API is free for registered users but rate-limited (4 lookups/min); an unseen hash or an API error gives NO VERDICT (exit 2), never SAFE; see [LLM provider support](#llm-provider-support).
-- Node.js/npm — optional. Needed if you install or run npm MCP servers through `npx`, install the Firecrawl CLI with npm, or explicitly configure a preinstalled Node renderer for protected marketplaces.
+- Node.js/npm — optional. Needed for locked npm MCP installs (`install_skill.py mcp-npm`, npm 11.10 or newer for `--min-release-age`), to install the Firecrawl CLI with npm, or to configure a preinstalled Node renderer for protected marketplaces.
+- Python 3.11 or newer — needed for locked PyPI and Git MCP installs (`mcp-pypi`, `mcp-git` read `uv.lock` with `tomllib`); the scanners themselves keep their own requirements.
 - Firecrawl CLI or Node Playwright — optional renderers for JavaScript-heavy/protected marketplace pages. Direct GitHub/archive/raw SKILL.md/npm/PyPI URLs work without them.
-- Git — optional, but needed for `install_skill.py mcp-git` / `uv tool install --from git+...` and for manual clone/checkout workflows after a SAFE verdict.
+- Git — optional, but needed for `install_skill.py mcp-git` (uv builds the package from the scanned commit) and for manual clone/checkout workflows after a SAFE verdict.
 
 Platform notes:
 
@@ -391,9 +392,11 @@ After a SAFE scan of an installable skill or MCP, interactive runs ask whether
 to install. The default is **not** "install everywhere": choose selected agent
 targets, or explicitly choose all detected agents. In non-interactive shells,
 agent-guard prints the safe install command instead of modifying configs.
-MCP install prompts always use isolated runners: PyPI via `uvx`, npm via
-`npx --silent -y`, and GitHub-only Python MCPs via `uv tool install --from`
-before registering the resulting local tool path.
+MCP install prompts always offer the locked installers for exactly the scanned
+version: `install_skill.py mcp-npm`, `mcp-pypi` or `mcp-git` (see
+[Install after a SAFE verdict](#install-after-a-safe-verdict)). Every package
+scan writes a receipt for its SAFE or BLOCK verdict, and the locked installers
+only run for a version with a receipt. No prompt offers `npx` or `uvx`.
 
 By default URL scans use a temporary directory. Use `--keep-source <dir>` when
 you want to install the exact source that was scanned after a SAFE verdict.
@@ -454,6 +457,7 @@ wiring agent-guard into scripts or CI:
 - **Nothing was scanned.** `audit_installed.py` without `--execute` (NOT EXECUTED, for every listed scan), unreadable configs (also an `mcpServers` that is not an object) and entries whose source cannot be inferred: a `uvx`/`npx` entry with `--with`, an index, registry or find-links option, several different `npx -p` packages, an option the tool does not know, or an index or registry variable in `env`. With no skill or MCP server found there is nothing to scan and the exit code is 0. In `scan_url.py`: a repo with neither a skill nor a package manifest (unsupported repo layout), a skill collection with non-documentation files outside the skill folders (prompt and instruction files such as `CLAUDE.md`, `AGENT.md`, `.cursorrules`, `*.prompt.md`, `*.instructions.md` or `.md` files in folders named `commands`, `agents`, `prompts`, `rules`, `instructions`, `chatmodes`, `hooks` or `workflows`, any dot folder except `.git` and the templates in `.github`, `.github/workflows`, extensionless `LICENSE`/`CHANGELOG` files that start with `#!`, and `marketplace.json`/`plugin.json` with anything but metadata keys or with a plugin or skill path that is not a `./` path without `..`, are not documentation), and marketplace candidates left out by `--max-candidates` or by `--no-scan-candidates`.
 - **Incomplete hash lookup.** A missing, malformed or inconsistent hash-lookup summary, an unseen hash, a suspicious-only file, a file skipped by the file limit, or a directory in which agent-guard finds more checkable files than Cisco looked at (Cisco silently skips files under dot directories and `__pycache__`, symlinks and files whose type it cannot tell; agent-guard counts them itself, runs the type detection again for every file Cisco skipped, counts a file whose detection fails or that cannot be read, never follows symlinks, and gives exit 2 instead of SAFE; a directory summary without agent-guard's own count is never SAFE).
 - **Stale scanner rules.** GuardDog and malcontent images are pinned by digest (`scripts/_pins.py`), so a hijacked or changed upstream image never runs unreviewed. Their rules live inside the image (no live signature feed), so new rules only arrive with a new release: `python scripts/check_image_pins.py` reports newer releases and from when the 7-day wait allows them; bump by hand, then run the offline suite. If the pinned digest cannot be pulled (offline, removed upstream) there is no verdict, never SAFE. Chainguard's free registry only serves a daily rebuilt `malcontent:latest`, so that pin is one dated build of it; should Chainguard ever delete old builds, every `--deep` scan ends in no verdict until the pin is renewed with `--malcontent-candidate`. A native `guarddog` on PATH (Linux/macOS) is your own install and is not pinned.
+- **Locked MCP install not possible yet.** `install_skill.py mcp-npm|mcp-pypi|mcp-git` gives exit 2 and leaves an installed tree untouched when there is no scan receipt for exactly this version (or it does not match), when a package in the lockfile or the Git commit is younger than 7 days (the message says from when it may be installed; wait and run it again), when a lockfile entry cannot be checked (other registry, Git, path or URL entries, unknown lockfile version, advisory or registry lookup failed), when the lockfile does not resolve the scanned archive (npm tarball integrity; PyPI: the top-level package must lock exactly one pure wheel, `*-none-any.whl`, the file the scan checked), when npm is older than 11.10 or Python older than 3.11, when the server's files are in use (close the apps that run it), and with `[mcp] register` when the register command fails ("installed but not registered", retry with `install_skill.py mcp-register <tree>`). Exit 1: an advisory or a hash mismatch in the lockfile, or a BLOCK receipt without `--accept "<reason>"`. `install_skill.py mcp` refuses launchers that resolve their packages at every start (`npx`, `bunx`, `pnpx`, `uvx`, `pipx run`, `uv tool run`, `uv run --with`, `npm exec`, `pnpm dlx`, `yarn dlx`) with exit 2.
 
 The wrapper writes SkillSpector JSON to a temporary report, so Windows console encoding issues, provider resolution, and SkillSpector's execution/coverage ledger are handled automatically.
 
@@ -712,46 +716,85 @@ status (`unchanged`, `updated`, `installed`, `blocked`, `paused`, `rejected`,
 `failed`, `no-verdict`, `cooldown`, `own-version`) for a scheduler or notifier
 to act on.
 
-**MCP server (PyPI, isolated via uvx) — only after `scan_mcp.py` returned SAFE:**
+**Local MCP servers: a locked tree per server — only after `scan_url.py` returned SAFE.**
+`npx -y pkg@1.2.3` or `uvx pkg==1.2.3` pin only the top package; everything
+below it is resolved again at every start, never checked, and a known
+vulnerable dependency goes unnoticed. The locked installers instead give each
+server its own directory under `[mcp] install_dir` with an exact pin and a
+lockfile, and change nothing unless every step passes:
+
+1. **Scan receipt.** `scan_url.py` writes a receipt for each SAFE or BLOCK
+   verdict (`<install_dir>/.receipts/`): the exact archive it scanned (npm
+   tarball and its integrity, the pure PyPI wheel, the GitHub ZIP). The
+   installer runs only for a version with a receipt; a BLOCK needs
+   `--accept "<reason>"`, which holds for that version only.
+2. **Lockfile without scripts or builds.** npm resolves with
+   `--package-lock-only --ignore-scripts --min-release-age=7`, uv with
+   `uv lock --no-build` and `exclude-newer = "7 days"`, both from the public
+   registry only.
+3. **Lockfile check.** Every entry against OSV and GitHub advisories (reviewed
+   and malware), its age (7 days) and its registry hash; the top-level entry
+   must be the scanned archive. An advisory is exit 1, anything unchecked or
+   too young is exit 2.
+4. **Build and swap.** `npm ci --ignore-scripts` or `uv sync --locked
+   --no-build` builds the tree in a hidden staging directory, which then
+   replaces the old one; a failure puts the old tree back.
 
 ```bash
-python scripts/install_skill.py mcp \
+# npm: agents start node with the package bin from the tree
+python scripts/install_skill.py mcp-npm --package @scope/server --version 1.2.3
+
+# PyPI: agents start uv run --project <tree> --locked --no-dev <entry point>
+python scripts/install_skill.py mcp-pypi --package mcp-server-time --version 2025.9.25
+
+# GitHub-only Python MCP: the commit must be at least 7 days on the default branch;
+# the build tools from [build-system] are pinned and checked as well
+python scripts/install_skill.py mcp-git \
   --name "my-server" \
-  --command "uvx" \
-  --arg "package-name" \
-  --env "API_KEY=your-key"
+  --git-url "https://github.com/user/repo@<scanned-sha>" \
+  --package "package-name" \
+  --executable "server-executable"     # or --module package.server
 ```
 
-Pass each server argument as its own repeated `--arg`. The legacy `--args` form
+Options: `--name` (default: npm package without scope, normalized PyPI name),
+`--bin` / `--executable` when a package declares several, `--override
+NAME=VERSION` with `--override-reason TEXT` to pin a dependency in an npm tree
+(for example a fixed version of a vulnerable SDK; the override must resolve
+exactly), `--secret NAME` for the name of a key the server needs (never a
+value: agent-guard prints the names and you start the server through your
+secret manager), `--tools` and `--dry-run`. Installing the same version again
+gives the same tree. Leftovers of an aborted run (`.<name>.staging-*`,
+`.<name>.old-*`) are reported, never used and never deleted.
+
+`install_skill.py mcp` still writes any explicit launch command, but refuses
+launchers that resolve their packages at every start (`npx`, `uvx`, `bunx`,
+`pipx run`, `uv tool run`, `uv run --with`, `pnpm dlx`, `yarn dlx`, …). Pass
+each server argument as its own repeated `--arg`. The legacy `--args` form
 consumes *everything* after it (including `--env` and `--dry-run`), so the
 installer rejects installer options placed after `--args` instead of silently
 misconfiguring the server.
 
-**MCP server (npm, isolated via npx):**
+**Locked MCP settings (`[mcp]`, optional)** in the
+[personal config file](#configuration-prefer-environment-variables):
 
-```bash
-python scripts/install_skill.py mcp \
-  --name "my-server" \
-  --command "npx" \
-  --arg=--silent \
-  --arg=-y \
-  --arg="@scope/package-name"
+```toml
+[mcp]
+install_dir = "/path/to/mcp-servers"   # default: %LOCALAPPDATA%\agent-guard\mcp,
+                                       # $XDG_DATA_HOME/agent-guard/mcp or ~/.local/share/agent-guard/mcp
+register = ["pwsh", "-NoProfile", "-File", "/path/to/register.ps1"]  # argv, no shell
+# register_timeout = 300
 ```
 
-**GitHub-only Python MCP (not on PyPI):**
-
-```bash
-python scripts/install_skill.py mcp-git \
-  --name "my-server" \
-  --git-url "git+https://github.com/user/repo@<scanned-sha>" \
-  --package "package-name" \
-  --executable "server-executable"
-```
-
-`mcp-git` first runs `uv tool install --from ...` in uv's isolated tool
-environment, then writes the resulting executable path into each selected agent
-config. This avoids relying on `git` being available inside GUI agent process
-environments.
+`install_dir` must be an absolute local path (a OneDrive folder is refused).
+Without `register` agent-guard writes the agent configs itself. With
+`register` it writes no agent config: it writes `agent-guard-register.json`
+into the tree (name, kind, package, version or commit, start command, tree,
+lockfile hash, overrides, verdict, secret names) and runs the register command
+with that file's path as last argument and without credentials in its
+environment — for a machine that keeps its own MCP manifest and distributes it
+to every agent. A failing or timed-out register command gives exit 2
+"installed but not registered"; `python scripts/install_skill.py mcp-register
+<tree>` repeats the handoff. Unknown keys in `[mcp]` stop the installer (exit 2).
 
 **Remote HTTP/SSE MCP (no local dependencies):**
 
@@ -764,8 +807,8 @@ python scripts/install_skill.py mcp-remote \
 **Dry run first** to preview every change:
 
 ```bash
-python scripts/install_skill.py mcp --name foo --command uvx --arg bar --dry-run
-python scripts/install_skill.py mcp-git --name foo --git-url git+https://github.com/user/repo@sha --package foo --dry-run
+python scripts/install_skill.py mcp-npm --package foo --version 1.2.3 --dry-run
+python scripts/install_skill.py mcp-git --name foo --git-url https://github.com/user/repo@sha --package foo --dry-run
 python scripts/install_skill.py mcp-remote --name foo --url https://example.com/mcp --dry-run
 python scripts/install_skill.py skill <path> --dry-run
 ```
@@ -964,23 +1007,34 @@ never start Docker or a scanner.
 
 ## MCP isolation rules
 
-Never install MCP dependencies globally. Always use isolated runners so MCP
-servers cannot create dependency conflicts with each other or with your system
-Python/Node installation:
+Never install MCP dependencies globally, and never let an agent start a
+launcher that resolves the package tree at every start (`npx`, `uvx`, …):
+what runs then is not what was checked. Each local server runs from its own
+locked tree:
 
-| Source | Command |
-|--------|---------|
-| PyPI package | `uvx package-name==1.2.3` |
-| PyPI (module start) | `uv run --with dep1 --with dep2 python -m module` |
-| GitHub (not on PyPI) | `uv tool install --from "git+URL" name` |
-| npm | `npx --silent -y package-name@1.2.3` |
-| Remote HTTP/SSE | URL in agent config; no local dependencies |
+| Source | Installer | Agent starts |
+|--------|-----------|--------------|
+| npm | `install_skill.py mcp-npm --package P --version V` | `node <tree>/node_modules/P/<bin>` |
+| PyPI | `install_skill.py mcp-pypi --package P --version V` | `uv run --project <tree> --locked --no-dev <entry point>` |
+| GitHub (not on PyPI) | `install_skill.py mcp-git --git-url https://github.com/o/r@<sha> --package P` | `uv run --project <tree> --locked --no-dev <entry point>` (or `python -m M`) |
+| Remote HTTP/SSE | `install_skill.py mcp-remote --url URL` | URL in agent config; no local dependencies |
 
-On synced folders (OneDrive, Dropbox), add `--link-mode=copy`:
+Keep `install_dir` out of synced folders (OneDrive, Dropbox); OneDrive paths
+are refused.
 
-```bash
-uv tool install package-name --link-mode=copy
-```
+Limits: transitive packages and build tools get the lockfile check
+(advisories, age, registry hash), not a SkillSpector or GuardDog scan of
+their code; the dynamic install analysis of the top package installs and
+watches the whole tree. A build backend can request further build tools at
+build time (only Git sources build anything); those are limited by
+`exclude-newer`, not by the lockfile check. Git packages with dynamic metadata
+(`setuptools-scm`, `hatch-vcs`) cannot be locked without a build and get no
+verdict. PyPI packages that ship only platform wheels cannot be installed this
+way (the scanned file must be the installed one). `uv run --locked`
+re-syncs from the checked lockfile if someone changed the environment; uv's
+own user-level checks also run at every start. GitHub advisory lookups without
+`GITHUB_TOKEN`/`GH_TOKEN` are limited to 60 per hour, so a large tree can end
+in no verdict.
 
 ## Severity guide
 

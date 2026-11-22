@@ -135,9 +135,15 @@ sync = ["pwsh", "-NoProfile", "-File", "<path to your sync script>"]
 # sync_timeout = 600                       # seconds
 
 # -- Locked MCP installs (optional) --------------------------------------------
-# install_skill.py mcp-npm / mcp-pypi keep one directory per MCP server with an
-# exact pin and a checked lockfile. Default location: %LOCALAPPDATA%\agent-guard\mcp
-# on Windows, $XDG_DATA_HOME/agent-guard/mcp or ~/.local/share/agent-guard/mcp
-# elsewhere. A location inside OneDrive is refused.
+# install_skill.py mcp-npm / mcp-pypi / mcp-git keep one directory per MCP server
+# with an exact pin and a checked lockfile; scan receipts live in its .receipts
+# folder. Default location: %LOCALAPPDATA%\agent-guard\mcp on Windows,
+# $XDG_DATA_HOME/agent-guard/mcp or ~/.local/share/agent-guard/mcp elsewhere.
+# A location inside OneDrive is refused.
+# register: argv (no shell) of a command that receives the path of the tree's
+# agent-guard-register.json after each install; agent-guard then writes no
+# agent config itself. It runs without credentials in its environment.
 # [mcp]
 # install_dir = "D:/agent-guard-mcp"
+# register = ["pwsh", "-NoProfile", "-File", "D:/tools/register-mcp.ps1"]
+# register_timeout = 300
