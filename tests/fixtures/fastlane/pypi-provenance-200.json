@@ -1,0 +1,25 @@
+{
+ "attestation_bundles": [
+  {
+   "attestations": [
+    {
+     "envelope": {
+      "signature": "removed",
+      "statement": "eyJfdHlwZSI6Imh0dHBzOi8vaW4tdG90by5pby9TdGF0ZW1lbnQvdjEiLCJzdWJqZWN0IjpbeyJuYW1lIjoic2lnc3RvcmUtNC41LjEtcHkzLW5vbmUtYW55LndobCIsImRpZ2VzdCI6eyJzaGEyNTYiOiIwMmUwMDAxOTdiMzQ5ODBmMWQzODI3NDFkNmY4M2MyZmVjYmNlZjdkZWJmNzMwNGYzNmE1MjUzZjNjODkyY2Q5In19XSwicHJlZGljYXRlVHlwZSI6Imh0dHBzOi8vZG9jcy5weXBpLm9yZy9hdHRlc3RhdGlvbnMvcHVibGlzaC92MSIsInByZWRpY2F0ZSI6bnVsbH0="
+     },
+     "verification_material": {
+      "removed": "certificate chain not needed by the tests"
+     },
+     "version": 1
+    }
+   ],
+   "publisher": {
+    "environment": null,
+    "kind": "GitHub",
+    "repository": "sigstore/sigstore-python",
+    "workflow": "release.yml"
+   }
+  }
+ ],
+ "version": 1
+}

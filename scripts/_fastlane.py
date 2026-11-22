@@ -1,12 +1,17 @@
-"""Pure package age and security-fix decisions for the shared contract."""
+"""Package age and security-fix decisions, with injected lookups for the contract."""
 from __future__ import annotations
 
+import base64
 import datetime as dt
+import json
 import re
 from dataclasses import dataclass
+from urllib.parse import quote, urlsplit
 
 import _versions
-from _mcp_locked import Refused
+from _lockcheck import (NPM_REGISTRY_URL, PYPI_JSON_URL, Advisory, Entry, LookupFailed,
+                        _array, _github_repo, _sha256, _text, advisories_for, entry_key)
+from _mcp_locked import Refused, normalize_pypi
 
 
 @dataclass(frozen=True)
@@ -258,3 +263,274 @@ def decide(case: dict) -> dict:
         action = "report"
     return _decision(action, version=selection.version, tier=tier, reason=reason,
                      advisories=selection.advisories)
+
+
+_KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+_CVE_ID = re.compile(r"CVE-[0-9]{4}-[0-9]{4,}")
+_INTOTO_STATEMENT = "https://in-toto.io/Statement/v1"
+_SLSA_PROVENANCE = "https://slsa.dev/provenance/v1"
+_PYPI_INTEGRITY_URL = "https://pypi.org/integrity/"
+
+
+def _field(value: object, *path: str) -> object:
+    for key in path:
+        if not isinstance(value, dict) or key not in value:
+            raise LookupFailed(f"missing or invalid {'.'.join(path)}")
+        value = value[key]
+    return value
+
+
+def _fetch_object(url: str, fetch) -> dict:
+    try:
+        body, next_url = fetch(url)
+    except (OSError, TypeError, ValueError) as exc:
+        raise LookupFailed(f"unable to read JSON from {url}") from exc
+    if not isinstance(body, dict) or next_url is not None:
+        raise LookupFailed(f"invalid or incomplete JSON object from {url}")
+    return body
+
+
+def _attestation_response(url: str, host: str, fetch) -> dict | None:
+    try:
+        return _fetch_object(url, fetch)
+    except LookupFailed as exc:
+        if exc.status == 404 and exc.host == host:
+            return None
+        raise
+
+
+def kev_cves(fetch) -> frozenset[str] | None:
+    """Return a complete KEV ID set, or None if the feed cannot be read."""
+    try:
+        body = _fetch_object(_KEV_URL, fetch)
+        rows = _array(_field(body, "vulnerabilities"), "KEV vulnerabilities")
+        count = body.get("count", len(rows))
+        if type(count) is not int or count != len(rows):
+            return None
+        ids = frozenset(_text(_field(row, "cveID"), "KEV CVE ID") for row in rows)
+        return ids if all(_CVE_ID.fullmatch(cve) for cve in ids) else None
+    except LookupFailed:
+        return None
+
+
+def _statement(payload: object) -> dict:
+    try:
+        statement = json.loads(base64.b64decode(_text(payload, "attestation payload"),
+                                               validate=True))
+    except ValueError as exc:
+        raise LookupFailed("invalid attestation statement") from exc
+    if _field(statement, "_type") != _INTOTO_STATEMENT:
+        raise LookupFailed("unsupported attestation statement type")
+    _text(_field(statement, "predicateType"), "statement predicate type")
+    return statement
+
+
+def _check_subject(statement: dict, names: set[str], algorithm: str, digest: str) -> None:
+    matched = False
+    for subject in _array(_field(statement, "subject"), "attestation subjects"):
+        name = _text(_field(subject, "name"), "attestation subject name")
+        if name in names:
+            actual = _text(_field(subject, "digest", algorithm), "attestation subject digest")
+            if actual.lower() != digest:
+                raise LookupFailed("attestation subject digest differs from registry")
+            matched = True
+    if not matched:
+        raise LookupFailed("attestation does not identify the requested artifact")
+
+
+def _common_repo(repos: set[str]) -> str:
+    known = repos - {"missing"}
+    if len(known) > 1:
+        raise LookupFailed("attestations identify different repositories")
+    if "missing" in repos or not known:
+        return "missing"
+    return known.pop()
+
+
+def _npm_sha512(package: str, version: str, fetch) -> str:
+    body = _fetch_object(f"{NPM_REGISTRY_URL}{package}/{version}", fetch)
+    integrity = _text(_field(body, "dist", "integrity"), "npm registry integrity")
+    algorithm, _, encoded = integrity.partition("-")
+    try:
+        digest = base64.b64decode(encoded, validate=True)
+    except ValueError as exc:
+        raise LookupFailed("invalid npm registry integrity") from exc
+    if algorithm != "sha512" or len(digest) != 64:
+        raise LookupFailed("invalid npm registry SHA-512 integrity")
+    return digest.hex()
+
+
+def npm_provenance(name: str, version: str, fetch) -> str:
+    """Bind the SLSA subject to registry integrity and return its GitHub repo key."""
+    package = quote(name, safe="").replace("%2F", "%2f")
+    pin = quote(version, safe="")
+    url = f"{NPM_REGISTRY_URL}-/npm/v1/attestations/{package}@{pin}"
+    body = _attestation_response(url, "registry.npmjs.org", fetch)
+    if body is None:
+        return "missing"
+    rows = _array(_field(body, "attestations"), "npm attestations")
+    slsa = [row for row in rows if _text(_field(row, "predicateType"), "predicate type")
+            == _SLSA_PROVENANCE]
+    if not slsa:
+        return "missing"
+
+    digest = _npm_sha512(package, pin, fetch)
+    names = {f"pkg:npm/{encoded}@{version}" for encoded in
+             (quote(name, safe="/"), quote(name, safe=""), package)}
+    repos = set()
+    for row in slsa:
+        statement = _statement(_field(row, "bundle", "dsseEnvelope", "payload"))
+        if statement["predicateType"] != _SLSA_PROVENANCE:
+            raise LookupFailed("conflicting npm attestation predicate type")
+        _check_subject(statement, names, "sha512", digest)
+        url = _text(_field(statement, "predicate", "buildDefinition", "externalParameters",
+                           "workflow", "repository"), "npm attestation repository")
+        try:
+            parts = urlsplit(url)
+            repo = _github_repo(url)
+        except ValueError as exc:
+            raise LookupFailed("invalid npm attestation GitHub repository") from exc
+        key = f"github.com/{repo}"
+        if (repo is None or parts.query or parts.fragment or any(c.isspace() for c in url)
+                or not _GITHUB_REPO.fullmatch(key)):
+            raise LookupFailed("invalid npm attestation GitHub repository")
+        repos.add(key)
+    return _common_repo(repos)
+
+
+def _pypi_files(path: str, fetch) -> dict[str, str]:
+    body = _fetch_object(f"{PYPI_JSON_URL}{path}/json", fetch)
+    files = {}
+    for row in _array(_field(body, "urls"), "PyPI files"):
+        filename = _text(_field(row, "filename"), "PyPI filename")
+        if filename in files:
+            raise LookupFailed(f"duplicate PyPI filename: {filename}")
+        files[filename] = _sha256(_field(row, "digests", "sha256"))
+    return files
+
+
+def _pypi_file_provenance(path: str, filename: str, digest: str, fetch) -> str:
+    url = f"{_PYPI_INTEGRITY_URL}{path}/{quote(filename, safe='')}/provenance"
+    body = _attestation_response(url, "pypi.org", fetch)
+    if body is None:
+        return "missing"
+    version = _field(body, "version")
+    if type(version) is not int or version != 1:
+        raise LookupFailed("unsupported PyPI provenance version")
+
+    repos = set()
+    has_attestation = False
+    for bundle in _array(_field(body, "attestation_bundles"), "PyPI attestation bundles"):
+        kind = _text(_field(bundle, "publisher", "kind"), "PyPI publisher kind")
+        repo = _text(_field(bundle, "publisher", "repository"), "PyPI publisher repository")
+        key = f"{kind.lower()}:{repo.lower()}"
+        if not _PUBLISHER_REPO.fullmatch(key):
+            raise LookupFailed("invalid PyPI publisher identity")
+        repos.add(key)
+        for row in _array(_field(bundle, "attestations"), "PyPI attestations"):
+            statement = _statement(_field(row, "envelope", "statement"))
+            _check_subject(statement, {filename}, "sha256", digest)
+            has_attestation = True
+    repo = _common_repo(repos)
+    return repo if has_attestation else "missing"
+
+
+def _pypi_path(name: str, version: str) -> str:
+    project = quote(normalize_pypi(name), safe="")
+    return f"{project}/{quote(version, safe='')}"
+
+
+def pypi_provenance(name: str, version: str, files: tuple[tuple[str, str], ...], fetch) -> str:
+    """Bind every supplied file to the registry and its published provenance."""
+    if not files:
+        raise LookupFailed("no locked PyPI files to verify")
+    path = _pypi_path(name, version)
+    known = _pypi_files(path, fetch)
+    locked = {}
+    for filename, sha256 in files:
+        digest = _sha256(sha256)
+        if known.get(filename) != digest:
+            raise LookupFailed(f"locked PyPI file differs from registry: {filename}")
+        locked[filename] = digest
+    repos = {_pypi_file_provenance(path, filename, digest, fetch)
+             for filename, digest in locked.items()}
+    return _common_repo(repos)
+
+
+def _single_pure_wheel(files: dict[str, str]) -> tuple[str, str] | None:
+    wheels = [(name, digest) for name, digest in files.items() if name.endswith("-none-any.whl")]
+    return wheels[0] if len(wheels) == 1 else None
+
+
+def pure_wheel(name: str, version: str, fetch) -> tuple[bool, str]:
+    wheel = _single_pure_wheel(_pypi_files(_pypi_path(name, version), fetch))
+    return (True, wheel[1]) if wheel is not None else (False, "")
+
+
+def _provenance_or_failed(lookup, *args) -> str:
+    try:
+        return lookup(*args)
+    except LookupFailed:
+        return "failed"
+
+
+def _pypi_fix(case_version: dict, name: str, fix: str, fetch) -> None:
+    path = _pypi_path(name, fix)
+    try:
+        wheel = _single_pure_wheel(_pypi_files(path, fetch))
+    except LookupFailed:
+        case_version["pure_wheel"] = "failed"
+        case_version["provenance"] = "failed"
+        return
+    case_version["pure_wheel"] = wheel is not None
+    if wheel is not None:
+        case_version["provenance"] = _provenance_or_failed(_pypi_file_provenance, path, *wheel,
+                                                           fetch)
+
+
+def gather(entry: Entry, advisories: list[Advisory], *, installed_files: tuple = (),
+           kev: frozenset | None, policy: Policy, override: str | None, fetch) -> dict:
+    """Collect the shared case for one entry and look up only the selected fix."""
+    key = entry_key(entry)
+    data = {"ecosystem": entry.ecosystem, "package": entry.name, "installed": entry.version,
+            "advisories": [advisory.as_case() for advisory in advisories
+                           if advisory.entry is not None and entry_key(advisory.entry) == key],
+            "kev": sorted(kev) if kev is not None else None, "installed_provenance": None,
+            "versions": {}, "override": override, "lookup_failed": False,
+            "settings": {"fast_lane": policy.fast_lane}}
+    case = {"kind": "fast_lane", "input": data}
+    fix, _ = select_fix(case)
+    if fix is None:
+        return case
+
+    fix_entry = Entry(entry.ecosystem, entry.name, fix)
+    try:
+        residual, failures = advisories_for([fix_entry], fetch)
+        advisory_count = "failed" if failures else len(residual)
+    except LookupFailed:
+        advisory_count = "failed"
+    record = {"advisories": advisory_count, "provenance": None}
+    data["versions"][fix] = record
+    if entry.ecosystem == "npm":
+        data["installed_provenance"] = _provenance_or_failed(npm_provenance, entry.name,
+                                                             entry.version, fetch)
+        record["provenance"] = _provenance_or_failed(npm_provenance, entry.name, fix, fetch)
+    elif entry.ecosystem == "PyPI":
+        data["installed_provenance"] = _provenance_or_failed(pypi_provenance, entry.name,
+                                                             entry.version, installed_files, fetch)
+        _pypi_fix(record, entry.name, fix, fetch)
+    return case
+
+
+def continuity(ecosystem: str, name: str, old: str | None, new: str, fetch) -> str:
+    """Compare npm provenance identities for the trusted waiting period."""
+    if old is None or ecosystem != "npm":
+        return "none"
+    try:
+        old_repo = npm_provenance(name, old, fetch)
+        new_repo = npm_provenance(name, new, fetch)
+    except LookupFailed:
+        return "failed"
+    if "missing" in (old_repo, new_repo):
+        return "missing"
+    return "same" if old_repo == new_repo else "different"
