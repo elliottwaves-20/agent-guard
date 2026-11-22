@@ -133,3 +133,11 @@ mode = "sync"
 inbox = "~/.claude/skills"                 # a directory your sync collects from
 sync = ["pwsh", "-NoProfile", "-File", "<path to your sync script>"]
 # sync_timeout = 600                       # seconds
+
+# -- Locked MCP installs (optional) --------------------------------------------
+# install_skill.py mcp-npm / mcp-pypi keep one directory per MCP server with an
+# exact pin and a checked lockfile. Default location: %LOCALAPPDATA%\agent-guard\mcp
+# on Windows, $XDG_DATA_HOME/agent-guard/mcp or ~/.local/share/agent-guard/mcp
+# elsewhere. A location inside OneDrive is refused.
+# [mcp]
+# install_dir = "D:/agent-guard-mcp"

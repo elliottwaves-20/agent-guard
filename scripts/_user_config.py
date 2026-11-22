@@ -1,7 +1,7 @@
 """User-level agent-guard configuration (outside the repository).
 
 One TOML file holds everything that is personal to a machine: LLM profiles
-and the local skill distribution. The repository ships only the mechanism and
+the local skill distribution and the locked MCP install directory. The repository ships only the mechanism and
 `config.example.toml`; without a config file every wrapper behaves exactly as
 before.
 
@@ -28,7 +28,7 @@ try:
 except ModuleNotFoundError:  # Python 3.10: only an existing config needs TOML.
     tomllib = None
 
-SECTIONS = {"llm", "distribution"}
+SECTIONS = {"llm", "distribution", "mcp"}
 
 # Credential prefixes of common providers. A match refuses the whole file.
 SECRET_PREFIXES = ("sk-", "sk_", "csk-", "gsk_", "nvapi-", "xai-", "AIza",

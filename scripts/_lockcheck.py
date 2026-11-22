@@ -22,12 +22,16 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
-import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10: a uv.lock then cannot be checked.
+    tomllib = None
 
 MIN_AGE_DAYS = 7
 OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
@@ -110,6 +114,8 @@ def _file_name(url: str) -> str:
 
 def uv_lock_entries(text: str, root_name: str) -> list[Entry]:
     """Registry entries of a uv.lock; the virtual root project is skipped."""
+    if tomllib is None:
+        raise NoVerdict("reading uv.lock needs Python 3.11+ (tomllib)")
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
