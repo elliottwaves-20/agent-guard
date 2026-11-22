@@ -772,7 +772,7 @@ def cmd_mcp_npm(args, *, config: dict, env, platform: str, run=None, which=shuti
 
 
 def cmd_mcp_pypi(args, *, config: dict, env, platform: str, run=None, which=shutil.which,
-                 check=None, deliver=None, register_run=None):
+                 check=None, deliver=None, register_run=None, fetch=None):
     """mcp-pypi: scan receipt, locked uv project, then hand the start command to the agents."""
     import _lockcheck
     import _mcp_receipts
@@ -784,13 +784,16 @@ def cmd_mcp_pypi(args, *, config: dict, env, platform: str, run=None, which=shut
     _mcp_uv.check_version(args.version)
     name = (_mcp_locked.check_name(args.name) if args.name
             else _mcp_locked.default_name("pypi", args.package))
+    overrides = _parse_overrides(getattr(args, "override", None))
     receipt, accepted = _mcp_receipts.require_receipt(
         settings.install_dir, "pypi", args.package, args.version, args.accept)
     installed = _mcp_uv.pypi_install(
         name=name, package=args.package, version=args.version, executable=args.executable,
         secrets=tuple(args.secret or ()), root=settings.install_dir, receipt=receipt,
         accepted=accepted, run=run or _mcp_locked.run_tool, check=check or _lockcheck.check,
-        which=which, dry=args.dry_run, policy=policy)
+        which=which, dry=args.dry_run, policy=policy, overrides=overrides,
+        override_reason=getattr(args, "override_reason", None),
+        fetch=fetch or _lockcheck.http_fetch)
     if accepted:
         print(f"   Installed despite the BLOCK verdict: {accepted['grund']}")
     _mcp_locked.deliver(installed, settings, dry=args.dry_run, selected=args.tools,
@@ -829,8 +832,8 @@ _POLICY_HELP = {
     "npm": ("Age in days of the top package when the installed version came from the same "
             "source repository (default: 2; at most --min-age-days)",
             "Never rebuild the tree with a younger scanned security fix; report the advisory"),
-    "pypi": ("Reserved age setting for trusted releases (default: 2)",
-             "Reserved switch to disable the security-fix fast lane"),
+    "pypi": ("Accepted; no effect because PyPI trees have no trusted period (default: 2)",
+             "Never rebuild the tree with a younger scanned security fix; report the advisory"),
     "git": ("Accepted; no effect for Git sources (default: 2)",
             "Accepted; no effect for Git sources"),
 }
@@ -984,6 +987,11 @@ def main():
     p_pypi.add_argument("--package", required=True, help="PyPI package, e.g. mcp-server-time")
     p_pypi.add_argument("--version", required=True, help="Exact scanned version, e.g. 1.2.3")
     p_pypi.add_argument("--name", help="Server name in configs (default: normalized package name)")
+    p_pypi.add_argument("--override", action="append", default=[], metavar="NAME=VERSION",
+                        help="Pin a dependency in the tree (uv override-dependencies, exact "
+                             "PEP 440 version); needs --override-reason")
+    p_pypi.add_argument("--override-reason", metavar="TEXT",
+                        help="Why the tree is changed (stored with the install)")
     p_pypi.add_argument("--executable",
                         help="Entry point of the package when it declares several")
     p_pypi.add_argument("--secret", action="append", default=[], metavar="NAME",

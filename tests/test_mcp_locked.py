@@ -1215,8 +1215,11 @@ class HelpTexts(unittest.TestCase):
         self.assertIn("--trusted-days", text)
         self.assertIn("--no-fast-lane", text)
 
-    def test_pypi_options_stay_reserved_until_the_pypi_fast_lane(self):
-        self.assertIn("Reserved", self.help_of("mcp-pypi"))
+    def test_pypi_options_describe_their_effect(self):
+        text = self.help_of("mcp-pypi")
+        self.assertNotIn("Reserved", text)
+        self.assertIn("no trusted period", text)
+        self.assertIn("Never rebuild the tree with a younger scanned security fix", text)
 
     def test_git_options_say_they_have_no_effect(self):
         text = self.help_of("mcp-git")

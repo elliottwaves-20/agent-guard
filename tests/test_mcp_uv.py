@@ -4,6 +4,7 @@ uv is replaced by a fake runner that writes what the real tool would write:
 `uv lock` a uv.lock, `uv sync` a .venv with the dist-info of the package. The
 lockfile check is a stub. The installed wheel must be the scanned one.
 """
+import datetime as dt
 import importlib
 import io
 import json
@@ -29,23 +30,38 @@ WHEEL_SHA = "b" * 64
 FILES = "https://files.pythonhosted.org/packages/xx"
 
 
-def uv_lock(root, pkg, version, wheels=None, sdist_sha="a" * 64, registry="https://pypi.org/simple"):
+def _package_block(pkg, version, wheels, sdist_sha, registry):
     dist = pkg.replace("-", "_").lower()
-    if wheels is None:
-        wheels = [(f"{dist}-{version}-py3-none-any.whl", WHEEL_SHA)]
     wheel_lines = ", ".join(f'{{ url = "{FILES}/{n}", hash = "sha256:{h}" }}' for n, h in wheels)
-    return (f'version = 1\nrequires-python = ">=3.10"\n\n'
-            f'[[package]]\nname = "{root}"\nversion = "0.0.0"\nsource = {{ virtual = "." }}\n'
-            f'dependencies = [{{ name = "{pkg}" }}]\n\n'
-            f'[[package]]\nname = "{pkg}"\nversion = "{version}"\n'
+    return (f'[[package]]\nname = "{pkg}"\nversion = "{version}"\n'
             f'source = {{ registry = "{registry}" }}\n'
             f'sdist = {{ url = "{FILES}/{dist}-{version}.tar.gz", hash = "sha256:{sdist_sha}" }}\n'
             f'wheels = [{wheel_lines}]\n')
 
 
+def uv_lock(root, pkg, version, wheels=None, sdist_sha="a" * 64, registry="https://pypi.org/simple",
+            extra=()):
+    """extra: (name, version, wheels) of further locked registry packages."""
+    dist = pkg.replace("-", "_").lower()
+    if wheels is None:
+        wheels = [(f"{dist}-{version}-py3-none-any.whl", WHEEL_SHA)]
+    text = (f'version = 1\nrequires-python = ">=3.10"\n\n'
+            f'[[package]]\nname = "{root}"\nversion = "0.0.0"\nsource = {{ virtual = "." }}\n'
+            f'dependencies = [{{ name = "{pkg}" }}]\n\n'
+            + _package_block(pkg, version, wheels, sdist_sha, registry))
+    for other, other_version, other_wheels in extra:
+        text += "\n" + _package_block(other, other_version, other_wheels, sdist_sha, registry)
+    return text
+
+
 class FakeUv:
+    """Writes what uv would write. The pyproject decides: its override-dependencies replace
+    the version of a transitive package (or drop it when uv backtracks around the override)."""
+
     def __init__(self, lock_rc=0, sync_rc=0, scripts=None, lock_version=None, wheels=None,
-                 registry="https://pypi.org/simple", dist_version=None, lock_package=None):
+                 registry="https://pypi.org/simple", dist_version=None, lock_package=None,
+                 extra=None, shas=None, override_wheels=None, backtrack=(), top_wheels=None,
+                 override_versions=None):
         self.lock_rc = lock_rc
         self.sync_rc = sync_rc
         self.scripts = scripts
@@ -54,7 +70,15 @@ class FakeUv:
         self.registry = registry
         self.dist_version = dist_version
         self.lock_package = lock_package
+        self.extra = dict(extra or {})  # name: version of further locked packages
+        self.shas = dict(shas or {})  # (name, version): sha256 of the pure wheel
+        self.override_wheels = dict(override_wheels or {})  # name: wheels after an override
+        self.backtrack = set(backtrack)  # names uv drops instead of following the override
+        self.top_wheels = list(top_wheels or [])  # wheels of the top package per lock run
+        self.override_versions = dict(override_versions or {})  # name: version uv really locks
         self.commands = []
+        self.pyprojects = []
+        self.locks = 0
 
     def _pin(self, cwd):
         text = (Path(cwd) / "pyproject.toml").read_text(encoding="utf-8")
@@ -64,16 +88,45 @@ class FakeUv:
         root = next(ln for ln in text.splitlines() if ln.startswith("name")).split('"')[1]
         return root, package, version
 
+    def _wheels(self, name, version):
+        dist = name.replace("-", "_")
+        return [(f"{dist}-{version}-py3-none-any.whl", self.shas.get((name, version), "e" * 64))]
+
+    def _extra_entries(self, text):
+        import tomllib
+        packages = dict(self.extra)
+        wheels = {}
+        uv = tomllib.loads(text).get("tool", {}).get("uv", {})
+        for spec in uv.get("override-dependencies", []):
+            dep, _, wanted = spec.partition("==")
+            if dep in self.backtrack:
+                packages.pop(dep, None)
+                continue
+            packages[dep] = self.override_versions.get(dep, wanted)
+            if dep in self.override_wheels:
+                wheels[dep] = self.override_wheels[dep]
+        return [(dep, ver, wheels.get(dep) or self._wheels(dep, ver))
+                for dep, ver in packages.items()]
+
     def __call__(self, cmd, cwd):
         self.commands.append(list(cmd))
         root, package, version = self._pin(cwd)
         norm = locked.normalize_pypi(package)
         if cmd[1] == "lock":
+            text = (Path(cwd) / "pyproject.toml").read_text(encoding="utf-8")
+            self.pyprojects.append(text)
+            run, self.locks = self.locks, self.locks + 1
             if self.lock_rc:
                 return self.lock_rc, "error: simulated"
+            wheels = self.wheels
+            if run < len(self.top_wheels):
+                wheels = self.top_wheels[run]
+            elif wheels is None and (norm, version) in self.shas:
+                wheels = self._wheels(norm, version)
             (Path(cwd) / "uv.lock").write_text(
                 uv_lock(root, self.lock_package or norm, self.lock_version or version,
-                        self.wheels, registry=self.registry), encoding="utf-8")
+                        wheels, registry=self.registry, extra=self._extra_entries(text)),
+                encoding="utf-8")
             return 0, ""
         if cmd[1] == "sync":
             if self.sync_rc:
@@ -694,6 +747,623 @@ class PypiCli(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
         self.assertIn("scan first", str(ctx.exception))
         self.assertEqual(uv.commands, [])
+
+
+NOW = dt.datetime(2026, 11, 22, 12, 0, tzinfo=dt.timezone.utc)
+REPO = "github.com/o/r"
+OLD_SHA = "e" * 64  # pure wheel of the vulnerable dependency
+FIX_SHA = "f" * 64  # pure wheel of the scanned fix
+TOP_FIX_SHA = "9" * 64  # pure wheel of the fixed top-level package
+GHSA = "GHSA-aaaa-bbbb-cccc"
+
+
+def stamp(days):
+    return (NOW - dt.timedelta(days=days)).isoformat().replace("+00:00", "Z")
+
+
+class FakePyPI:
+    """Answers the PyPI JSON of any release (no network); every release is old unless listed."""
+
+    def __init__(self, ages=None, default_days=100):
+        self.ages = dict(ages or {})  # (name, version): days since the upload
+        self.default_days = default_days
+        self.requests = []
+
+    def __call__(self, url, payload=None):
+        prefix = "https://pypi.org/pypi/"
+        if not url.startswith(prefix) or not url.endswith("/json"):
+            raise AssertionError(f"unexpected request: {url}")
+        self.requests.append(url)
+        name, version = url[len(prefix):-len("/json")].split("/")
+        days = self.ages.get((name, version), self.default_days)
+        return {"urls": [{"filename": f"{name}-{version}-py3-none-any.whl",
+                          "upload_time_iso_8601": stamp(days)}]}, None
+
+
+class ScriptedCheck:
+    """Returns the scripted results one by one (the last one repeats) and records calls."""
+
+    def __init__(self, *results):
+        self.results = list(results)
+        self.calls = []
+
+    def __call__(self, entries, **kwargs):
+        self.calls.append((list(entries), kwargs))
+        return self.results[min(len(self.calls) - 1, len(self.results) - 1)]
+
+
+def locked_files(name, version, sha=OLD_SHA):
+    dist = name.replace("-", "_")
+    return ((f"{dist}-{version}.tar.gz", "a" * 64), (f"{dist}-{version}-py3-none-any.whl", sha))
+
+
+def pypi_advisory(name="dep", version="1.0.0", fixed="1.0.3", ident=GHSA, severity="high",
+                  files=None):
+    entry = lockcheck.Entry("PyPI", name, version,
+                            files=files if files is not None else locked_files(name, version))
+    interval = {"lower": None, "lower_inclusive": True, "upper": fixed,
+                "upper_inclusive": False, "fixed": fixed}
+    return lockcheck.Advisory(entry, ident, "github-reviewed", aliases=("CVE-2026-0001",),
+                              severity=severity, affected=(interval,))
+
+
+def finding(*advisories, failures=()):
+    lines = [f"[BLOCK] lockfile finding: {a.id}" for a in advisories]
+    return lockcheck.Result(1, lines, list(advisories), [], list(failures))
+
+
+class PypiFastLaneBase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "mcp"
+        self.installed_files = []
+        self.stderr = ""
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def lookups(self, provenance=None, kev=frozenset(), files=None):
+        """Fixed answers for KEV, fix advisories, provenance and files (no network)."""
+        table = dict(provenance if provenance is not None else {
+            ("dep", "1.0.0"): REPO, ("dep", "1.0.3"): REPO})
+        listed = dict(files or {})
+
+        def answer(key):
+            value = table[key]
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        def pypi_provenance(name, version, installed, fetch):
+            self.installed_files.append((name, version, tuple(installed)))
+            return answer((name, version))
+
+        def pypi_files(path, fetch):
+            name, version = path.split("/")
+            default = {f"{name.replace('-', '_')}-{version}-py3-none-any.whl": FIX_SHA}
+            return dict(listed.get((name, version), default))
+
+        def file_provenance(path, filename, digest, fetch):
+            name, version = path.split("/")
+            return answer((name, version))
+
+        for target, replacement in (("kev_cves", lambda fetch: kev),
+                                    ("advisories_for", lambda entries, fetch=None: ([], [])),
+                                    ("pypi_provenance", pypi_provenance),
+                                    ("_pypi_files", pypi_files),
+                                    ("_pypi_file_provenance", file_provenance)):
+            patcher = mock.patch.object(fastlane, target, replacement)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def scan(self, name, version, sha, verdict="SAFE"):
+        receipts.write_receipt(self.root, receipts.Receipt(
+            kind="pypi", package=name, version=version, archive_sha256=sha, integrity="",
+            verdict=verdict, at="2026-11-22T00:00:00+00:00", agent_guard="0.5.2"))
+
+    def install(self, uv=None, check=None, **kwargs):
+        opts = {"name": "time", "package": PKG, "version": "1.2.3", "executable": None,
+                "secrets": (), "root": self.root, "receipt": receipt(), "accepted": None,
+                "run": uv if uv is not None else FakeUv(), "check": check or stub_check(0),
+                "which": which, "fetch": FakePyPI(), "now": NOW}
+        opts.update(kwargs)
+        buffer = io.StringIO()
+        with mock.patch.object(sys, "stderr", buffer):
+            try:
+                return uv_mod.pypi_install(**opts)
+            finally:
+                self.stderr = buffer.getvalue()
+
+    def refused(self, code, **kwargs):
+        with self.assertRaises(locked.Refused) as ctx:
+            self.install(**kwargs)
+        self.assertEqual(ctx.exception.code, code, str(ctx.exception))
+        return ctx.exception
+
+    def old_install(self):
+        target = self.root / "time"
+        target.mkdir(parents=True)
+        (target / "marker.txt").write_text("old tree", encoding="utf-8")
+
+    def assert_old_untouched(self):
+        target = self.root / "time"
+        self.assertEqual((target / "marker.txt").read_text(encoding="utf-8"), "old tree")
+        self.assertEqual(sorted(p.name for p in self.root.iterdir() if p.name != ".receipts"),
+                         ["time"])
+
+    def uv_table(self, index):
+        import tomllib
+        return tomllib.loads(self.uv.pyprojects[index])["tool"]["uv"]
+
+    def locks_of(self, uv):
+        return [c for c in uv.commands if c[1] == "lock"]
+
+    def syncs_of(self, uv):
+        return [c for c in uv.commands if c[1] == "sync"]
+
+
+class PypiFastLane(PypiFastLaneBase):
+    """Security fixes that are younger than the waiting period in PyPI trees (#48, 15.2)."""
+
+    def fix_setup(self, provenance=None, scanned=True, files=None, **uv_options):
+        self.lookups(provenance=provenance, files=files)
+        if scanned:
+            self.scan("dep", "1.0.3", FIX_SHA)
+        uv_options.setdefault("extra", {"dep": "1.0.0"})
+        uv_options.setdefault("shas", {("dep", "1.0.3"): FIX_SHA})
+        self.uv = FakeUv(**uv_options)
+        check = ScriptedCheck(finding(pypi_advisory()), lockcheck.Result(0, ["ok"]))
+        return self.uv, check
+
+    def test_pypi_fast_lane_installs_scanned_pure_wheel(self):
+        uv, check = self.fix_setup()
+        installed = self.install(uv=uv, check=check)
+        expected = [{"package": "dep", "from": "1.0.0", "to": "1.0.3", "advisories": [GHSA],
+                     "repo": REPO, "receipt_sha256": FIX_SHA, "tier": "fast_lane"}]
+        self.assertEqual(installed.fast_lane, expected)
+        self.assertEqual(installed.overrides, {"dep": "1.0.3"})
+        self.assertEqual(installed.override_reason, f"agent-guard fast lane: {GHSA}")
+        self.assertEqual(installed.tier, "s2")
+        meta = json.loads((self.root / "time" / locked.METADATA).read_text(encoding="utf-8"))
+        self.assertEqual(meta["fast_lane"], expected)
+        self.assertEqual(meta["overrides"], {"dep": "1.0.3"})
+        self.assertEqual(meta["override_reason"], f"agent-guard fast lane: {GHSA}")
+        self.assertEqual(len(self.locks_of(uv)), 2)
+        self.assertEqual(len(self.syncs_of(uv)), 1)
+        self.assertEqual(check.calls[1][1]["age_limits"], {("PyPI", "dep", "1.0.3"): 0})
+        self.assertIn(f"fast lane: dep 1.0.0 -> 1.0.3 ({GHSA}, provenance {REPO}, "
+                      f"receipt {FIX_SHA})", self.stderr)
+        self.assertEqual(installed.args[-1], PKG)
+
+    def test_pypi_rebuild_pyproject_has_override_and_exclude_newer_package(self):
+        uv, check = self.fix_setup()
+        self.install(uv=uv, check=check)
+        self.assertEqual(self.uv_table(0), {"package": False, "exclude-newer": "7 days"})
+        self.assertEqual(self.uv_table(1), {
+            "package": False, "exclude-newer": "7 days",
+            "override-dependencies": ["dep==1.0.3"],
+            "exclude-newer-package": {"dep": "2026-11-22T12:00:00Z"}})
+
+    def test_pypi_fix_without_pure_wheel_reports(self):
+        self.old_install()
+        platform_only = {("dep", "1.0.3"): {"dep-1.0.3-cp312-cp312-win_amd64.whl": FIX_SHA}}
+        uv, check = self.fix_setup(files=platform_only)
+        exc = self.refused(1, uv=uv, check=check)
+        self.assertIn("no_pure_wheel", str(exc) + self.stderr)
+        self.assertEqual(len(self.locks_of(uv)), 1)
+        self.assertEqual(self.syncs_of(uv), [])
+        self.assert_old_untouched()
+
+    def test_pypi_fix_only_sdist_reports(self):
+        self.old_install()
+        uv, check = self.fix_setup(files={("dep", "1.0.3"): {"dep-1.0.3.tar.gz": "a" * 64}})
+        self.refused(1, uv=uv, check=check)
+        self.assertEqual(len(self.locks_of(uv)), 1)
+        self.assertEqual(self.syncs_of(uv), [])
+        self.assert_old_untouched()
+
+    def test_pypi_fix_with_platform_wheels_has_no_verdict(self):
+        self.old_install()
+        wheels = [("dep-1.0.3-py3-none-any.whl", FIX_SHA),
+                  ("dep-1.0.3-cp312-cp312-win_amd64.whl", "d" * 64)]
+        uv, check = self.fix_setup(override_wheels={"dep": wheels})
+        exc = self.refused(2, uv=uv, check=check)
+        self.assertIn("exactly one pure wheel", str(exc))
+        self.assertEqual(self.syncs_of(uv), [])
+        self.assert_old_untouched()
+
+    def test_pypi_fix_wheel_must_be_the_scanned_one(self):
+        self.old_install()
+        uv, check = self.fix_setup(shas={("dep", "1.0.3"): "c" * 64})
+        exc = self.refused(2, uv=uv, check=check)
+        self.assertIn("scanned", str(exc))
+        self.assertEqual(self.syncs_of(uv), [])
+        self.assert_old_untouched()
+
+    def test_pypi_fix_missing_from_final_lock_has_no_verdict(self):
+        self.old_install()
+        uv, check = self.fix_setup(backtrack={"dep"})
+        exc = self.refused(2, uv=uv, check=check)
+        self.assertIn("dep==1.0.3", str(exc))
+        self.assertEqual(self.syncs_of(uv), [])
+        self.assert_old_untouched()
+
+    def test_pypi_fix_at_another_version_in_final_lock_has_no_verdict(self):
+        self.old_install()
+        uv, check = self.fix_setup(override_versions={"dep": "1.0.2"})
+        self.refused(2, uv=uv, check=check)
+        self.assertEqual(self.syncs_of(uv), [])
+        self.assert_old_untouched()
+
+    def test_pypi_needs_scan_lists_pypi_commands(self):
+        self.old_install()
+        uv, check = self.fix_setup(scanned=False)
+        exc = self.refused(2, uv=uv, check=check)
+        self.assertIsInstance(exc, locked.NeedsScan)
+        self.assertEqual(exc.items, [{"kind": "pypi", "package": "dep", "version": "1.0.3"}])
+        self.assertIn("python scripts/scan_url.py pypi:dep==1.0.3", str(exc))
+        self.assertEqual(len(self.locks_of(uv)), 1)
+        self.assert_old_untouched()
+
+    def test_pypi_block_receipt_of_a_fix_is_a_finding(self):
+        uv, check = self.fix_setup(scanned=False)
+        self.scan("dep", "1.0.3", FIX_SHA, verdict="BLOCK")
+        self.refused(1, uv=uv, check=check)
+        self.assertEqual(len(self.locks_of(uv)), 1)
+
+    def test_pypi_missing_provenance_reports_with_override_hint(self):
+        uv, check = self.fix_setup(provenance={("dep", "1.0.0"): REPO, ("dep", "1.0.3"): "missing"})
+        exc = self.refused(1, uv=uv, check=check)
+        self.assertIn("--override dep=1.0.3", str(exc) + self.stderr)
+        self.assertIn("--override-reason", str(exc) + self.stderr)
+        self.assertEqual(len(self.locks_of(uv)), 1)
+
+    def test_pypi_provenance_lookup_failure_has_no_verdict(self):
+        failed = lockcheck.LookupFailed("index down", 500)
+        uv, check = self.fix_setup(provenance={("dep", "1.0.0"): REPO, ("dep", "1.0.3"): failed})
+        self.refused(2, uv=uv, check=check)
+        self.assertEqual(len(self.locks_of(uv)), 1)
+
+    def test_pypi_no_fast_lane_option_reports(self):
+        uv, check = self.fix_setup(scanned=False)
+        self.refused(1, uv=uv, check=check, policy=fastlane.policy(None, None, True))
+        self.assertEqual(len(self.locks_of(uv)), 1)
+
+    def test_pypi_lookup_failure_next_to_fixable_finding_blocks_rebuild(self):
+        uv, _ = self.fix_setup()
+        check = ScriptedCheck(finding(pypi_advisory(), failures=["GitHub reviewed: unreadable"]))
+        self.refused(2, uv=uv, check=check)
+        self.assertEqual(len(self.locks_of(uv)), 1)
+        self.assertEqual(self.syncs_of(uv), [])
+
+    def test_pypi_kev_unavailable_blocks_fast_lane(self):
+        uv, check = self.fix_setup()
+        self.lookups(kev=None)
+        self.refused(2, uv=uv, check=check)
+        self.assertEqual(len(self.locks_of(uv)), 1)
+
+    def test_pypi_young_dependency_of_the_rebuild_waits(self):
+        self.old_install()
+        uv, _ = self.fix_setup()
+        young = lockcheck.Young(lockcheck.Entry("PyPI", "newdep", "2.0.0"), stamp(1), 7,
+                                "2026-11-28")
+        check = ScriptedCheck(finding(pypi_advisory()),
+                              lockcheck.Result(2, ["NO VERDICT -- newdep young"], [], [young], []))
+        self.refused(2, uv=uv, check=check)
+        self.assertEqual(self.syncs_of(uv), [])
+        self.assert_old_untouched()
+
+    def test_pypi_rebuild_checks_top_wheel(self):
+        self.old_install()
+        top = "mcp_server_time-1.2.3-py3-none-any.whl"
+        uv, check = self.fix_setup(top_wheels=[[(top, WHEEL_SHA)], [(top, "c" * 64)]])
+        exc = self.refused(2, uv=uv, check=check)
+        self.assertIn("scanned", str(exc))
+        self.assertEqual(self.syncs_of(uv), [])
+        self.assert_old_untouched()
+
+    def test_pypi_fix_of_top_package_pins_the_fix_version(self):
+        self.lookups(provenance={(PKG, "1.2.3"): REPO, (PKG, "1.2.4"): REPO})
+        self.scan(PKG, "1.2.4", TOP_FIX_SHA)
+        self.uv = uv = FakeUv(shas={(PKG, "1.2.4"): TOP_FIX_SHA})
+        advisory = pypi_advisory(name=PKG, version="1.2.3", fixed="1.2.4",
+                                 files=locked_files(PKG, "1.2.3", WHEEL_SHA))
+        check = ScriptedCheck(finding(advisory), lockcheck.Result(0, ["ok"]))
+        installed = self.install(uv=uv, check=check)
+        data = self.uv_table(1)
+        self.assertEqual(tomllib_dependencies(self.uv.pyprojects[1]), [f"{PKG}==1.2.4"])
+        self.assertNotIn("override-dependencies", data)
+        self.assertEqual(data["exclude-newer-package"], {PKG: "2026-11-22T12:00:00Z"})
+        self.assertEqual(installed.requested, "1.2.4")
+        self.assertEqual((installed.overrides, installed.override_reason), ({}, None))
+        meta = json.loads((self.root / "time" / locked.METADATA).read_text(encoding="utf-8"))
+        self.assertEqual((meta["version"], meta["overrides"]), ("1.2.4", {}))
+        self.assertEqual((installed.fast_lane[0]["from"], installed.fast_lane[0]["to"]),
+                         ("1.2.3", "1.2.4"))
+        self.assertEqual(installed.fast_lane[0]["receipt_sha256"], TOP_FIX_SHA)
+        self.assertEqual(check.calls[1][1]["age_limits"], {("PyPI", PKG, "1.2.4"): 0})
+        self.assertEqual(installed.args[-1], PKG)
+
+    def test_pypi_fix_of_top_package_must_be_the_installed_version(self):
+        self.lookups(provenance={(PKG, "1.2.3"): REPO, (PKG, "1.2.4"): REPO})
+        self.scan(PKG, "1.2.4", TOP_FIX_SHA)
+        advisory = pypi_advisory(name=PKG, version="1.2.3", fixed="1.2.4",
+                                 files=locked_files(PKG, "1.2.3", WHEEL_SHA))
+        check = ScriptedCheck(finding(advisory), lockcheck.Result(0, ["ok"]))
+        uv = FakeUv(shas={(PKG, "1.2.4"): TOP_FIX_SHA}, dist_version="1.2.3")
+        self.old_install()
+        self.refused(2, uv=uv, check=check)
+        self.assert_old_untouched()
+
+    def test_pypi_top_fix_wheel_must_be_the_scanned_one(self):
+        self.lookups(provenance={(PKG, "1.2.3"): REPO, (PKG, "1.2.4"): REPO})
+        self.scan(PKG, "1.2.4", TOP_FIX_SHA)
+        advisory = pypi_advisory(name=PKG, version="1.2.3", fixed="1.2.4",
+                                 files=locked_files(PKG, "1.2.3", WHEEL_SHA))
+        check = ScriptedCheck(finding(advisory), lockcheck.Result(0, ["ok"]))
+        uv = FakeUv(shas={(PKG, "1.2.4"): "c" * 64})
+        exc = self.refused(2, uv=uv, check=check)
+        self.assertIn("scanned", str(exc))
+        self.assertEqual(self.syncs_of(uv), [])
+
+
+def tomllib_dependencies(pyproject_text):
+    return importlib.import_module("tomllib").loads(pyproject_text)["project"]["dependencies"]
+
+
+class PypiTiers(PypiFastLaneBase):
+    """PyPI has no trusted period (S1): the top package waits like every other entry."""
+
+    def test_pypi_has_no_trusted_period(self):
+        self.old_install()
+        young = lockcheck.Young(lockcheck.Entry("PyPI", PKG, "1.2.3"), stamp(3), 7, "2026-11-26")
+        check = ScriptedCheck(lockcheck.Result(2, ["NO VERDICT -- top package young"], [],
+                                               [young], []))
+        self.uv = uv = FakeUv()
+        with mock.patch.object(fastlane, "continuity", side_effect=AssertionError("S1 asked")):
+            self.refused(2, uv=uv, check=check, fetch=FakePyPI(ages={(PKG, "1.2.3"): 3}))
+        self.assertEqual(len(self.locks_of(uv)), 1)
+        self.assertEqual(self.uv_table(0), {"package": False, "exclude-newer": "7 days"})
+        self.assertEqual(check.calls[0][1]["age_limits"], None)
+        self.assert_old_untouched()
+
+    def test_pypi_plain_install_is_s2_without_fast_lane(self):
+        installed = self.install()
+        self.assertEqual((installed.tier, installed.fast_lane, installed.overrides),
+                         ("s2", [], {}))
+
+
+class PypiUserOverrides(PypiFastLaneBase):
+    def override_setup(self, provenance, name="dep", fix_name=None):
+        fix_name = fix_name or name
+        self.lookups(provenance=provenance)
+        self.scan(fix_name, "1.0.3", FIX_SHA)
+        self.uv = FakeUv(extra={fix_name: "1.0.0"}, shas={(fix_name, "1.0.3"): FIX_SHA})
+        check = ScriptedCheck(finding(pypi_advisory(name=fix_name)), lockcheck.Result(0, ["ok"]))
+        options = {"fetch": FakePyPI(ages={(fix_name, "1.0.3"): 3})}
+        return self.uv, check, options
+
+    def test_pypi_user_override_rules(self):
+        for label, options in {
+                "no reason": {"overrides": {"dep": "1.0.3"}},
+                "blank reason": {"overrides": {"dep": "1.0.3"}, "override_reason": "  "},
+                "range": {"overrides": {"dep": ">=1.0"}, "override_reason": "r"},
+                "local version": {"overrides": {"dep": "1.0.3+local"}, "override_reason": "r"},
+                "bad name": {"overrides": {"d;ep": "1.0.3"}, "override_reason": "r"},
+                "name twice": {"overrides": {"dep": "1.0.3", "Dep": "1.0.3"},
+                               "override_reason": "r"}}.items():
+            with self.subTest(case=label):
+                uv = FakeUv()
+                self.refused(2, uv=uv, **options)
+                self.assertEqual(uv.commands, [])
+        uv, check, options = self.override_setup(
+            {("dep", "1.0.0"): REPO, ("dep", "1.0.3"): "missing"})
+        installed = self.install(uv=uv, check=check, overrides={"dep": "1.0.3"},
+                                 override_reason="own reason", **options)
+        self.assertEqual([item["tier"] for item in installed.fast_lane], ["override"])
+        self.assertEqual(installed.overrides, {"dep": "1.0.3"})
+        self.assertEqual(installed.override_reason, f"own reason; agent-guard fast lane: {GHSA}")
+        meta = json.loads((self.root / "time" / locked.METADATA).read_text(encoding="utf-8"))
+        self.assertEqual(meta["overrides"], {"dep": "1.0.3"})
+        self.assertEqual(meta["override_reason"], f"own reason; agent-guard fast lane: {GHSA}")
+        self.assertNotIn("override-dependencies", self.uv_table(0))
+        self.assertEqual(self.uv_table(1)["override-dependencies"], ["dep==1.0.3"])
+
+    def test_pypi_override_does_not_help_a_failed_lookup(self):
+        failed = lockcheck.LookupFailed("index down", 500)
+        uv, check, options = self.override_setup({("dep", "1.0.0"): REPO, ("dep", "1.0.3"): failed})
+        self.refused(2, uv=uv, check=check, overrides={"dep": "1.0.3"}, override_reason="r",
+                     **options)
+        self.assertEqual(len(self.locks_of(uv)), 1)
+
+    def test_pypi_override_does_not_help_a_changed_repo(self):
+        uv, check, options = self.override_setup(
+            {("dep", "1.0.0"): REPO, ("dep", "1.0.3"): "github.com/x/y"})
+        self.refused(1, uv=uv, check=check, overrides={"dep": "1.0.3"}, override_reason="r",
+                     **options)
+        self.assertEqual(len(self.locks_of(uv)), 1)
+
+    def test_pypi_pending_override_without_advisory_waits(self):
+        uv = FakeUv()
+        exc = self.refused(2, uv=uv, overrides={"dep": "1.0.3"}, override_reason="r",
+                           fetch=FakePyPI(ages={("dep", "1.0.3"): 3}))
+        self.assertIn("younger than 7 days", str(exc))
+        self.assertIn("2026-11-26", str(exc))
+        self.assertEqual(len(self.locks_of(uv)), 1)
+        self.assertEqual(self.syncs_of(uv), [])
+
+    def test_pypi_old_override_is_applied_at_once(self):
+        uv = FakeUv(extra={"dep": "1.0.0"})
+        installed = self.install(uv=uv, overrides={"dep": "1.0.3"}, override_reason="pinned",
+                                 fetch=FakePyPI(ages={("dep", "1.0.3"): 30}))
+        self.assertEqual(len(self.locks_of(uv)), 1)
+        self.assertEqual(installed.overrides, {"dep": "1.0.3"})
+        self.assertEqual(installed.override_reason, "pinned")
+        self.assertEqual(installed.fast_lane, [])
+        import tomllib
+        table = tomllib.loads(uv.pyprojects[0])["tool"]["uv"]
+        self.assertEqual(table["override-dependencies"], ["dep==1.0.3"])
+        self.assertNotIn("exclude-newer-package", table)
+
+    def test_pypi_override_lookup_failure_has_no_verdict(self):
+        def broken(url, payload=None):
+            raise lockcheck.LookupFailed("index down", 500)
+
+        uv = FakeUv()
+        self.refused(2, uv=uv, overrides={"dep": "1.0.3"}, override_reason="r", fetch=broken)
+        self.assertEqual(uv.commands, [])
+
+    def test_pypi_conflicting_override_is_refused(self):
+        self.lookups(provenance={("dep", "1.0.1"): REPO, ("dep", "1.0.3"): REPO})
+        self.scan("dep", "1.0.3", FIX_SHA)
+        uv = FakeUv(extra={"dep": "1.0.1"})
+        check = ScriptedCheck(finding(pypi_advisory(version="1.0.1")))
+        self.refused(2, uv=uv, check=check, overrides={"dep": "1.0.1"},
+                     override_reason="pinned for compatibility")
+        self.assertEqual(len(self.locks_of(uv)), 1)
+
+    def test_pypi_override_name_is_normalised(self):
+        uv, check, options = self.override_setup(
+            {("foo-bar", "1.0.0"): REPO, ("foo-bar", "1.0.3"): "missing"}, name="foo-bar")
+        installed = self.install(uv=uv, check=check, overrides={"Foo_Bar": "1.0.3"},
+                                 override_reason="own reason", **options)
+        self.assertEqual([item["tier"] for item in installed.fast_lane], ["override"])
+        self.assertEqual(installed.overrides, {"foo-bar": "1.0.3"})
+        self.assertEqual(self.uv_table(1)["override-dependencies"], ["foo-bar==1.0.3"])
+
+
+class PypiJudgeTree(PypiFastLaneBase):
+    def judge(self, advisory, overrides=None, entries=None, **kwargs):
+        opts = {"receipts_root": self.root, "kind": "pypi", "user_overrides": overrides or {},
+                "policy": fastlane.Policy(), "fetch": FakePyPI(), "now": NOW,
+                "check": ScriptedCheck(finding(advisory))}
+        opts.update(kwargs)
+        return fastlane.judge_tree(entries or [advisory.entry], {}, **opts)
+
+    def test_pypi_override_name_is_normalised_in_judge_tree(self):
+        advisory = pypi_advisory(name="foo-bar")
+        self.lookups(provenance={("foo-bar", "1.0.0"): REPO, ("foo-bar", "1.0.3"): "missing"})
+        self.scan("foo-bar", "1.0.3", FIX_SHA)
+        for spelling in ("Foo_Bar", "foo.bar", "FOO-BAR", "foo-bar"):
+            with self.subTest(spelling=spelling):
+                verdict = self.judge(advisory, {spelling: "1.0.3"})
+                self.assertEqual(verdict.code, 0)
+                self.assertEqual((verdict.decisions[0]["action"], verdict.decisions[0]["tier"]),
+                                 ("install", "override"))
+                self.assertEqual(verdict.fixes["foo-bar"][0], "1.0.3")
+        verdict = self.judge(advisory, {"other": "1.0.3"})
+        self.assertEqual(verdict.code, 1)
+        self.assertEqual(verdict.decisions[0]["reason"], "provenance_missing")
+
+    def test_pypi_two_overrides_for_one_name_have_no_verdict(self):
+        advisory = pypi_advisory(name="foo-bar")
+        self.lookups(provenance={("foo-bar", "1.0.0"): REPO, ("foo-bar", "1.0.3"): "missing"})
+        with self.assertRaises(locked.Refused) as ctx:
+            self.judge(advisory, {"Foo_Bar": "1.0.3", "foo-bar": "1.0.4"})
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_pypi_gather_gets_all_locked_files(self):
+        files = (("dep-1.0.0.tar.gz", "a" * 64), ("dep-1.0.0-py3-none-any.whl", OLD_SHA),
+                 ("dep-1.0.0-cp312-cp312-win_amd64.whl", "d" * 64))
+        advisory = pypi_advisory(files=files)
+        self.lookups()
+        self.scan("dep", "1.0.3", FIX_SHA)
+        verdict = self.judge(advisory)
+        self.assertEqual(verdict.code, 0)
+        self.assertEqual(self.installed_files, [("dep", "1.0.0", files)])
+
+    def test_pypi_judge_tree_returns_fix_receipt_and_repo(self):
+        advisory = pypi_advisory()
+        self.lookups()
+        self.scan("dep", "1.0.3", FIX_SHA)
+        verdict = self.judge(advisory)
+        version, found, decision = verdict.fixes["dep"]
+        self.assertEqual((version, found.archive_sha256, decision["tier"], decision["repo"]),
+                         ("1.0.3", FIX_SHA, "fast_lane", REPO))
+        self.assertEqual(verdict.needs_scan, [])
+
+
+class PypiOverrideCli(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def args(self, **values):
+        import argparse
+        opts = {"package": PKG, "version": "1.2.3", "name": None, "executable": None,
+                "override": [], "override_reason": None, "secret": [], "accept": None,
+                "tools": None, "dry_run": False}
+        opts.update(values)
+        return argparse.Namespace(**opts)
+
+    def call(self, args, uv, **kwargs):
+        install_skill = importlib.import_module("install_skill")
+        config = {"mcp": {"install_dir": str(self.base / "mcp")}}
+        return install_skill.cmd_mcp_pypi(
+            args, config=config, env={}, platform="win32", run=uv, which=which,
+            check=stub_check(0), deliver=kwargs.pop("deliver", lambda *a, **k: None), **kwargs)
+
+    def test_bad_override_syntax_is_refused(self):
+        for override in (["dep"], ["=1.0.0"]):
+            with self.subTest(override=override):
+                uv = FakeUv()
+                with self.assertRaises(locked.Refused) as ctx:
+                    self.call(self.args(override=override, override_reason="r"), uv)
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertEqual(uv.commands, [])
+
+    def test_override_needs_a_reason(self):
+        receipts.write_receipt(self.base / "mcp", receipt())
+        uv = FakeUv()
+        with self.assertRaises(locked.Refused) as ctx:
+            self.call(self.args(override=["dep=1.0.3"]), uv, fetch=FakePyPI())
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("--override-reason", str(ctx.exception))
+        self.assertEqual(uv.commands, [])
+
+    def test_override_reaches_the_installer_and_the_handoff(self):
+        receipts.write_receipt(self.base / "mcp", receipt())
+        delivered = []
+        uv = FakeUv(extra={"dep": "1.0.0"})
+        installed = self.call(self.args(override=["Dep=1.0.3"], override_reason="advisory"), uv,
+                              fetch=FakePyPI(),
+                              deliver=lambda *a, **k: delivered.append((a, k)))
+        self.assertEqual((installed.overrides, installed.override_reason),
+                         ({"dep": "1.0.3"}, "advisory"))
+        self.assertEqual(len(delivered), 1)
+
+    def invoke_cli(self, mode, *options):
+        env = dict(os.environ)
+        env["AGENT_GUARD_NO_USER_CONFIG"] = "1"
+        env["LOCALAPPDATA"] = str(self.base)
+        env["XDG_DATA_HOME"] = str(self.base)
+        for var in locked.ONEDRIVE_VARS:
+            env.pop(var, None)
+        import subprocess
+        return subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "install_skill.py"), mode, *options],
+            capture_output=True, text=True, env=env, timeout=120)
+
+    def test_json_lists_the_pypi_scan_command(self):
+        result = self.invoke_cli("mcp-pypi", "--package", PKG, "--version", "1.2.3", "--json")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        status = json.loads(result.stdout)
+        self.assertEqual(status["needs_scan"],
+                         [{"kind": "pypi", "package": PKG, "version": "1.2.3"}])
+        self.assertEqual((status["code"], status["fast_lane"], status["tier"]), (2, [], ""))
+        self.assertIn(f"python scripts/scan_url.py pypi:{PKG}==1.2.3", status["message"])
+
+    def test_help_describes_the_override_and_fast_lane_options(self):
+        result = self.invoke_cli("mcp-pypi", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = " ".join(result.stdout.split())
+        self.assertIn("--override NAME=VERSION", text)
+        self.assertIn("--override-reason TEXT", text)
+        self.assertIn("younger scanned security fix", text)
+        self.assertIn("no trusted period", text)
 
 
 if __name__ == "__main__":

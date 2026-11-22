@@ -600,6 +600,17 @@ def _decision_line(record: dict) -> str:
     return line
 
 
+def _user_override(entry: Entry, user_overrides: dict) -> str | None:
+    """The version the user pinned for this entry; PyPI names compare after PEP 503 normalisation."""
+    if entry.ecosystem != "PyPI":
+        return user_overrides.get(entry.name)
+    wanted = normalize_pypi(entry.name)
+    found = {version for name, version in user_overrides.items() if normalize_pypi(name) == wanted}
+    if len(found) > 1:
+        raise Refused(2, f"NO VERDICT -- several --override versions name {wanted}")
+    return found.pop() if found else None
+
+
 def judge_tree(entries: list[Entry], previous: dict, *, receipts_root: Path, kind: str,
                user_overrides: dict, policy: Policy, fetch, now=None, age_limits=None,
                check=_lockcheck.check, unavailable: str | None = None) -> TreeVerdict:
@@ -635,7 +646,7 @@ def judge_tree(entries: list[Entry], previous: dict, *, receipts_root: Path, kin
             groups.setdefault(entry_key(advisory.entry), (advisory.entry, []))[1].append(advisory)
     for entry, advisories in groups.values():
         verdict.decisions.append(_decide_entry(entry, advisories, kev, policy,
-                                               user_overrides.get(entry.name), fetch))
+                                               _user_override(entry, user_overrides), fetch))
     incomplete = bool(result.failures)
     for record in verdict.decisions:
         if record["action"] == "install" and unavailable:

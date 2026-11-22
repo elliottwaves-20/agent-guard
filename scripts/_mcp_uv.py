@@ -11,15 +11,18 @@ failing sync puts the previous tree back. The agent starts
 from __future__ import annotations
 
 import configparser
+import datetime as dt
 import hashlib
 import re
 import shutil
+import sys
+import urllib.parse
 from pathlib import Path
 
 import _fastlane
 import _lockcheck
-from _mcp_locked import (ENTRY_RE, Installed, Refused, Runner, check_name, check_secrets,
-                         normalize_pypi, replace_tree, require_python_311, staged,
+from _mcp_locked import (ENTRY_RE, Installed, NeedsScan, Refused, Runner, check_name,
+                         check_secrets, normalize_pypi, replace_tree, require_python_311, staged,
                          stale_leftovers, write_metadata)
 
 INDEX = "https://pypi.org/simple"
@@ -109,6 +112,21 @@ def entry_point(scripts: dict, package: str, executable: str | None) -> str:
                      "choose one with --executable")
 
 
+def single_pure_wheel(entry: _lockcheck.Entry, sha256: str, what: str) -> None:
+    """The entry must lock exactly one wheel, a pure one (*-none-any.whl), and it must be
+    the file with this SHA-256 (the scanned one). Anything else is Refused(2)."""
+    where = "" if what == "top-level package" else f" ({what})"
+    wheels = [(f, h) for f, h in entry.files if f.endswith(".whl")]
+    if len(wheels) != 1 or not wheels[0][0].endswith("-none-any.whl"):
+        names = ", ".join(f for f, _ in wheels) or "no wheel"
+        raise Refused(2, f"NO VERDICT -- {entry.name} {entry.version} must lock exactly one pure "
+                         f"wheel (*-none-any.whl) to install the scanned file; it locks "
+                         f"{names}{where}")
+    if wheels[0][1] != sha256:
+        raise Refused(2, f"the locked wheel {wheels[0][0]} is not the scanned file "
+                         f"(sha256 {wheels[0][1]} vs {sha256}); scan again{where}")
+
+
 def _top_level_wheel(entries: list, package: str, version: str, receipt) -> None:
     """The top-level package must lock exactly one pure wheel: the scanned file."""
     tops = [e for e in entries if normalize_pypi(e.name) == normalize_pypi(package)]
@@ -116,20 +134,189 @@ def _top_level_wheel(entries: list, package: str, version: str, receipt) -> None
         found = ", ".join(e.version for e in tops) or "nothing"
         raise Refused(2, f"NO VERDICT -- uv.lock resolves {package} to {found}, "
                          f"not the pinned {version}")
-    wheels = [(f, h) for f, h in tops[0].files if f.endswith(".whl")]
-    if len(wheels) != 1 or not wheels[0][0].endswith("-none-any.whl"):
-        names = ", ".join(f for f, _ in wheels) or "no wheel"
-        raise Refused(2, f"NO VERDICT -- {package} {version} must lock exactly one pure "
-                         f"wheel (*-none-any.whl) to install the scanned file; it locks {names}")
-    if wheels[0][1] != receipt.archive_sha256:
-        raise Refused(2, f"the locked wheel {wheels[0][0]} is not the scanned file "
-                         f"(sha256 {wheels[0][1]} vs {receipt.archive_sha256}); scan again")
+    single_pure_wheel(tops[0], receipt.archive_sha256, "top-level package")
+
+
+def _validate_overrides(overrides, override_reason) -> dict:
+    """User overrides by PEP 503 name: exact PEP 440 versions, each name once, a reason."""
+    checked = {}
+    for dep, wanted in (overrides or {}).items():
+        check_package(dep)
+        if not isinstance(wanted, str) or not PEP440_RE.fullmatch(wanted):
+            raise Refused(2, f"invalid override version {wanted!r} for {dep}: an exact PEP 440 "
+                             "version like 1.2.3 is required")
+        key = normalize_pypi(dep)
+        if key in checked:
+            raise Refused(2, f"--override names {key} twice")
+        checked[key] = wanted
+    if checked and not (override_reason or "").strip():
+        raise Refused(2, "--override needs --override-reason (why the pinned tree is changed)")
+    return checked
+
+
+def _uv_settings(overrides: dict, excludes: dict) -> str:
+    """The [tool.uv] lines of a tree with pinned dependencies and per-package time limits."""
+    text = ""
+    if overrides:
+        text += ("override-dependencies = ["
+                 + ", ".join(f'"{dep}=={wanted}"' for dep, wanted in overrides.items()) + "]\n")
+    if excludes:
+        text += ("exclude-newer-package = { "
+                 + ", ".join(f'"{dep}" = "{when}"' for dep, when in excludes.items()) + " }\n")
+    return text
+
+
+def _lock(run, uv, stage, *, name, package, version, overrides, excludes, min_age_days):
+    """Write the project, let uv resolve without builds and read the lockfile back."""
+    (stage / "pyproject.toml").write_text(
+        _pyproject(name, f"{package}=={version}", min_age_days, _uv_settings(overrides, excludes)),
+        encoding="utf-8")
+    (stage / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    code, out = run([uv, "lock", "--no-build", "--default-index", INDEX], stage)
+    if code != 0:
+        raise Refused(2, f"uv could not lock {package}=={version} from {INDEX} without "
+                         f"builds and without files younger than {min_age_days} days:\n"
+                         f"{_tail(out)}")
+    try:
+        lock_bytes = (stage / LOCKFILE).read_bytes()
+        entries = _lockcheck.uv_lock_entries(lock_bytes.decode("utf-8"), project_name(name))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise Refused(2, f"cannot read {LOCKFILE}: {exc}")
+    except _lockcheck.NoVerdict as exc:
+        raise Refused(2, f"NO VERDICT -- {exc}")
+    return lock_bytes, entries
+
+
+# ── Registry facts for the waiting period of user overrides ──────────────────
+
+def _published(name: str, version: str, fetch) -> dt.datetime:
+    """Latest upload time of the files of one release; anything odd fails the lookup."""
+    url = (f"{_lockcheck.PYPI_JSON_URL}{urllib.parse.quote(normalize_pypi(name), safe='')}/"
+           f"{urllib.parse.quote(version, safe='')}/json")
+    try:
+        body, _ = fetch(url)
+        stamps = [dt.datetime.fromisoformat(row["upload_time_iso_8601"].replace("Z", "+00:00"))
+                  for row in body["urls"]]
+    except _lockcheck.LookupFailed:
+        raise
+    except Exception as exc:
+        raise _lockcheck.LookupFailed(
+            f"cannot read the upload time of {name}=={version}: {type(exc).__name__}") from exc
+    if not stamps or any(stamp.tzinfo is None for stamp in stamps):
+        raise _lockcheck.LookupFailed(f"no usable upload time for {name}=={version}")
+    return max(stamps)
+
+
+def _pending_overrides(overrides: dict, policy, fetch, now) -> dict:
+    """User overrides younger than the waiting period: name to (version, day it is old enough).
+
+    They are not resolved into the first tree; they count only as the chosen fix of an advisory."""
+    pending = {}
+    for dep, wanted in overrides.items():
+        try:
+            published = _published(dep, wanted, fetch)
+        except _lockcheck.LookupFailed as exc:
+            raise Refused(2, f"NO VERDICT -- {exc}")
+        if published > now - dt.timedelta(days=policy.min_age_days):
+            ready = (published + dt.timedelta(days=policy.min_age_days)).date().isoformat()
+            pending[dep] = (wanted, ready)
+    return pending
+
+
+def _check_rebuilt(entries, fixes: dict, check, policy, fetch, now) -> None:
+    """The rebuilt tree passes the same check; only the fix entries skip the waiting period."""
+    names = {normalize_pypi(dep) for dep in fixes}
+    limits = {_lockcheck.entry_key(e): 0 for e in entries if normalize_pypi(e.name) in names}
+    result = check(entries, now=now, fetch=fetch, min_age_days=policy.min_age_days,
+                   age_limits=limits)
+    for line in result.lines:
+        print(f"  {line}")
+    if result.code:
+        raise Refused(result.code, "the rebuilt tree fails the lockfile check (see above); "
+                                   "the installed tree is unchanged")
+    if result.failures:
+        raise Refused(2, "NO VERDICT -- a lookup of the rebuilt tree failed (see above)")
+
+
+def _finish(run, uv, stage, target, *, name, package, version, executable, lock_bytes,
+            overrides, override_reason, secrets, accepted, fast_lane) -> Installed:
+    """Swap the checked tree in, then `uv sync --locked` it; a failing sync restores the old one."""
+    chosen = {}
+
+    def sync(tree: Path) -> None:
+        code, out = run([uv, "sync", "--locked", "--no-dev", "--no-build"], tree)
+        if code != 0:
+            raise Refused(2, f"uv sync failed:\n{_tail(out)}")
+        if (tree / LOCKFILE).read_bytes() != lock_bytes:
+            raise Refused(2, "uv sync changed uv.lock; the checked tree is not what was built")
+        _info, installed_version = dist_info(tree / ".venv", package)
+        if installed_version != version:
+            raise Refused(2, f"uv sync installed {package} {installed_version}, "
+                             f"not the pinned {version}")
+        chosen["entry"] = entry_point(console_scripts(tree / ".venv", package),
+                                      package, executable)
+
+    installed = Installed(
+        name=name, kind="pypi", package=package, requested=version, command=uv, args=[],
+        tree=target, lockfile_sha256=hashlib.sha256(lock_bytes).hexdigest(), overrides=overrides,
+        override_reason=override_reason.strip() if overrides else None,
+        secrets=tuple(secrets), accepted=accepted, fast_lane=fast_lane)
+    write_metadata(stage, installed)
+    replace_tree(stage, target, finish=sync)
+    installed.args = ["run", "--project", str(target), "--locked", "--no-dev", chosen["entry"]]
+    return installed
+
+
+def _rebuild_with_fixes(run, uv, root, target, verdict, *, name, package, version, receipt,
+                        applied, override_reason, executable, secrets, accepted, check, policy,
+                        fetch, now) -> Installed:
+    """Second tree: the smallest scanned fixes pinned, only they exempt from the waiting period."""
+    fixes = verdict.fixes
+    top_key = normalize_pypi(package)
+    top_fix = next((fix for dep, fix in fixes.items() if normalize_pypi(dep) == top_key), None)
+    top_version = top_fix[0] if top_fix else version
+    top_receipt = top_fix[1] if top_fix else receipt
+    overrides = {**applied, **{dep: fix[0] for dep, fix in fixes.items()
+                               if normalize_pypi(dep) != top_key}}
+    ids = sorted({i for fix in fixes.values() for i in fix[2]["advisories"]})
+    text = "agent-guard fast lane: " + ", ".join(ids)
+    user_reason = (override_reason or "").strip()
+    reason = f"{user_reason}; {text}" if user_reason else text
+    when = now.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    excludes = {normalize_pypi(dep): when for dep in fixes}
+    with staged(root, name) as stage:
+        lock_bytes, entries = _lock(run, uv, stage, name=name, package=package,
+                                    version=top_version, overrides=overrides, excludes=excludes,
+                                    min_age_days=policy.min_age_days)
+        _top_level_wheel(entries, package, top_version, top_receipt)
+        for dep, (fix_version, fix_receipt, _) in fixes.items():
+            found = [e for e in entries if normalize_pypi(e.name) == normalize_pypi(dep)]
+            if len(found) != 1 or found[0].version != fix_version:
+                raise Refused(2, f"the rebuilt lockfile does not hold exactly the scanned "
+                                 f"{dep}=={fix_version}; the installed tree is unchanged")
+            single_pure_wheel(found[0], fix_receipt.archive_sha256, "fast lane fix")
+        _check_rebuilt(entries, fixes, check, policy, fetch, now)
+        fast_lane = [{"package": dep, "from": rec["installed"], "to": fix_version,
+                      "advisories": rec["advisories"], "repo": rec["repo"],
+                      "receipt_sha256": fix_receipt.archive_sha256, "tier": rec["tier"]}
+                     for dep, (fix_version, fix_receipt, rec) in fixes.items()]
+        installed = _finish(
+            run, uv, stage, target, name=name, package=package, version=top_version,
+            executable=executable, lock_bytes=lock_bytes, overrides=overrides,
+            override_reason=reason, secrets=secrets, accepted=accepted, fast_lane=fast_lane)
+    for item in fast_lane:
+        print(f"fast lane: {item['package']} {item['from']} -> {item['to']} "
+              f"({', '.join(item['advisories'])}, provenance {item['repo']}, "
+              f"receipt {item['receipt_sha256']})", file=sys.stderr)
+    return installed
 
 
 def pypi_install(*, name: str, package: str, version: str, executable: str | None,
                  secrets: tuple, root: Path, receipt, accepted: dict | None, run: Runner,
                  check=_lockcheck.check, which=shutil.which, dry: bool = False,
-                 policy: _fastlane.Policy = _fastlane.Policy()) -> Installed:
+                 policy: _fastlane.Policy = _fastlane.Policy(), overrides: dict | None = None,
+                 override_reason: str | None = None, fetch=_lockcheck.http_fetch,
+                 now: dt.datetime | None = None) -> Installed:
     """Build, check and swap in the locked tree of one PyPI MCP server."""
     require_python_311()
     check_name(name)
@@ -138,6 +325,7 @@ def pypi_install(*, name: str, package: str, version: str, executable: str | Non
     if executable is not None and not ENTRY_RE.fullmatch(executable):
         raise Refused(2, f"invalid --executable {executable!r}")
     check_secrets(secrets)
+    overrides = _validate_overrides(overrides, override_reason)
     if (receipt.kind != "pypi" or normalize_pypi(receipt.package) != normalize_pypi(package)
             or receipt.version != version):
         raise Refused(2, f"the scan receipt is for {receipt.package} {receipt.version}, "
@@ -153,60 +341,47 @@ def pypi_install(*, name: str, package: str, version: str, executable: str | Non
         return Installed(name=name, kind="pypi", package=package, requested=version, command=uv,
                          args=["run", "--project", str(target), "--locked", "--no-dev",
                                executable or "<entry point>"],
-                         tree=target, lockfile_sha256="", overrides={}, override_reason=None,
+                         tree=target, lockfile_sha256="", overrides=overrides,
+                         override_reason=override_reason.strip() if overrides else None,
                          secrets=tuple(secrets), accepted=accepted)
     root.mkdir(parents=True, exist_ok=True)
     root = root.resolve()
     target = root / name
+    now = now or dt.datetime.now(dt.timezone.utc)
     for leftover in stale_leftovers(root, name):
         print(f"  note: leftover of an aborted run, not used: {leftover}")
-    chosen = {}
     min_age_days = policy.min_age_days
     with staged(root, name) as stage:
-        (stage / "pyproject.toml").write_text(
-            _pyproject(name, f"{package}=={version}", min_age_days), encoding="utf-8")
-        (stage / ".gitignore").write_text(".venv/\n", encoding="utf-8")
-        code, out = run([uv, "lock", "--no-build", "--default-index", INDEX], stage)
-        if code != 0:
-            raise Refused(2, f"uv could not lock {package}=={version} from {INDEX} without "
-                             f"builds and without files younger than {min_age_days} days:\n"
-                             f"{_tail(out)}")
-        try:
-            lock_bytes = (stage / LOCKFILE).read_bytes()
-            entries = _lockcheck.uv_lock_entries(lock_bytes.decode("utf-8"), project_name(name))
-        except (OSError, UnicodeDecodeError) as exc:
-            raise Refused(2, f"cannot read {LOCKFILE}: {exc}")
-        except _lockcheck.NoVerdict as exc:
-            raise Refused(2, f"NO VERDICT -- {exc}")
+        pending = _pending_overrides(overrides, policy, fetch, now) if overrides else {}
+        applied = {dep: wanted for dep, wanted in overrides.items() if dep not in pending}
+        lock_bytes, entries = _lock(run, uv, stage, name=name, package=package, version=version,
+                                    overrides=applied, excludes={}, min_age_days=min_age_days)
         _top_level_wheel(entries, package, version, receipt)
-        result = check(entries, min_age_days=min_age_days)
-        for line in result.lines:
+        verdict = _fastlane.judge_tree(
+            entries, {}, receipts_root=root, kind="pypi", user_overrides=overrides,
+            policy=policy, fetch=fetch, now=now, check=check)
+        for line in verdict.lines:
             print(f"  {line}")
-        if result.code:
-            raise Refused(result.code, f"lockfile check for {package}=={version} failed "
-                                       "(see above); the installed tree is unchanged")
-
-        def sync(tree: Path) -> None:
-            code, out = run([uv, "sync", "--locked", "--no-dev", "--no-build"], tree)
-            if code != 0:
-                raise Refused(2, f"uv sync failed:\n{_tail(out)}")
-            if (tree / LOCKFILE).read_bytes() != lock_bytes:
-                raise Refused(2, "uv sync changed uv.lock; the checked tree is not what was built")
-            _info, installed_version = dist_info(tree / ".venv", package)
-            if installed_version != version:
-                raise Refused(2, f"uv sync installed {package} {installed_version}, "
-                                 f"not the pinned {version}")
-            chosen["entry"] = entry_point(console_scripts(tree / ".venv", package),
-                                          package, executable)
-
-        installed = Installed(
-            name=name, kind="pypi", package=package, requested=version, command=uv, args=[],
-            tree=target, lockfile_sha256=hashlib.sha256(lock_bytes).hexdigest(), overrides={},
-            override_reason=None, secrets=tuple(secrets), accepted=accepted)
-        write_metadata(stage, installed)
-        replace_tree(stage, target, finish=sync)
-    installed.args = ["run", "--project", str(target), "--locked", "--no-dev", chosen["entry"]]
-    return installed
+        if verdict.code:
+            if verdict.needs_scan and verdict.code == 2:
+                raise NeedsScan(verdict.needs_scan, prefix="fast lane needs scans first:\n")
+            detail = "".join(f"\n{note}" for note in verdict.notes)
+            raise Refused(verdict.code, f"lockfile check for {package}=={version} failed "
+                                        f"(see above); the installed tree is unchanged{detail}")
+        for dep, (wanted, ready) in pending.items():
+            if verdict.fixes.get(dep, (None,))[0] != wanted:
+                raise Refused(2, f"override {dep}=={wanted} is younger than {min_age_days} days "
+                                 f"and fixes no advisory; wait until {ready}")
+        if verdict.fixes:
+            return _rebuild_with_fixes(
+                run, uv, root, target, verdict, name=name, package=package, version=version,
+                receipt=receipt, applied=applied, override_reason=override_reason,
+                executable=executable, secrets=secrets, accepted=accepted, check=check,
+                policy=policy, fetch=fetch, now=now)
+        return _finish(
+            run, uv, stage, target, name=name, package=package, version=version,
+            executable=executable, lock_bytes=lock_bytes, overrides=applied,
+            override_reason=override_reason, secrets=secrets, accepted=accepted, fast_lane=[])
 
 
 # ── Git sources (A4) ─────────────────────────────────────────────────────────
