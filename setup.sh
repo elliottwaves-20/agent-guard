@@ -13,7 +13,7 @@ set -euo pipefail
 # "scan = install" applies to the scanner itself. Bump deliberately; see
 # scripts/_pins.py (a test keeps both in sync).
 SKILLSPECTOR_REPO="https://github.com/NVIDIA/SkillSpector"   # main until 2.13.0
-SKILLSPECTOR_SHA="e48d771a26f7398b36256ceb8d8f94adce3d5c44"   # v2.12.0 + main 2026-11-06
+SKILLSPECTOR_SHA="c81615007d40e86051a302a3cf897f8a05264928"   # v2.12.0 + main 2026-11-14
 
 # Cisco mcp-scanner: pinned to a commit on the official main branch. The newest
 # PyPI release still pins a litellm with published advisories; main accepts a
@@ -27,7 +27,7 @@ CISCO_LITELLM="litellm>=1.106.5,!=1.107.0"
 # fresh. --exclude-newer limits registry packages to files uploaded before this
 # fixed instant (set at least 7 days back with each pin bump), so a release
 # from the days before a setup run cannot slip in (see scripts/_pins.py).
-EXCLUDE_NEWER="2026-11-08T09:00:00Z"
+EXCLUDE_NEWER="2026-11-15T00:00:00Z"
 
 echo "Checking prerequisites..."
 

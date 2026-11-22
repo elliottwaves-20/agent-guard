@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
-from _llm_budget import Paused
+from _llm_budget import Paused, estimated_input_tokens
 
 USER_AGENT = "agent-guard/" + (Path(__file__).resolve().parents[1] / "VERSION").read_text(
     encoding="utf-8").strip()
@@ -192,6 +192,16 @@ def install(budget):
     OpenAICompatibleProvider.create_chat_model = forbidden
     import skillspector.llm_analyzer_base as base
     base.get_chat_model = factory
+    # Since SkillSpector #980 an unrecognized chat model is counted in UTF-8
+    # bytes against the analyzer's token budget, so no prompt fit the 4000
+    # tokens set below. Count our model with the ledger estimate instead: the
+    # ledger still refuses any request above the policy's input limit.
+    original_counter = base._input_token_counter
+    def token_counter(chat_model):
+        if isinstance(chat_model, Model):
+            return estimated_input_tokens, "agent_guard_ledger_estimate"
+        return original_counter(chat_model)
+    base._input_token_counter = token_counter
     base.API_CONNECTION_MAX_RETRIES = 0
     base.API_CONNECTION_RETRY_DELAYS_SECONDS = ()
     base.STRUCTURED_RESPONSE_MAX_ATTEMPTS = 1

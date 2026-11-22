@@ -23,6 +23,16 @@ class Paused(RuntimeError):
     """A persisted, fail-closed stop; never an empty successful response."""
 
 
+def estimated_input_tokens(text: str) -> int:
+    """Ledger token estimate: UTF-8 bytes / 3, rounded up.
+
+    A byte upper bound rather than chars/4: deliberately conservative for
+    multilingual text. The adapter hands the same count to SkillSpector's
+    prompt budget, so batches are packed in the unit the ledger enforces.
+    """
+    return math.ceil(len(text.encode("utf-8", errors="replace")) / 3)
+
+
 def _nano_usd(name, section, field, value, per=1):
     """Dollar amount (or $/Mtok when per=10**6) as integer nano-dollars."""
     try:
@@ -177,10 +187,10 @@ class Budget:
         raise Paused(reason)
 
     def measure(self, payload, context):
-        # Byte upper bound rather than chars/4: deliberately conservative for
-        # multilingual text. Includes JSON schema, messages and framing margin.
-        size = len(canonical(payload).encode("utf-8"))
-        estimated = math.ceil(size / 3)
+        # Includes JSON schema, messages and framing margin.
+        text = canonical(payload)
+        size = len(text.encode("utf-8"))
+        estimated = estimated_input_tokens(text)
         upper = size + 1024
         key = digest({"identity": self.identity, "policy": self.policy,
                       "payload": payload, "context": context})

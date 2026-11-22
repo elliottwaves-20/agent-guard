@@ -28,14 +28,20 @@ published advisories), #1051 (one LLM batch admission shared across
 analyzers) and #1048 (accounted refusals). Malformed LLM answers now get a
 bounded field-by-field recovery; its calls go through the same patched
 get_chat_model, and an unfinished recovery is reported as a partial
-inspection, which still ends in no verdict. Since
+inspection, which still ends in no verdict. Since c816150 it also carries
+#1077 (bounded token-gap compaction for mixed scripts), #1092 (an unforced
+tool-call binding when a gateway rejects json_schema; it reuses the same
+patched model, and a second rejection still ends the batch), #1027
+(--exclude globs on Windows), #1087, #1095 (langgraph past
+GHSA-3fx2-cqw9-xr3c), #980 (prompt token counting that never downloads a
+vocabulary) and #1123. Since
 #798 SkillSpector refuses --output on Windows, so reports are read from stdout.
 tests/test_pins.py checks on GitHub that main contains it. The 2.13.x release
 tags sit on a separate branch without #855/#856, so the pin stays on main.
 """
 SKILLSPECTOR_VERSION = "2.12.0"
 SKILLSPECTOR_REPO = "https://github.com/NVIDIA/SkillSpector"
-SKILLSPECTOR_SHA = "e48d771a26f7398b36256ceb8d8f94adce3d5c44"
+SKILLSPECTOR_SHA = "c81615007d40e86051a302a3cf897f8a05264928"
 
 # Cisco mcp-scanner (optional live MCP runtime check), pinned like SkillSpector
 # to a commit on the official main branch. The newest PyPI release (4.8.7)
@@ -60,7 +66,7 @@ CISCO_LITELLM_REQUIREMENT = "litellm>=1.106.5,!=1.107.0"
 # hence the commit pins). It is a fixed date rather than "now minus 7 days" so
 # a setup run is reproducible; raise it with every scanner pin bump, to a
 # moment at least 7 days back (a test checks the 7 days).
-UV_EXCLUDE_NEWER = "2026-11-08T09:00:00Z"
+UV_EXCLUDE_NEWER = "2026-11-15T00:00:00Z"
 
 # Scanner images, pinned by digest. Docker runs the
 # digest; the tag only keeps the line readable. GuardDog and malcontent carry

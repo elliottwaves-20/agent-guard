@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- SkillSpector is pinned to main `c816150` (14 Nov 2026, package version
+  2.12.0), the newest main push at least 7 days old. It adds #1077, #1092,
+  #1027, #1087, #1095 (langgraph past GHSA-3fx2-cqw9-xr3c), #980 and #1123.
+  The 2.13.5 / 2.13.6 release tags still sit on a separate branch without
+  most main fixes, so the pin stays on main. The dependency window
+  `UV_EXCLUDE_NEWER` moves to 2026-11-15.
+- Budgeted API scans (`llm_scan.py`): since SkillSpector #980 an
+  unrecognized chat model is counted in UTF-8 bytes against the analyzer's
+  token budget, so every prompt of the budget adapter missed it and no batch
+  was sent. The adapter now hands SkillSpector the ledger's own estimate
+  (UTF-8 bytes / 3); the ledger still stops any request above the profile's
+  input limit, and nothing is truncated.
+
 ## 0.5.2 - 2026-11-15
 
 0.5.1 was merged but never published as a release. 0.5.2 is the first

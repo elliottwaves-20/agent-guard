@@ -65,6 +65,28 @@ raise SystemExit(scan(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4] == "prev
 @unittest.skipUnless(os.environ.get("AGENT_GUARD_BUDGET_CONTRACT") == "1",
                      "set AGENT_GUARD_BUDGET_CONTRACT=1 with installed scanner Python; no live calls")
 class InstalledBudgetContract(unittest.TestCase):
+    def test_upstream_prompt_budget_counts_like_the_ledger(self):
+        # SkillSpector counts unknown chat models in UTF-8 bytes; the adapter
+        # must hand it the ledger estimate, or every prompt misses its budget.
+        probe = r'''
+import sys
+sys.path.insert(0, sys.argv[1])
+import _llm_adapter, _llm_budget
+from types import SimpleNamespace
+import json
+budget = SimpleNamespace(policy=json.loads(sys.argv[2]))
+_llm_adapter.install(budget)
+import skillspector.llm_analyzer_base as base
+counter, source = base._input_token_counter(_llm_adapter.Model(budget))
+text = "ä" * 300 + "x" * 100
+assert counter(text) == _llm_budget.estimated_input_tokens(text), (counter(text), source)
+print("ok")
+'''
+        scripts = str(Path(__file__).resolve().parents[1] / "scripts")
+        result = subprocess.run([sys.executable, "-c", probe, scripts, json.dumps(POLICY)],
+                                capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stderr[-3000:])
+
     def test_preview_probe_resume_preserves_all_semantic_analyzers(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
