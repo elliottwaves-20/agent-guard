@@ -16,15 +16,14 @@ import shutil
 from pathlib import Path
 
 import _lockcheck
-from _mcp_locked import (Installed, Refused, Runner, check_name, replace_tree, staged,
-                         stale_leftovers, write_metadata)
+from _mcp_locked import (Installed, Refused, Runner, check_name, check_secrets, replace_tree,
+                         staged, stale_leftovers, write_metadata)
 
 REGISTRY = "https://registry.npmjs.org/"
 MIN_NPM = (11, 10)  # first npm with --min-release-age (npm/cli#8965, v11.10.0)
 PACKAGE_RE = re.compile(r"(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*")
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
 BIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-SECRET_RE = re.compile(r"[A-Z][A-Z0-9_]*")
 YOUNG_CODES = ("ETARGET", "ENOVERSIONS")
 LOCKFILE = "package-lock.json"
 
@@ -39,14 +38,6 @@ def check_version(version: str, what: str = "version") -> str:
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         raise Refused(2, f"invalid {what} {version!r}: an exact version like 1.2.3 is required")
     return version
-
-
-def check_secrets(secrets: tuple) -> tuple:
-    for name in secrets:
-        if not isinstance(name, str) or not SECRET_RE.fullmatch(name):
-            raise Refused(2, f"invalid secret name {name!r}: --secret takes the name of a key "
-                             "in your secret manager (A-Z, 0-9, _), never a value")
-    return tuple(secrets)
 
 
 def _validate(name, package, version, overrides, override_reason, bin_name, secrets):

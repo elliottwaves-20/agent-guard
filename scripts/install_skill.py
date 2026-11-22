@@ -787,6 +787,34 @@ def cmd_mcp_npm(args, *, config: dict, env, platform: str, run=None, which=shuti
     return installed
 
 
+def cmd_mcp_pypi(args, *, config: dict, env, platform: str, run=None, which=shutil.which,
+                 check=None, deliver=None):
+    """mcp-pypi: scan receipt, locked uv project, then hand the start command to the agents."""
+    import _lockcheck
+    import _mcp_receipts
+    import _mcp_uv
+    _mcp_locked.require_python_311()
+    settings = _mcp_locked.settings(config, env, platform)
+    _mcp_uv.check_package(args.package)
+    _mcp_uv.check_version(args.version)
+    name = (_mcp_locked.check_name(args.name) if args.name
+            else _mcp_locked.default_name("pypi", args.package))
+    receipt, accepted = _mcp_receipts.require_receipt(
+        settings.install_dir, "pypi", args.package, args.version, args.accept)
+    installed = _mcp_uv.pypi_install(
+        name=name, package=args.package, version=args.version, executable=args.executable,
+        secrets=tuple(args.secret or ()), root=settings.install_dir, receipt=receipt,
+        accepted=accepted, run=run or _mcp_locked.run_tool, check=check or _lockcheck.check,
+        which=which, dry=args.dry_run)
+    if accepted:
+        print(f"   Installed despite the BLOCK verdict: {accepted['grund']}")
+    _report_secrets(installed)
+    (deliver or install_mcp)(installed.name, {"command": installed.command,
+                                              "args": list(installed.args)},
+                             args.dry_run, selected=args.tools)
+    return installed
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -882,13 +910,32 @@ def main():
                             f"(default: all detected). Choices: {', '.join(tool_choices)}")
     p_npm.add_argument("--dry-run", action="store_true")
 
+    # Locked PyPI MCP
+    p_pypi = sub.add_parser("mcp-pypi", help="Install a PyPI MCP server from a checked uv.lock "
+                                             "in its own directory (after scan_url.py)")
+    p_pypi.add_argument("--package", required=True, help="PyPI package, e.g. mcp-server-time")
+    p_pypi.add_argument("--version", required=True, help="Exact scanned version, e.g. 1.2.3")
+    p_pypi.add_argument("--name", help="Server name in configs (default: normalized package name)")
+    p_pypi.add_argument("--executable",
+                        help="Entry point of the package when it declares several")
+    p_pypi.add_argument("--secret", action="append", default=[], metavar="NAME",
+                        help="Name of a key the server needs (never a value); repeatable")
+    p_pypi.add_argument("--accept", metavar="REASON",
+                        help="Install this exact version despite a BLOCK verdict, with a reason")
+    p_pypi.add_argument("--tools", nargs="*", choices=tool_choices, default=None,
+                        metavar="TOOL",
+                        help=f"Limit installation to specific tools "
+                             f"(default: all detected). Choices: {', '.join(tool_choices)}")
+    p_pypi.add_argument("--dry-run", action="store_true")
+
     args = parser.parse_args()
     workspace = args.workspace or workspace_default()
 
-    if args.mode == "mcp-npm":
+    locked_modes = {"mcp-npm": cmd_mcp_npm, "mcp-pypi": cmd_mcp_pypi}
+    if args.mode in locked_modes:
         try:
-            cmd_mcp_npm(args, config=_skillspector.USER_CONFIG, env=os.environ,
-                        platform=sys.platform)
+            locked_modes[args.mode](args, config=_skillspector.USER_CONFIG, env=os.environ,
+                                    platform=sys.platform)
         except _mcp_locked.Refused as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             sys.exit(exc.code)

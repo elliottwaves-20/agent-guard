@@ -25,6 +25,8 @@ from pathlib import Path
 METADATA = "agent-guard-mcp.json"
 REGISTER_FILE = "agent-guard-register.json"
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+SECRET_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+ENTRY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")  # executable / bin / module names
 KEYS = {"install_dir", "register", "register_timeout"}
 DEFAULT_REGISTER_TIMEOUT = 300
 TOOL_TIMEOUT = 600
@@ -138,6 +140,15 @@ def check_name(name: str) -> str:
         raise Refused(2, f"invalid MCP server name {name!r}: letters, digits, '.', '_' "
                          "and '-', starting with a letter or digit, at most 64 characters")
     return name
+
+
+def check_secrets(secrets: tuple) -> tuple:
+    """Names of keys in the secret manager; a value never passes here (K2)."""
+    for name in secrets:
+        if not isinstance(name, str) or not SECRET_RE.fullmatch(name):
+            raise Refused(2, f"invalid secret name {name!r}: --secret takes the name of a key "
+                             "in your secret manager (A-Z, 0-9, _), never a value")
+    return tuple(secrets)
 
 
 def default_name(kind: str, package: str) -> str:
