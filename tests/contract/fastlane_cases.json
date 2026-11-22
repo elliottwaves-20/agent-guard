@@ -1,0 +1,784 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "trigger-critical", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "osv", "severity": "critical", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "install", "reason": "triggered", "version": "1.0.3", "tier": "fast_lane", "advisories": ["GHSA-aaaa-bbbb-cccc"]}
+    },
+    {
+      "id": "trigger-high", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "install", "reason": "triggered", "version": "1.0.3", "tier": "fast_lane", "advisories": ["GHSA-aaaa-bbbb-cccc"]}
+    },
+    {
+      "id": "trigger-kev-moderate", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "OSV-EXAMPLE-1", "aliases": ["CVE-2026-0001"],
+            "source": "osv", "severity": "moderate", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": ["CVE-2026-0001"], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "install", "reason": "triggered", "version": "1.0.3", "tier": "fast_lane", "advisories": ["OSV-EXAMPLE-1"]}
+    },
+    {
+      "id": "no-trigger-moderate", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "moderate", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "not_triggered"}
+    },
+    {
+      "id": "no-trigger-withdrawn", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": true,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": ["CVE-2026-0001"], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "not_triggered"}
+    },
+    {
+      "id": "no-trigger-osv-cvss-only", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "OSV-EXAMPLE-1", "aliases": ["CVE-2026-0001"],
+            "source": "osv", "severity": null, "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "not_triggered"}
+    },
+    {
+      "id": "lowest-not-latest", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"},
+          "1.1.0": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "install", "reason": "triggered", "version": "1.0.3", "tier": "fast_lane", "advisories": ["GHSA-aaaa-bbbb-cccc"]}
+    },
+    {
+      "id": "two-advisories-max-fix", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          },
+          {
+            "id": "GHSA-dddd-eeee-ffff", "aliases": ["CVE-2026-0002"],
+            "source": "github-reviewed", "severity": "critical", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.5", "upper_inclusive": false, "fixed": "1.0.5"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 1, "provenance": "github.com/o/r"},
+          "1.0.5": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "install", "reason": "triggered", "version": "1.0.5", "tier": "fast_lane", "advisories": ["GHSA-aaaa-bbbb-cccc", "GHSA-dddd-eeee-ffff"]}
+    },
+    {
+      "id": "alias-duplicate", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "moderate", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          },
+          {
+            "id": "OSV-EXAMPLE-1", "aliases": ["CVE-2026-0001"],
+            "source": "osv", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "install", "reason": "triggered", "version": "1.0.3", "tier": "fast_lane", "advisories": ["GHSA-aaaa-bbbb-cccc"]}
+    },
+    {
+      "id": "alias-fix-still-affected", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "moderate", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          },
+          {
+            "id": "OSV-EXAMPLE-1", "aliases": ["CVE-2026-0001"],
+            "source": "osv", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.5", "upper_inclusive": false, "fixed": "1.0.5"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"},
+          "1.0.5": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "fix_has_advisory"}
+    },
+    {
+      "id": "alias-transitive", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "moderate", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          },
+          {
+            "id": "OSV-EXAMPLE-1", "aliases": ["CVE-2026-0001", "CVE-2026-0002"],
+            "source": "osv", "severity": "moderate", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          },
+          {
+            "id": "OSV-EXAMPLE-2", "aliases": ["CVE-2026-0002"],
+            "source": "osv", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "install", "reason": "triggered", "version": "1.0.3", "tier": "fast_lane", "advisories": ["GHSA-aaaa-bbbb-cccc"]}
+    },
+    {
+      "id": "fix-with-residual-advisory", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 1, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "fix_has_advisory"}
+    },
+    {
+      "id": "fix-needs-major", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "2.0.0", "upper_inclusive": false, "fixed": "2.0.0"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "2.0.0": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "major"}
+    },
+    {
+      "id": "prerelease-fix", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "2.0.0-beta.1", "upper_inclusive": false, "fixed": "2.0.0-beta.1"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "2.0.0-beta.1": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "prerelease_fix"}
+    },
+    {
+      "id": "malware", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "MAL-EXAMPLE-1", "aliases": [],
+            "source": "osv-malware", "severity": null, "withdrawn": false,
+            "affected": []
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "malware"}
+    },
+    {
+      "id": "provenance-missing", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "missing",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "provenance_missing"}
+    },
+    {
+      "id": "provenance-missing-with-override", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "missing"}
+        },
+        "override": "1.0.3", "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "install", "reason": "provenance_missing", "version": "1.0.3", "tier": "override"}
+    },
+    {
+      "id": "repo-changed", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/s"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "repo_changed"}
+    },
+    {
+      "id": "repo-changed-with-override", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/s"}
+        },
+        "override": "1.0.3", "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "repo_changed"}
+    },
+    {
+      "id": "provenance-lookup-failed-with-override", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "failed",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": "1.0.3", "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "no_verdict", "reason": "lookup_failed"}
+    },
+    {
+      "id": "pypi-no-pure-wheel", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "PyPI", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r", "pure_wheel": false}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "no_pure_wheel"}
+    },
+    {
+      "id": "pypi-sdist-only", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "PyPI", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.4", "upper_inclusive": false, "fixed": "1.0.4"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.4": {"advisories": 0, "provenance": "github.com/o/r", "pure_wheel": false}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "no_pure_wheel"}
+    },
+    {
+      "id": "pypi-wheel-lookup-unavailable", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "PyPI", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "no_verdict", "reason": "lookup_failed"}
+    },
+    {
+      "id": "lookup-failed", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": true, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "no_verdict", "reason": "lookup_failed"}
+    },
+    {
+      "id": "kev-unavailable", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "moderate", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": null, "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "no_verdict", "reason": "kev_unavailable"}
+    },
+    {
+      "id": "kev-unavailable-high", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": null, "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "no_verdict", "reason": "kev_unavailable"}
+    },
+    {
+      "id": "exclusive-lower-bound", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": "1.0.0", "lower_inclusive": false, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "not_triggered"}
+    },
+    {
+      "id": "separate-intervals", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "0.2.0", "upper_inclusive": false, "fixed": "0.2.0"},
+              {"lower": "0.9.0", "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "install", "reason": "triggered", "version": "1.0.3", "tier": "fast_lane", "advisories": ["GHSA-aaaa-bbbb-cccc"]}
+    },
+    {
+      "id": "last-affected-closed-interval", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "0.2.0", "upper_inclusive": true, "fixed": null},
+              {"lower": "0.9.0", "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "install", "reason": "triggered", "version": "1.0.3", "tier": "fast_lane", "advisories": ["GHSA-aaaa-bbbb-cccc"]}
+    },
+    {
+      "id": "fix-not-above-installed", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.1", "upper_inclusive": false, "fixed": "1.0.0"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.0": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": true}
+      },
+      "expect": {"action": "report", "reason": "no_fix"}
+    },
+    {
+      "id": "disabled", "kind": "fast_lane",
+      "input": {
+        "ecosystem": "npm", "package": "x", "installed": "1.0.0",
+        "advisories": [
+          {
+            "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2026-0001"],
+            "source": "github-reviewed", "severity": "high", "withdrawn": false,
+            "affected": [
+              {"lower": null, "lower_inclusive": true, "upper": "1.0.3", "upper_inclusive": false, "fixed": "1.0.3"}
+            ]
+          }
+        ],
+        "kev": [], "installed_provenance": "github.com/o/r",
+        "versions": {
+          "1.0.3": {"advisories": 0, "provenance": "github.com/o/r"}
+        },
+        "override": null, "lookup_failed": false, "settings": {"fast_lane": false}
+      },
+      "expect": {"action": "report", "reason": "disabled"}
+    },
+    {
+      "id": "s1-npm-3-days-same-repo", "kind": "age",
+      "input": {
+        "ecosystem": "npm", "continuity": "same",
+        "published": "2026-11-19T00:00:00Z", "now": "2026-11-22T00:00:00Z",
+        "settings": {"min_age_days": 7, "trusted_days": 2}
+      },
+      "expect": {"action": "install", "tier": "s1", "wait_until": null}
+    },
+    {
+      "id": "s1-npm-exactly-2-days-same-repo", "kind": "age",
+      "input": {
+        "ecosystem": "npm", "continuity": "same",
+        "published": "2026-11-20T00:00:00Z", "now": "2026-11-22T00:00:00Z",
+        "settings": {"min_age_days": 7, "trusted_days": 2}
+      },
+      "expect": {"action": "install", "tier": "s1", "wait_until": null}
+    },
+    {
+      "id": "s1-npm-1-day-same-repo", "kind": "age",
+      "input": {
+        "ecosystem": "npm", "continuity": "same",
+        "published": "2026-11-21T00:00:00Z", "now": "2026-11-22T00:00:00Z",
+        "settings": {"min_age_days": 7, "trusted_days": 2}
+      },
+      "expect": {"action": "wait", "tier": "s1", "wait_until": "2026-11-23"}
+    },
+    {
+      "id": "s1-npm-other-repo", "kind": "age",
+      "input": {
+        "ecosystem": "npm", "continuity": "different",
+        "published": "2026-11-19T00:00:00Z", "now": "2026-11-22T00:00:00Z",
+        "settings": {"min_age_days": 7, "trusted_days": 2}
+      },
+      "expect": {"action": "wait", "tier": "s2", "wait_until": "2026-11-26"}
+    },
+    {
+      "id": "s1-no-previous", "kind": "age",
+      "input": {
+        "ecosystem": "npm", "continuity": "none",
+        "published": "2026-11-19T00:00:00Z", "now": "2026-11-22T00:00:00Z",
+        "settings": {"min_age_days": 7, "trusted_days": 2}
+      },
+      "expect": {"action": "wait", "tier": "s2", "wait_until": "2026-11-26"}
+    },
+    {
+      "id": "s1-provenance-failed", "kind": "age",
+      "input": {
+        "ecosystem": "npm", "continuity": "failed",
+        "published": "2026-11-19T00:00:00Z", "now": "2026-11-22T00:00:00Z",
+        "settings": {"min_age_days": 7, "trusted_days": 2}
+      },
+      "expect": {"action": "wait", "tier": "s2", "wait_until": "2026-11-26"}
+    },
+    {
+      "id": "s1-pypi-same-repo", "kind": "age",
+      "input": {
+        "ecosystem": "PyPI", "continuity": "same",
+        "published": "2026-11-19T00:00:00Z", "now": "2026-11-22T00:00:00Z",
+        "settings": {"min_age_days": 7, "trusted_days": 2}
+      },
+      "expect": {"action": "wait", "tier": "s2", "wait_until": "2026-11-26"}
+    },
+    {
+      "id": "s2-8-days", "kind": "age",
+      "input": {
+        "ecosystem": "npm", "continuity": "none",
+        "published": "2026-11-14T00:00:00Z", "now": "2026-11-22T00:00:00Z",
+        "settings": {"min_age_days": 7, "trusted_days": 2}
+      },
+      "expect": {"action": "install", "tier": "s2", "wait_until": null}
+    },
+    {
+      "id": "s2-exactly-7-days", "kind": "age",
+      "input": {
+        "ecosystem": "npm", "continuity": "none",
+        "published": "2026-11-15T00:00:00Z", "now": "2026-11-22T00:00:00Z",
+        "settings": {"min_age_days": 7, "trusted_days": 2}
+      },
+      "expect": {"action": "install", "tier": "s2", "wait_until": null}
+    },
+    {
+      "id": "young-without-trigger", "kind": "age",
+      "input": {
+        "ecosystem": "npm", "continuity": "missing",
+        "published": "2026-11-21T00:00:00Z", "now": "2026-11-22T00:00:00Z",
+        "settings": {"min_age_days": 7, "trusted_days": 2}
+      },
+      "expect": {"action": "wait", "tier": "s2", "wait_until": "2026-11-28"}
+    }
+  ]
+}
