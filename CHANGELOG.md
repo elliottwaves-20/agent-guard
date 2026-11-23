@@ -6,14 +6,15 @@
 
 - Local MCP servers no longer run through `npx`/`uvx`, which pin only the top
   package and resolve the rest of the tree again at every start, unchecked
-  (#48). New `install_skill.py mcp-npm` and `mcp-pypi`, and a new inside for
-  `mcp-git`, give each server its own directory under `[mcp] install_dir` with
+  (#48). The locked `mcp-npm`, `mcp-pypi` and `mcp-git` installers give
+  each server its own directory under `[mcp] install_dir` with
   an exact pin and a lockfile: resolved without lifecycle scripts or builds
-  and without anything younger than 7 days, every entry checked against OSV,
+  under a 7-day age policy by default, with every entry checked against OSV,
   GitHub advisories, its age and its registry hash, built in a staging
   directory and swapped in only when every step passed. Agents start
-  `node <bin>` or `uv run --project <tree> --locked`. An advisory is exit 1;
+  `node <bin>` or `uv run --project <tree> --locked`. An advisory without a fast-lane fix is exit 1;
   anything unchecked or too young is exit 2 and the installed tree stays.
+  Locked trees never update themselves: run `mcp-audit` regularly.
 - Scan receipts bind an install to the scanned archive: `scan_url.py` records
   each SAFE or BLOCK verdict with the archive hash (npm tarball and its
   integrity, the pure PyPI wheel, the GitHub ZIP), and the locked installers
@@ -21,11 +22,25 @@
   for exactly that version. PyPI scans now check the pure wheel that
   `uv sync` installs instead of the sdist when the release has exactly one;
   npm tarballs are verified against their registry integrity.
-- `mcp-git` additionally requires the commit to be at least 7 days on the
+- `mcp-git` additionally requires the commit to meet the age policy on the
   default branch and pins and checks the build tools from `[build-system]`.
-- Locked MCP installers accept `--min-age-days` for the waiting period and
-  accept the reserved `--trusted-days` and `--no-fast-lane` settings. `--json`
-  reports the result and identifies missing npm or PyPI scan receipts.
+- Locked MCP installers accept `--min-age-days` for the normal waiting period
+  and `--trusted-days` for the top package of a same-repository npm update
+  with verified provenance. The default waits are 7 and 2 days. Git applies
+  only the normal wait and reports that the trusted period and fast-lane
+  switch have no effect.
+- npm and PyPI can rebuild with pinned fast-lane fixes for critical, high
+  or CISA KEV advisories. Each fix needs a SAFE scan receipt, provenance
+  continuity or explicit approval when provenance is missing, and a
+  fully checked rebuilt lockfile. npm needs 11.17 or later for the fast
+  lane. Use `--no-fast-lane` to disable rebuilds. `--json` reports missing
+  npm or PyPI receipts in `needs_scan`.
+- `check_lock.py` judges npm lockfiles, uv lockfiles and hashed requirements.
+  It can also check advisories for one exact npm or PyPI version without
+  checking age.
+- `install_skill.py mcp-audit` checks installed lockfiles for advisories
+  without age or receipt checks. It reports every advisory as a finding and
+  leaves the trees untouched.
 - `install_skill.py mcp` refuses ad-hoc launchers (`npx`, `uvx`, `bunx`,
   `pipx run`, `uv tool run`, `uv run --with`, `pnpm dlx`, `yarn dlx`, …) with
   exit 2; `scan_url.py` offers only the locked installers.

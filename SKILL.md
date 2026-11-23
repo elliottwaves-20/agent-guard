@@ -211,7 +211,8 @@ print the safe install command instead of modifying configs.
 MCP install prompts always offer the locked installers for exactly the
 scanned version (`mcp-npm`, `mcp-pypi`, `mcp-git`; remote HTTP/SSE MCPs as
 URL-only config) and never `npx` or `uvx`. Every package scan writes a receipt
-for its SAFE or BLOCK verdict; the locked installers run only with one.
+for its SAFE or BLOCK verdict. The locked installers require a receipt for the
+requested version and a separate SAFE receipt for each fast-lane fix.
 
 Without any usable SkillSpector provider, skill/static scans run static-only
 (patterns, taint, YARA, OSV.dev still run), but the verdict is exit 2 (no
@@ -605,11 +606,10 @@ commit** → checkout the new SHA.
 
 Local MCP servers get their own directory under `[mcp] install_dir` with an
 exact pin and a lockfile. The installer needs the scan receipt of exactly this
-version, resolves the lockfile without scripts or builds and without packages
-younger than the configured age (7 days by default), checks every entry (OSV,
-GitHub advisories, age, registry hash, top-level = the scanned archive),
-builds the tree in a staging directory
-and only then swaps it in. Any failure leaves the installed tree as it was
+version, resolves the lockfile without scripts or builds under the applicable
+age policy, checks every entry (OSV, GitHub advisories, age, registry hash,
+top-level = the scanned archive), builds the tree in a staging directory and
+only then swaps it in. Any failure leaves the installed tree as it was
 (exit 1 finding, exit 2 no verdict or wait).
 
 ```bash
@@ -631,21 +631,54 @@ python "$INSTALLER" mcp-git \
 ```
 
 Options: `--name`, `--bin`/`--executable`/`--module`, `--override NAME=VERSION`
-with `--override-reason` (npm), `--secret NAME` (key name only, never a value),
+with `--override-reason` (npm and PyPI), `--secret NAME` (key name only),
 `--accept "<reason>"` for a reviewed BLOCK of exactly this version, `--tools`,
 `--dry-run`. With `[mcp] register = [...]` in the config the installer writes
 no agent config but hands `agent-guard-register.json` to that command; a
 failed handoff is repeated with `python "$INSTALLER" mcp-register <tree>`.
 `--min-age-days N` sets the wait for registry packages and, for Git, the
-commit and build tools. The default is 7. `--trusted-days N` (default 2) and
-`--no-fast-lane` are reserved policy settings. Git reports that they have no
-effect. The ages must be integers with `0 <= trusted_days <= min_age_days`.
+commit and build tools. The default is 7. `--trusted-days N` (default 2)
+applies only to the top package of an npm update with same-repository SLSA
+provenance, on npm 11.17 or later. The fast lane is enabled by default for npm
+and PyPI; use `--no-fast-lane` to disable security fix rebuilds. Git accepts
+both flags and reports that they have no effect. Policy flags go on the
+command line. The ages must be integers with
+`0 <= trusted_days <= min_age_days` (invalid values give exit 2).
 With `--json`, stdout carries one result object and progress goes to stderr.
-For a missing npm or PyPI scan receipt, exit 2 includes the required package
-and version in `needs_scan`.
 
-Packages younger than the required age give exit 2 with the date to retry.
-Wait until that date. `mcp` refuses `npx`, `uvx`, `bunx`, `pipx run`, `uv tool run`,
+The fast lane can rebuild around critical or high GitHub-rated advisories
+(including that rating in OSV) or CVEs in CISA KEV. It selects the largest of
+the smallest applicable fixes, within the same major version. The fix must
+be a final release, have no advisory and have matching repository provenance.
+PyPI needs a single pure wheel, with provenance as reported by PyPI. npm
+checks signatures and attestations with `npm audit signatures`. The npm
+fast lane requires 11.17 or later; 11.10–11.16 report an otherwise eligible
+fix as a finding. Never pass `--override` without the user's explicit reason.
+An exact-version override can address missing provenance when all other
+checks pass. A changed repository or a failed lookup blocks that path.
+
+On exit 2 with `needs_scan` (items have `kind`, `package`, `version`), use the
+printed `scan_url.py` commands for the exact versions. For a fast-lane fix,
+require SAFE before retrying the same install. The installer pins the fixes,
+resolves again, and checks the whole tree and the receipt hashes before
+finishing. For an age-only wait, retry on the reported date. Failed advisory
+or KEV lookups prevent a fast-lane rebuild. A confirmed finding with no
+fast-lane fix takes precedence over incomplete lookups.
+
+Run `python "$INSTALLER" mcp-audit --json` for periodic advisory checks on
+installed local MCP trees. It checks lockfiles without age or receipt checks
+and never installs. Exit 0 means clean, 1 means a finding even if a fix is
+available, and 2 means incomplete without a finding. Git audits cover only
+registry entries in the lockfile. Locked trees never update themselves, so
+suggest running `mcp-audit` regularly; on a finding, install the fixed
+version with the locked installer. To check a candidate file, use
+`python "$SKILL_DIR/scripts/check_lock.py" FILE` for `package-lock.json`,
+`uv.lock` (with `--root-name`), or hashed requirements. Use
+`--package <ecosystem>:<name>@<version>` for one exact npm or PyPI version
+without an age check. In that mode any lookup failure takes precedence,
+giving exit 2 even when findings are present.
+
+`mcp` refuses `npx`, `uvx`, `bunx`, `pipx run`, `uv tool run`,
 `uv run --with`, `pnpm dlx`, `yarn dlx` as launch commands (exit 2).
 
 For remote HTTP/SSE MCPs, no local dependency installation is needed:
@@ -684,10 +717,14 @@ Keep `install_dir` out of synced folders (OneDrive paths are refused).
 
 **Never:** `pip install` for MCP dependencies, global node modules, or `npx` /
 `uvx` / `bunx` / `pipx run` / `uv tool run` / `uv run --with` / `dlx` in an
-agent config. Limits: transitive packages and build tools get the lockfile
-check (advisories, age, hash), not a code scan; PyPI packages with only
-platform wheels and Git packages with dynamic metadata cannot be installed
-this way (no verdict).
+agent config. Transitive packages and build tools generally get lockfile
+checks (advisories, age, hash). Fast-lane fixes also get individual SAFE
+scans. Matching provenance does not protect against a compromised source
+repo or CI; advisories can lag. A CVSS-only OSV advisory needs a KEV match to trigger
+the fast lane. PyPI attestations can be missing and are checked against
+PyPI's report without independent signature verification. PyPI packages
+with only platform wheels and Git packages with dynamic metadata cannot be
+installed this way (no verdict).
 
 ## Analyzer behavior (scan_skill.py / SkillSpector)
 

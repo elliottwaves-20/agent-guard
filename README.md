@@ -187,6 +187,9 @@ python scripts/install_skill.py skill .
 
 ### Configuration: prefer environment variables
 
+For local MCP installs, see [locked MCP settings](#locked-mcp-settings) for
+the install directory, registration command and age policy flags.
+
 No configuration file is required. Keys always belong in the environment; model
 and provider choices can alternatively live in the personal config file
 described below. Set the variables on the process that
@@ -457,7 +460,18 @@ wiring agent-guard into scripts or CI:
 - **Nothing was scanned.** `audit_installed.py` without `--execute` (NOT EXECUTED, for every listed scan), unreadable configs (also an `mcpServers` that is not an object) and entries whose source cannot be inferred: a `uvx`/`npx` entry with `--with`, an index, registry or find-links option, several different `npx -p` packages, an option the tool does not know, or an index or registry variable in `env`. With no skill or MCP server found there is nothing to scan and the exit code is 0. In `scan_url.py`: a repo with neither a skill nor a package manifest (unsupported repo layout), a skill collection with non-documentation files outside the skill folders (prompt and instruction files such as `CLAUDE.md`, `AGENT.md`, `.cursorrules`, `*.prompt.md`, `*.instructions.md` or `.md` files in folders named `commands`, `agents`, `prompts`, `rules`, `instructions`, `chatmodes`, `hooks` or `workflows`, any dot folder except `.git` and the templates in `.github`, `.github/workflows`, extensionless `LICENSE`/`CHANGELOG` files that start with `#!`, and `marketplace.json`/`plugin.json` with anything but metadata keys or with a plugin or skill path that is not a `./` path without `..`, are not documentation), and marketplace candidates left out by `--max-candidates` or by `--no-scan-candidates`.
 - **Incomplete hash lookup.** A missing, malformed or inconsistent hash-lookup summary, an unseen hash, a suspicious-only file, a file skipped by the file limit, or a directory in which agent-guard finds more checkable files than Cisco looked at (Cisco silently skips files under dot directories and `__pycache__`, symlinks and files whose type it cannot tell; agent-guard counts them itself, runs the type detection again for every file Cisco skipped, counts a file whose detection fails or that cannot be read, never follows symlinks, and gives exit 2 instead of SAFE; a directory summary without agent-guard's own count is never SAFE).
 - **Stale scanner rules.** GuardDog and malcontent images are pinned by digest (`scripts/_pins.py`), so a hijacked or changed upstream image never runs unreviewed. Their rules live inside the image (no live signature feed), so new rules only arrive with a new release: `python scripts/check_image_pins.py` reports newer releases and from when the 7-day wait allows them; bump by hand, then run the offline suite. If the pinned digest cannot be pulled (offline, removed upstream) there is no verdict, never SAFE. Chainguard's free registry only serves a daily rebuilt `malcontent:latest`, so that pin is one dated build of it; should Chainguard ever delete old builds, every `--deep` scan ends in no verdict until the pin is renewed with `--malcontent-candidate`. A native `guarddog` on PATH (Linux/macOS) is your own install and is not pinned.
-- **Locked MCP install not possible yet.** `install_skill.py mcp-npm|mcp-pypi|mcp-git` gives exit 2 and leaves an installed tree untouched when the age settings are invalid, when there is no scan receipt for exactly this version (or it does not match), when a package in the lockfile or the Git commit is younger than the configured minimum age (7 days by default) (the message says from when it may be installed; wait and run it again), when a lockfile entry cannot be checked (other registry, Git, path or URL entries, unknown lockfile version, advisory or registry lookup failed), when the lockfile does not resolve the scanned archive (npm tarball integrity; PyPI: the top-level package must lock exactly one pure wheel, `*-none-any.whl`, the file the scan checked), when npm is older than 11.10 or Python older than 3.11, when the server's files are in use (close the apps that run it), and with `[mcp] register` when the register command fails ("installed but not registered", retry with `install_skill.py mcp-register <tree>`). Exit 1: an advisory or a hash mismatch in the lockfile, or a BLOCK receipt without `--accept "<reason>"`. `install_skill.py mcp` refuses launchers that resolve their packages at every start (`npx`, `bunx`, `pnpx`, `uvx`, `pipx run`, `uv tool run`, `uv run --with`, `npm exec`, `pnpm dlx`, `yarn dlx`) with exit 2.
+- **Locked MCP install not possible yet.** `install_skill.py mcp-npm|mcp-pypi|mcp-git` gives exit 2 and leaves an installed tree untouched when the age settings are invalid, when there is no scan receipt for exactly this version or for a fast-lane fix (or it does not match; `--json` lists the scans to run in `needs_scan`), when a package in the lockfile or the Git commit is younger than the configured minimum age (7 days by default) (the message says from when it may be installed; wait and run it again), when a lockfile entry cannot be checked (other registry, Git, path or URL entries, unknown lockfile version, advisory, KEV or registry lookup failed), when the lockfile does not resolve the scanned archive (npm tarball integrity; PyPI: the top-level package must lock exactly one pure wheel, `*-none-any.whl`, the file the scan checked), when npm is older than 11.10 or Python older than 3.11, and when the server's files are in use (close the apps that run it). Exit 1: an advisory with no fast-lane fix (with npm 11.10–11.16 also one with an otherwise eligible fix), a hash mismatch in the lockfile, or a BLOCK receipt without `--accept "<reason>"`. A confirmed finding takes precedence over incomplete lookups.
+  In `check_lock.py` file mode, a fix recommendation for an affected entry
+  still present in the file also gives exit 1. In `check_lock.py --package`,
+  any lookup failure gives exit 2, even alongside findings.
+- **Installed MCP audit.** `mcp-audit` gives exit 0 for a complete check with
+  no findings (including no installed trees), 1 for findings, and 2 for an
+  incomplete check without findings. Findings take precedence over lookup
+  failures.
+- **Locked MCP handoff.** After a successful tree replacement, a failing
+  `[mcp] register` command gives exit 2 ("installed but not registered").
+  Retry with `install_skill.py mcp-register <tree>`. The unlocked `mcp`
+  command gives exit 2 for launchers that resolve packages at every start.
 
 The wrapper writes SkillSpector JSON to a temporary report, so Windows console encoding issues, provider resolution, and SkillSpector's execution/coverage ledger are handled automatically.
 
@@ -716,12 +730,12 @@ status (`unchanged`, `updated`, `installed`, `blocked`, `paused`, `rejected`,
 `failed`, `no-verdict`, `cooldown`, `own-version`) for a scheduler or notifier
 to act on.
 
-**Local MCP servers: a locked tree per server — only after `scan_url.py` returned SAFE.**
+**Local MCP servers: a locked tree per server with a scan receipt.**
 `npx -y pkg@1.2.3` or `uvx pkg==1.2.3` pin only the top package; everything
 below it is resolved again at every start, never checked, and a known
 vulnerable dependency goes unnoticed. The locked installers instead give each
 server its own directory under `[mcp] install_dir` with an exact pin and a
-lockfile, and change nothing unless every step passes:
+lockfile:
 
 1. **Scan receipt.** `scan_url.py` writes a receipt for each SAFE or BLOCK
    verdict (`<install_dir>/.receipts/`): the exact archive it scanned (npm
@@ -734,11 +748,13 @@ lockfile, and change nothing unless every step passes:
    registry only.
 3. **Lockfile check.** Every entry against OSV and GitHub advisories (reviewed
    and malware), its age (7 days by default) and its registry hash; the top-level entry
-   must be the scanned archive. An advisory is exit 1, anything unchecked or
-   too young is exit 2.
-4. **Build and swap.** `npm ci --ignore-scripts` or `uv sync --locked
-   --no-build` builds the tree in a hidden staging directory, which then
-   replaces the old one; a failure puts the old tree back.
+   must be the scanned archive. Advisories in npm and PyPI locks can trigger
+   the [security fix fast lane](#security-fix-fast-lane).
+4. **Build and swap.** The checked tree is staged in a hidden directory.
+   npm runs `npm ci --ignore-scripts` there before replacing the old tree.
+   PyPI runs `uv sync --locked --no-build` at the final path and rolls back
+   a failed sync. If the new tree cannot be removed during rollback, the
+   installer reports where it kept the previous tree.
 
 ```bash
 # npm: agents start node with the package bin from the tree
@@ -758,20 +774,12 @@ python scripts/install_skill.py mcp-git \
 
 Options: `--name` (default: npm package without scope, normalized PyPI name),
 `--bin` / `--executable` when a package declares several, `--override
-NAME=VERSION` with `--override-reason TEXT` to pin a dependency in an npm tree
+NAME=VERSION` with `--override-reason TEXT` to pin a dependency in an npm or PyPI tree
 (for example a fixed version of a vulnerable SDK; the override must resolve
 exactly), `--secret NAME` for the name of a key the server needs (never a
 value: agent-guard prints the names and you start the server through your
-secret manager), `--tools` and `--dry-run`. Installing the same version again
-gives the same tree. Leftovers of an aborted run (`.<name>.staging-*`,
+secret manager), `--tools` and `--dry-run`. Leftovers of an aborted run (`.<name>.staging-*`,
 `.<name>.old-*`) are reported, never used and never deleted.
-
-All three locked installers accept `--min-age-days N` (default 7) for the
-resolution and lockfile checks. For Git this also covers the commit on the
-default branch and the build tools. `--trusted-days N` (default 2) and
-`--no-fast-lane` set policy values reserved for future installer behavior.
-Git reports that those two options have no effect. Ages must be integers with
-`0 <= trusted_days <= min_age_days`; invalid settings give exit 2.
 
 Use `--json` for one result object on stdout with `code`, `message`,
 `needs_scan`, `fast_lane` and `tier`. Progress output goes to stderr. A
@@ -786,7 +794,9 @@ consumes *everything* after it (including `--env` and `--dry-run`), so the
 installer rejects installer options placed after `--args` instead of silently
 misconfiguring the server.
 
-**Locked MCP settings (`[mcp]`, optional)** in the
+#### Locked MCP settings
+
+The optional `[mcp]` table goes in the
 [personal config file](#configuration-prefer-environment-variables):
 
 ```toml
@@ -808,7 +818,129 @@ to every agent. A failing or timed-out register command gives exit 2
 "installed but not registered"; `python scripts/install_skill.py mcp-register
 <tree>` repeats the handoff. Unknown keys in `[mcp]` stop the installer (exit 2).
 
-**Remote HTTP/SSE MCP (no local dependencies):**
+Set the age and fast-lane policy with command-line flags.
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--min-age-days N` | 7 | Normal minimum age for registry entries. For Git it also applies to the commit on the default branch and the pinned build tools. |
+| `--trusted-days N` | 2 | Shorter waiting period for the top package of an npm update when both versions have SLSA provenance from the same repository. Requires npm 11.17 or later and a previous managed lockfile that matches its recorded hash. Fresh installs, PyPI, and Git use the normal period. |
+| `--no-fast-lane` | Fast lane enabled | Disable security fix rebuilds for npm and PyPI. Advisories still produce findings or an incomplete verdict if the required checks fail. |
+
+If npm cannot establish continuity for the trusted period, it uses the
+normal waiting period. A build using the trusted period must pass npm's
+signature audit with verified provenance for the top package.
+
+The two ages must be integers with `0 <= trusted_days <= min_age_days`.
+Invalid values give exit 2, including on commands where the trusted period
+has no effect. `mcp-git` accepts `--trusted-days` and `--no-fast-lane` and
+prints a note that they have no effect for Git sources. The policy values
+are CLI options. The `[mcp]` table accepts `install_dir`, `register` and
+`register_timeout` (300 seconds by default).
+
+#### Security fix fast lane
+
+1. The installer first resolves a candidate lockfile with the normal waiting
+   period, including the top-package trusted period on eligible npm updates.
+   An active advisory on a locked entry can trigger the fast lane if it is
+   rated critical or high by GitHub (including that rating in OSV), or has
+   a CVE in CISA's Known Exploited Vulnerabilities (KEV) catalog. Malware
+   findings block installation.
+2. For each triggering advisory, take the smallest applicable fixed version
+   above the affected version, then take the largest of those fixes. It must
+   stay on the same major version, be a final release, and have no known
+   advisory of any severity. If a package occurs at several versions, a
+   single pin must fix all of them. A PyPI fix must publish exactly one pure
+   wheel (`*-none-any.whl`). The rebuilt lock must list exactly one wheel
+   for the fix, and it must be the scanned pure wheel.
+3. Check provenance on the affected version and the fix. npm uses SLSA
+   attestations. For PyPI, agent-guard uses the attestations and publisher
+   identity PyPI reports for the relevant files. The source repository must
+   match. If evidence is missing, the user can approve the exact fix with
+   `--override NAME=VERSION --override-reason TEXT`. A repository change,
+   a failed provenance lookup, or any other failed requirement cannot be
+   overridden this way.
+4. Each fix needs its own SAFE scan receipt. If an otherwise eligible fix
+   has no receipt, the installer exits 2 and prints the exact command for
+   its package and version, such as the examples below. With `--json`,
+   `needs_scan` is a list of objects with `kind`, `package` and `version`.
+   Run the requested scans and rerun the installer with the same arguments
+   once they return SAFE.
+
+   ```bash
+   python scripts/scan_url.py npm:example-dependency@1.2.4
+   python scripts/scan_url.py pypi:example-dependency==1.2.4
+   ```
+
+5. The installer pins dependency fixes with npm `overrides` or uv
+   `override-dependencies`. A fix for the top package changes its exact
+   pin. npm uses `--min-release-age-exclude` and uv uses
+   `exclude-newer-package` to exempt the fixes from the normal age rule.
+   The installer resolves the tree again and checks every entry, including
+   any new dependencies. It binds the selected fix artifacts to their SAFE
+   receipts by integrity or SHA-256 and verifies that installation leaves
+   the lockfile unchanged. npm runs
+   `npm audit signatures --include-attestations` and requires verified
+   provenance for fixes that qualified through provenance. Failed lockfile
+   checks leave the previous tree in place. Successful fixes are reported
+   on stderr and recorded in the tree metadata.
+
+npm 11.17 or later is required for the npm fast lane. With npm 11.10 through
+11.16 an otherwise eligible fix is reported as a finding (exit 1) and the
+installer does not rebuild. npm versions older than 11.10 cannot perform a
+locked install (exit 2).
+
+#### Check a lockfile or audit installed trees
+
+`check_lock.py` checks a candidate `package-lock.json`, `uv.lock` or
+requirements file with exact pins and SHA-256 hashes. Supply `--root-name`
+for a `uv.lock` (the virtual project's package name). Use `--previous FILE`
+to evaluate age exceptions for young entries against a previous lockfile
+of the same format. For npm's top-package trusted period also supply
+`--top NAME`. `--receipts DIR` selects the install root containing
+`.receipts`, defaulting to the configured install root. The checker never
+rebuilds the file. A recommendation to fix an entry still present in the
+file leaves it blocked. For hashed requirements, each hash must match a
+PyPI artifact, and an entry with only source archives is a finding.
+
+`--package <ecosystem>:<name>@<version>` checks OSV and GitHub reviewed and
+malware advisories for one exact npm or PyPI version without an age check.
+With `--json`, file mode returns `code`, `lines`, `advisories`, `decisions`,
+`needs_scan` and `young`. Package mode returns `code`, `lines` and
+`findings`, with `kind` set to `security` or `malware` for each finding.
+
+```bash
+python scripts/check_lock.py package-lock.json --json
+python scripts/check_lock.py uv.lock --root-name example-project
+python scripts/check_lock.py requirements.txt
+python scripts/check_lock.py --package pypi:example-dependency@1.2.4 --json
+python scripts/install_skill.py mcp-audit --json
+```
+
+`install_skill.py mcp-audit [--json]` checks the installed lockfiles directly
+under `[mcp] install_dir` against current advisories. It checks the lockfile
+hash against the tree metadata. It skips age and registry hash checks and
+does not inspect the installed package files or use scan receipts. For Git
+trees it checks registry entries in the lockfile, since the commit itself
+has no advisory source. A Git tree without registry entries gives no
+verdict. The audit never installs or changes a tree. Any advisory
+in an installed tree is a finding, even when a fast-lane fix is available.
+`--no-fast-lane` disables fix recommendations. The age flags are validated
+but do not apply an age check. JSON includes `code`,
+`trees`, `leftovers` and an `error` when there is a run-level error. Each
+tree includes its status (`clean`, `finding` or `no_verdict`), scope,
+findings and any error. A finding can carry a fast-lane decision. Missing
+or invalid metadata, a lockfile hash mismatch, or links in the audited
+paths can prevent a verdict. Hidden staging and backup directories are
+listed as leftovers when found and excluded from the advisory check.
+
+Locked trees never update themselves: a server keeps running exactly the
+installed lockfile, also after an advisory for one of its packages appears.
+Run `mcp-audit` regularly (for example from a scheduled task) and install
+the fixed version with the locked installer when it reports a finding.
+
+#### Remote HTTP/SSE MCP
+
+Remote servers have no local dependencies.
 
 ```bash
 python scripts/install_skill.py mcp-remote \
@@ -816,7 +948,8 @@ python scripts/install_skill.py mcp-remote \
   --url "https://example.com/mcp"
 ```
 
-**Dry run first** to preview every change:
+**Dry run first** to preview the install. A locked install dry run does not
+resolve or check a new tree:
 
 ```bash
 python scripts/install_skill.py mcp-npm --package foo --version 1.2.3 --dry-run
@@ -1034,9 +1167,9 @@ locked tree:
 Keep `install_dir` out of synced folders (OneDrive, Dropbox); OneDrive paths
 are refused.
 
-Limits: transitive packages and build tools get the lockfile check
-(advisories, age, registry hash), not a SkillSpector or GuardDog scan of
-their code; the dynamic install analysis of the top package installs and
+Limits: transitive packages and build tools generally get the lockfile check
+(advisories, age, registry hash). Each fast-lane fix also needs an individual
+SAFE scan. The dynamic install analysis of the top package installs and
 watches the whole tree. A build backend can request further build tools at
 build time (only Git sources build anything); those are limited by
 `exclude-newer`, not by the lockfile check. Git packages with dynamic metadata
@@ -1047,6 +1180,23 @@ re-syncs from the checked lockfile if someone changed the environment; uv's
 own user-level checks also run at every start. GitHub advisory lookups without
 `GITHUB_TOKEN`/`GH_TOKEN` are limited to 60 per hour, so a large tree can end
 in no verdict.
+
+The fast lane has these additional limits.
+
+- A compromised source repository or CI can publish a malicious fix with
+  matching provenance. It could skip the waiting period if the scan and
+  advisory checks miss it.
+- Many PyPI packages lack attestations. The fix waits for explicit user
+  approval of an exact-version override and still needs a SAFE receipt.
+- Advisory databases can lag. An OSV advisory without a GitHub severity
+  can trigger the fast lane only if a matching CVE is in KEV. A CVSS vector
+  alone is insufficient.
+- For PyPI, agent-guard checks the publisher and artifact identity reported
+  by PyPI. It does not independently verify the attestation signature.
+  For npm fast-lane rebuilds, npm performs cryptographic verification with
+  `npm audit signatures`.
+- An unavailable advisory API or KEV feed leaves an attempted check incomplete
+  and prevents a fast-lane rebuild in that run.
 
 ## Severity guide
 
