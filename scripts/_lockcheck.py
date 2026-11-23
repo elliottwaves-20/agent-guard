@@ -55,6 +55,7 @@ GITHUB_ECOSYSTEM = {"npm": "npm", "PyPI": "pip"}
 WORKERS = 8
 _PIN_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
 _PIN_VERSION = re.compile(r"[0-9][0-9A-Za-z.+!-]*")
+_REQUIREMENTS_COMMENT = re.compile(r"(?:^|\s+)#.*$")
 _GITHUB_COMPARISON = re.compile(r"(>=|<=|>|<|=)\s*(\S+)")
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}")
 _SEVERITIES = {"low", "moderate", "high", "critical"}
@@ -240,6 +241,47 @@ def pinned_entries(text: str) -> list[Entry]:
         entries.append(Entry("PyPI", name.strip(), version.strip(), all_files=True))
     if not entries:
         raise NoVerdict("the build requirements resolved to nothing")
+    return entries
+
+
+def hashed_requirements(text: str, *, require_hashes: bool = True) -> list[Entry]:
+    """Read exact PyPI pins with SHA-256 hashes, optionally accepting old unhashed pins."""
+    entries = []
+    continued = []
+    for raw in text.splitlines():
+        line = _REQUIREMENTS_COMMENT.sub("", raw).rstrip()
+        if not line:
+            if continued:
+                raise NoVerdict("requirements continuation is interrupted by a blank or comment line")
+            continue
+        if line.endswith("\\"):
+            if line != raw or not line[:-1].strip():
+                raise NoVerdict("invalid requirements continuation")
+            continued.append(line[:-1])
+            continue
+        continued.append(line)
+        pin, *options = "".join(continued).split()
+        continued.clear()
+        name, separator, version = pin.partition("==")
+        if not separator or not _PIN_NAME.fullmatch(name):
+            raise NoVerdict(f"requirement is not an exact PyPI pin: {pin!r}")
+        try:
+            _versions.key("PyPI", version)
+        except ValueError as exc:
+            raise NoVerdict(f"requirement is not an exact PyPI pin: {pin!r}") from exc
+        hashes = []
+        for option in options:
+            prefix, separator, digest = option.partition(":")
+            if prefix != "--hash=sha256" or not separator or not _SHA256.fullmatch(digest):
+                raise NoVerdict(f"invalid hash option for {pin}: {option!r}")
+            hashes.append(digest.lower())
+        if require_hashes and not hashes:
+            raise NoVerdict(f"requirement has no SHA-256 hash: {pin}")
+        entries.append(Entry("PyPI", name, version, hashes=tuple(hashes)))
+    if continued:
+        raise NoVerdict("requirements file ends in an incomplete continuation")
+    if not entries:
+        raise NoVerdict("the requirements file lists no packages")
     return entries
 
 
@@ -697,7 +739,7 @@ def _sha256(value):
     return value.lower()
 
 
-def _age_pypi(entry, fetch, now, limit, result):
+def _age_pypi(entry, fetch, now, limit, result, require_wheel):
     name = urllib.parse.quote(entry.name)
     body, _ = fetch(f"{PYPI_JSON_URL}{name}/{urllib.parse.quote(entry.version)}/json")
     known = {}
@@ -727,6 +769,12 @@ def _age_pypi(entry, fetch, now, limit, result):
             for digest, original in locked_hashes.items():
                 if digest not in found_hashes:
                     result.findings.append(f"{entry.label}: {original} hash differs from PyPI")
+            if require_wheel and found_hashes == set(locked_hashes) and not any(
+                filename.endswith(".whl") and known[filename].get("packagetype", "bdist_wheel")
+                == "bdist_wheel" for filename, _ in wanted
+            ):
+                result.findings.append(f"{entry.label}: locked hashes match no wheel; "
+                                       "installation with --no-build is impossible")
     elif entry.all_files:
         if not known:
             raise LookupFailed(f"{entry.label}: PyPI lists no files for this version")
@@ -758,7 +806,7 @@ def _validate_age_limit(value):
         raise LookupFailed("age limit must be a nonnegative integer")
 
 
-def _ages(entries, fetch, now, min_age_days, age_limits):
+def _ages(entries, fetch, now, min_age_days, age_limits, require_wheel):
     def one(entry):
         result = _AgeCheck()
         try:
@@ -767,7 +815,7 @@ def _ages(entries, fetch, now, min_age_days, age_limits):
             if entry.ecosystem == "npm":
                 _age_npm(entry, fetch, now, limit, result)
             elif entry.ecosystem == "PyPI":
-                _age_pypi(entry, fetch, now, limit, result)
+                _age_pypi(entry, fetch, now, limit, result, require_wheel)
         except _BAD_AGE as exc:
             result.failures.append(str(exc))
         result.failures = [f"age of {entry.label}: {f}" for f in result.failures]
@@ -779,11 +827,12 @@ def _ages(entries, fetch, now, min_age_days, age_limits):
 
 def check(entries: list[Entry], *, now: dt.datetime | None = None, fetch=http_fetch,
           min_age_days: int = MIN_AGE_DAYS, age_limits: Mapping[tuple, int] | None = None,
-          ages: bool = True) -> Result:
+          ages: bool = True, require_wheel: bool = False) -> Result:
     """Run every check over *entries*; 0 clean, 1 finding, 2 no verdict.
 
     Check age and registry hashes unless ages=False. A young entry gives no
-    verdict and the day on which it becomes eligible (#48, K10)."""
+    verdict and the day on which it becomes eligible (#48, K10). With
+    require_wheel=True, every hashed requirement must lock a registry wheel."""
     if not entries:
         return Result(2, ["NO VERDICT -- the lockfile lists no packages"])
     findings, advisories, failures = _advisory_checks(entries, fetch)
@@ -798,7 +847,7 @@ def check(entries: list[Entry], *, now: dt.datetime | None = None, fetch=http_fe
             notes.append(str(exc))
         else:
             for age in _ages(entries, fetch, now or dt.datetime.now(dt.timezone.utc),
-                             min_age_days, limits):
+                             min_age_days, limits, require_wheel):
                 findings.extend(age.findings)
                 blocking.extend(age.findings)
                 failures.extend(age.failures)

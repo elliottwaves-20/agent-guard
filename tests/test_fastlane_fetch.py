@@ -2,12 +2,15 @@
 
 import base64
 import copy
+import datetime as dt
 import importlib
 import json
 import sys
 import unittest
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+
+from tests.test_lockcheck import FakeNet, github_advisory
 
 TEST_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TEST_DIR.parent / "scripts"))
@@ -29,6 +32,8 @@ SLSA = "https://slsa.dev/provenance/v1"
 PYPI_WHEEL = ("sigstore-4.5.1-py3-none-any.whl",
               "02e000197b34980f1d382741d6f83c2fecbcef7debf7304f36a5253f3c892cd9")
 PYPI_SDIST = ("sigstore-4.5.1.tar.gz", "e" * 64)
+PYPI_OLD = "4.5.0"
+PYPI_OLD_WHEEL = ("sigstore-4.5.0-py3-none-any.whl", "a" * 64)
 PYPI_METADATA = "https://pypi.org/pypi/sigstore/4.5.1/json"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 OSV_BATCH = "https://api.osv.dev/v1/querybatch"
@@ -212,6 +217,61 @@ class FastLaneFetchTests(unittest.TestCase):
         mismatched_files = (PYPI_WHEEL, (PYPI_SDIST[0], "a" * 64))
         with self.assertRaises(lockcheck.LookupFailed):
             fastlane.pypi_provenance("sigstore", "4.5.1", mismatched_files, fetch)
+
+    def pypi_fix_fetch(self):
+        published = "2026-01-01T00:00:00Z"
+        old_metadata = pypi_files(PYPI_OLD_WHEEL)["urls"]
+        old_metadata[0]["upload_time_iso_8601"] = published
+        advisory = github_advisory(name="sigstore", version_range=">= 4.5.0, < 4.5.1",
+                                   fixed="4.5.1", ecosystem="pip")
+        lock_fetch = FakeNet(
+            pypi_files={
+                ("sigstore", PYPI_OLD): old_metadata,
+                ("sigstore", "4.5.1"): pypi_files(PYPI_WHEEL)["urls"],
+            },
+            ghsa={("reviewed", f"sigstore@{PYPI_OLD}"): [advisory]},
+        )
+        old_attestation = fixture("pypi-provenance-200")
+        replace_subject(pypi_envelope(old_attestation), "statement", {
+            "name": PYPI_OLD_WHEEL[0], "digest": {"sha256": PYPI_OLD_WHEEL[1]},
+        })
+        attestations = FakeFetch({
+            KEV_URL: {"vulnerabilities": []},
+            pypi_attestation(PYPI_OLD_WHEEL[0], PYPI_OLD): old_attestation,
+            pypi_attestation(PYPI_WHEEL[0]): fixture("pypi-provenance-200"),
+        })
+
+        def fetch(url, payload=None):
+            if url in attestations.responses:
+                return attestations(url, payload)
+            return lock_fetch(url, payload)
+
+        return fetch
+
+    def test_unknown_installed_pypi_hash_gives_no_verdict(self):
+        entry = lockcheck.Entry("PyPI", "sigstore", PYPI_OLD,
+                                hashes=(PYPI_OLD_WHEEL[1], "f" * 64))
+        fetch = self.pypi_fix_fetch()
+        advisories, failures = lockcheck.advisories_for([entry], fetch)
+        self.assertEqual(failures, [])
+        case = fastlane.gather(entry, advisories, kev=frozenset(), policy=fastlane.Policy(),
+                               override="4.5.1", fetch=fetch)
+        self.assertEqual(case["input"]["installed_provenance"], "failed")
+        self.assertEqual(fastlane.decide(case)["action"], "no_verdict")
+
+    def test_judge_tree_needs_exact_installed_pypi_version_for_provenance(self):
+        entry = lockcheck.Entry("PyPI", "sigstore", PYPI_OLD, files=(PYPI_OLD_WHEEL,))
+        previous = lockcheck.Entry("PyPI", "sigstore", "4.5.1", hashes=(PYPI_WHEEL[1],))
+        verdict = fastlane.judge_tree(
+            [entry], {}, receipts_root=TEST_DIR, kind="pypi", user_overrides={},
+            policy=fastlane.Policy(), fetch=self.pypi_fix_fetch(),
+            now=dt.datetime(2026, 1, 10, tzinfo=dt.timezone.utc),
+            pypi_installed={lockcheck.entry_key(previous): previous},
+        )
+        self.assertEqual(verdict.code, 1)
+        self.assertEqual([(item["action"], item["reason"]) for item in verdict.decisions],
+                         [("report", "provenance_missing")])
+        self.assertEqual(verdict.fixes, {})
 
     def test_pypi_404_is_missing(self):
         fetch = self.pypi_fetch(missing("pypi.org", "pypi-provenance-404"))

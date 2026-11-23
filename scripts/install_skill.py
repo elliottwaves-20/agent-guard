@@ -62,6 +62,7 @@ import _fastlane
 import _mcp_locked
 import _skills_cli
 import _skillspector
+from _mcp_locked import age_arg, parse_overrides
 from _skillspector import run_skillspector
 from _user_config import ConfigError
 try:
@@ -725,18 +726,6 @@ def install_mcp(name: str, entry: dict, dry: bool, selected: list = None):
         print("     Restart affected apps to activate.")
 
 
-def _parse_overrides(pairs: list) -> dict:
-    overrides = {}
-    for pair in pairs or []:
-        dep, sep, version = pair.partition("=")
-        if not sep or not dep:
-            raise _mcp_locked.Refused(2, f"--override expects NAME=VERSION, got {pair!r}")
-        if dep in overrides:
-            raise _mcp_locked.Refused(2, f"--override names {dep} twice")
-        overrides[dep] = version
-    return overrides
-
-
 def _mcp_policy(args) -> _fastlane.Policy:
     return _fastlane.policy(getattr(args, "min_age_days", None),
                             getattr(args, "trusted_days", None),
@@ -755,7 +744,7 @@ def cmd_mcp_npm(args, *, config: dict, env, platform: str, run=None, which=shuti
     _mcp_npm.check_version(args.version)
     name = (_mcp_locked.check_name(args.name) if args.name
             else _mcp_locked.default_name("npm", args.package))
-    overrides = _parse_overrides(args.override)
+    overrides = parse_overrides(args.override)
     receipt, accepted = _mcp_receipts.require_receipt(
         settings.install_dir, "npm", args.package, args.version, args.accept)
     installed = _mcp_npm.npm_install(
@@ -784,7 +773,7 @@ def cmd_mcp_pypi(args, *, config: dict, env, platform: str, run=None, which=shut
     _mcp_uv.check_version(args.version)
     name = (_mcp_locked.check_name(args.name) if args.name
             else _mcp_locked.default_name("pypi", args.package))
-    overrides = _parse_overrides(getattr(args, "override", None))
+    overrides = parse_overrides(getattr(args, "override", None))
     receipt, accepted = _mcp_receipts.require_receipt(
         settings.install_dir, "pypi", args.package, args.version, args.accept)
     installed = _mcp_uv.pypi_install(
@@ -820,14 +809,6 @@ def cmd_mcp_register(args, *, config: dict, env, platform: str, register_run=Non
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-def _age_arg(value: str) -> int | str:
-    """Leave invalid values for policy validation and the installer result."""
-    try:
-        return int(value)
-    except ValueError:
-        return value
-
-
 _POLICY_HELP = {
     "npm": ("Age in days of the top package when the installed version came from the same "
             "source repository (default: 2; at most --min-age-days)",
@@ -841,9 +822,9 @@ _POLICY_HELP = {
 
 def _add_mcp_policy_options(parser, kind: str):
     trusted_help, fast_lane_help = _POLICY_HELP[kind]
-    parser.add_argument("--min-age-days", type=_age_arg, metavar="N",
+    parser.add_argument("--min-age-days", type=age_arg, metavar="N",
                         help="Minimum age in days (default: 7)")
-    parser.add_argument("--trusted-days", type=_age_arg, metavar="N", help=trusted_help)
+    parser.add_argument("--trusted-days", type=age_arg, metavar="N", help=trusted_help)
     parser.add_argument("--no-fast-lane", action="store_true", help=fast_lane_help)
     parser.add_argument("--json", action="store_true",
                         help="Print one JSON result on stdout and diagnostics on stderr")

@@ -147,6 +147,26 @@ def settings(config: dict, env: Mapping, platform: str) -> Settings:
 
 # ── Names and checks ─────────────────────────────────────────────────────────
 
+def parse_overrides(pairs: list) -> dict:
+    overrides = {}
+    for pair in pairs or []:
+        dep, sep, version = pair.partition("=")
+        if not sep or not dep:
+            raise Refused(2, f"--override expects NAME=VERSION, got {pair!r}")
+        if dep in overrides:
+            raise Refused(2, f"--override names {dep} twice")
+        overrides[dep] = version
+    return overrides
+
+
+def age_arg(value: str) -> int | str:
+    """Leave invalid values for policy validation and the command result."""
+    try:
+        return int(value)
+    except ValueError:
+        return value
+
+
 def normalize_pypi(name: str) -> str:
     """PEP 503 normalized project name."""
     return re.sub(r"[-_.]+", "-", name).lower()

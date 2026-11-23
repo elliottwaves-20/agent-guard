@@ -5,7 +5,7 @@ import base64
 import datetime as dt
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -477,6 +477,18 @@ def _provenance_or_failed(lookup, *args) -> str:
         return "failed"
 
 
+def _installed_pypi_provenance(entry: Entry, files: tuple, fetch) -> str:
+    if not files and entry.hashes:
+        hashes = {_sha256(digest) for digest in entry.hashes}
+        known = _pypi_files(_pypi_path(entry.name, entry.version), fetch)
+        files = tuple((name, digest) for name, digest in known.items() if digest in hashes)
+        if {digest for _, digest in files} != hashes:
+            raise LookupFailed(f"{entry.label}: installed hashes differ from PyPI")
+    if not files:
+        return "missing"
+    return pypi_provenance(entry.name, entry.version, files, fetch)
+
+
 def _pypi_fix(case_version: dict, name: str, fix: str, fetch) -> None:
     path = _pypi_path(name, fix)
     try:
@@ -519,8 +531,8 @@ def gather(entry: Entry, advisories: list[Advisory], *, installed_files: tuple =
                                                              entry.version, fetch)
         record["provenance"] = _provenance_or_failed(npm_provenance, entry.name, fix, fetch)
     elif entry.ecosystem == "PyPI":
-        data["installed_provenance"] = _provenance_or_failed(pypi_provenance, entry.name,
-                                                             entry.version, installed_files, fetch)
+        data["installed_provenance"] = _provenance_or_failed(_installed_pypi_provenance, entry,
+                                                             installed_files, fetch)
         _pypi_fix(record, entry.name, fix, fetch)
     return case
 
@@ -600,7 +612,7 @@ def _decision_line(record: dict) -> str:
     return line
 
 
-def _user_override(entry: Entry, user_overrides: dict) -> str | None:
+def user_override(entry: Entry, user_overrides: dict) -> str | None:
     """The version the user pinned for this entry; PyPI names compare after PEP 503 normalisation."""
     if entry.ecosystem != "PyPI":
         return user_overrides.get(entry.name)
@@ -613,7 +625,8 @@ def _user_override(entry: Entry, user_overrides: dict) -> str | None:
 
 def judge_tree(entries: list[Entry], previous: dict, *, receipts_root: Path, kind: str,
                user_overrides: dict, policy: Policy, fetch, now=None, age_limits=None,
-               check=_lockcheck.check, unavailable: str | None = None) -> TreeVerdict:
+               check=_lockcheck.check, unavailable: str | None = None,
+               pypi_installed: dict[tuple, Entry] | None = None) -> TreeVerdict:
     """The one rule for a resolved tree: lockfile check, then a decision per affected entry.
 
     Exit mapping: any report gives 1; otherwise any no verdict, lookup failure or
@@ -621,7 +634,8 @@ def judge_tree(entries: list[Entry], previous: dict, *, receipts_root: Path, kin
     receipt. `unavailable` turns every install decision into a report (the
     caller cannot rebuild a tree with a fix). `previous` is accepted for the
     callers that judge a list against an installed state; the build path of
-    npm_install does not use it."""
+    npm_install does not use it. If supplied, `pypi_installed` is the evidence
+    for installed PyPI artifacts by exact entry key."""
     try:
         result = check(entries, now=now, fetch=fetch, min_age_days=policy.min_age_days,
                        age_limits=age_limits)
@@ -645,8 +659,12 @@ def judge_tree(entries: list[Entry], previous: dict, *, receipts_root: Path, kin
         else:
             groups.setdefault(entry_key(advisory.entry), (advisory.entry, []))[1].append(advisory)
     for entry, advisories in groups.values():
+        if entry.ecosystem == "PyPI" and pypi_installed is not None:
+            installed = pypi_installed.get(entry_key(entry))
+            entry = replace(entry, files=installed.files if installed else (),
+                            hashes=installed.hashes if installed else ())
         verdict.decisions.append(_decide_entry(entry, advisories, kev, policy,
-                                               _user_override(entry, user_overrides), fetch))
+                                               user_override(entry, user_overrides), fetch))
     incomplete = bool(result.failures)
     for record in verdict.decisions:
         if record["action"] == "install" and unavailable:

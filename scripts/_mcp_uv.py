@@ -137,7 +137,7 @@ def _top_level_wheel(entries: list, package: str, version: str, receipt) -> None
     single_pure_wheel(tops[0], receipt.archive_sha256, "top-level package")
 
 
-def _validate_overrides(overrides, override_reason) -> dict:
+def validate_overrides(overrides, override_reason) -> dict:
     """User overrides by PEP 503 name: exact PEP 440 versions, each name once, a reason."""
     checked = {}
     for dep, wanted in (overrides or {}).items():
@@ -325,7 +325,7 @@ def pypi_install(*, name: str, package: str, version: str, executable: str | Non
     if executable is not None and not ENTRY_RE.fullmatch(executable):
         raise Refused(2, f"invalid --executable {executable!r}")
     check_secrets(secrets)
-    overrides = _validate_overrides(overrides, override_reason)
+    overrides = validate_overrides(overrides, override_reason)
     if (receipt.kind != "pypi" or normalize_pypi(receipt.package) != normalize_pypi(package)
             or receipt.version != version):
         raise Refused(2, f"the scan receipt is for {receipt.package} {receipt.version}, "

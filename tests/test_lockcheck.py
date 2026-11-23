@@ -693,6 +693,35 @@ class HttpFetch(unittest.TestCase):
         self.assertEqual(failed.exception.host, "example.test")
 
 
+class HashedRequirements(unittest.TestCase):
+    hash_option = "--hash=sha256:" + "a" * 64
+
+    def test_rejects_blank_or_comment_inside_continuation(self):
+        for interrupted_by in ("", "    # continued requirement"):
+            with self.subTest(interrupted_by=interrupted_by):
+                text = "\n".join(["srv==1.0.0 \\", interrupted_by, f"    {self.hash_option}"])
+                with self.assertRaises(lockcheck.NoVerdict):
+                    lockcheck.hashed_requirements(text)
+
+    def test_rejects_space_after_continuation_backslash(self):
+        text = "\n".join(["srv==1.0.0 \\ ", f"    {self.hash_option}"])
+        with self.assertRaises(lockcheck.NoVerdict):
+            lockcheck.hashed_requirements(text)
+
+    def test_rejects_empty_file(self):
+        for require_hashes in (True, False):
+            with self.subTest(require_hashes=require_hashes):
+                with self.assertRaises(lockcheck.NoVerdict):
+                    lockcheck.hashed_requirements("", require_hashes=require_hashes)
+
+    def test_rejects_triple_equals(self):
+        text = f"a===1 {self.hash_option}"
+        for require_hashes in (True, False):
+            with self.subTest(require_hashes=require_hashes):
+                with self.assertRaises(lockcheck.NoVerdict):
+                    lockcheck.hashed_requirements(text, require_hashes=require_hashes)
+
+
 class PypiCheck(unittest.TestCase):
     def entries(self):
         return lockcheck.uv_lock_entries(UV_LOCK, root_name="wrapper")
@@ -706,6 +735,22 @@ class PypiCheck(unittest.TestCase):
     def test_clean_locked_files_pass(self):
         net = FakeNet(pypi_files={("srv", "1.0.0"): self.files()})
         self.assertEqual(lockcheck.check(self.entries(), now=NOW, fetch=net).code, 0)
+
+    def test_require_wheel_accepts_mixed_sdist_and_wheel_hashes(self):
+        sdist_hash, wheel_hash = "a" * 64, "b" * 64
+        files = self.files(wheel_hash=wheel_hash)
+        files[0]["digests"]["sha256"] = sdist_hash
+        files[0]["packagetype"] = "sdist"
+        files[1]["packagetype"] = "bdist_wheel"
+        net = FakeNet(pypi_files={("srv", "1.0.0"): files})
+        entries = lockcheck.hashed_requirements(
+            f"srv==1.0.0 --hash=sha256:{sdist_hash} --hash=sha256:{wheel_hash}"
+        )
+
+        result = lockcheck.check(entries, now=NOW, fetch=net, require_wheel=True)
+
+        self.assertEqual(result.blocking, [])
+        self.assertEqual(result.code, 0, result.lines)
 
     def test_young_locked_file_waits(self):
         net = FakeNet(pypi_files={("srv", "1.0.0"): self.files(wheel_time=NEW)})

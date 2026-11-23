@@ -53,15 +53,19 @@ def check_version(version: str, what: str = "version") -> str:
     return version
 
 
-def _validate(name, package, version, overrides, override_reason, bin_name, secrets):
-    check_name(name)
-    check_package(package)
-    check_version(version)
+def validate_overrides(overrides: dict, override_reason: str | None) -> None:
     for dep, wanted in overrides.items():
         check_package(dep)
         check_version(wanted, f"override version for {dep}")
     if overrides and not (override_reason or "").strip():
         raise Refused(2, "--override needs --override-reason (why the pinned tree is changed)")
+
+
+def _validate(name, package, version, overrides, override_reason, bin_name, secrets):
+    check_name(name)
+    check_package(package)
+    check_version(version)
+    validate_overrides(overrides, override_reason)
     if bin_name is not None and not BIN_RE.fullmatch(bin_name):
         raise Refused(2, f"invalid --bin {bin_name!r}")
     check_secrets(secrets)
