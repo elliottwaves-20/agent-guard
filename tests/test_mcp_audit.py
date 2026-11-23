@@ -330,9 +330,22 @@ class McpAuditTests(unittest.TestCase):
         self.assert_status(result, 1, "finding")
         self.assertIn("changed", result["trees"][0]["error"])
 
-    def test_audit_empty_or_missing_root_is_clean(self):
+    def test_audit_existing_empty_root_is_clean(self):
         self.assert_status(self.audit(), 0)
-        self.assert_status(self.audit(root=self.root / "missing"), 0)
+
+    def test_audit_reports_missing_install_directory(self):
+        root = self.root / "missing"
+        config = {"mcp": {"install_dir": str(root)}}
+        note = f"no install directory at {root}, nothing audited"
+        fetch = FakeNet()
+        result = self.run_cli(config=config, fetch=fetch)
+        self.assert_status(result, 0)
+        self.assertEqual(result["note"], note)
+        code, text = self.run_cli(config=config, fetch=fetch, as_json=False)
+        self.assertEqual(code, 0)
+        self.assertIn(note, text)
+        self.assertEqual(fetch.calls, [])
+        self.assertFalse(root.exists())
 
     def test_audit_lock_modified_during_lookup_has_no_verdict(self):
         lock = self.tree() / "package-lock.json"

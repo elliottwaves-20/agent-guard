@@ -87,7 +87,7 @@ def console_scripts(venv: Path, package: str) -> dict:
     if path.is_file():
         try:
             parser.read_string(path.read_text(encoding="utf-8"))
-        except (OSError, configparser.Error) as exc:
+        except (OSError, ValueError, configparser.Error) as exc:
             raise Refused(2, f"cannot read {path}: {exc}")
     if not parser.has_section("console_scripts"):
         return {}
@@ -156,6 +156,8 @@ def validate_overrides(overrides, override_reason) -> dict:
 
 def _uv_settings(overrides: dict, excludes: dict) -> str:
     """The [tool.uv] lines of a tree with pinned dependencies and per-package time limits."""
+    for dep in (*overrides, *excludes):
+        check_package(dep)
     text = ""
     if overrides:
         text += ("override-dependencies = ["

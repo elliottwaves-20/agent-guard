@@ -897,6 +897,8 @@ def _audit_output(result, as_json):
     if as_json:
         print(json.dumps(result))
     else:
+        if "note" in result:
+            print(result["note"])
         for tree in result["trees"]:
             label = tree["status"].replace("_", " ").upper()
             error = " | ".join(tree["error"].splitlines()) if tree["error"] else ""
@@ -959,7 +961,8 @@ def main():
     p_mcp = sub.add_parser("mcp", help="Install an MCP server to all detected tools")
     p_mcp.add_argument("--name", required=True, help="Server name in configs")
     p_mcp.add_argument("--command", required=True,
-                       help="Launcher: 'uvx', 'uv', 'npx', or full path")
+                       help="Executable to start (ad-hoc launchers such as npx or uvx are "
+                            "refused; use mcp-npm, mcp-pypi or mcp-git)")
     p_mcp.add_argument("--args", nargs=argparse.REMAINDER, default=[], metavar="ARG",
                        help="Arguments for the command. Put this last; use '--args -- ...' "
                             "when the MCP command itself has option-style arguments.")

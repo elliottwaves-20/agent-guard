@@ -303,9 +303,10 @@ class NpmInstall(unittest.TestCase):
 
     def test_bin_outside_the_package_is_refused(self):
         self.old_install()
-        for bin_field in ("../../../marker.txt", "../server-files-evil/x.js"):
+        for bin_field in ("../../../package.json", "../../../marker.txt",
+                          "../server-files-evil/x.js"):
             with self.subTest(bin=bin_field):
-                with self.assertRaises(locked.Refused) as ctx:
+                with self.assertRaisesRegex(locked.Refused, "not a file inside the package") as ctx:
                     self.install(npm=FakeNpm(bin_field={"server-files": bin_field}))
                 self.assertEqual(ctx.exception.code, 2)
                 self.assert_old_untouched()
@@ -351,6 +352,22 @@ class NpmInstall(unittest.TestCase):
                     self.install(npm=npm)
                 self.assertEqual(ctx.exception.code, 2)
                 self.assert_old_untouched()
+
+    def test_ci_that_changes_the_lockfile_keeps_the_old_tree(self):
+        self.old_install()
+        npm = FakeNpm()
+
+        def run(cmd, cwd):
+            result = npm(cmd, cwd)
+            if cmd[1] == "ci":
+                lockfile = Path(cwd) / npm_mod.LOCKFILE
+                lockfile.write_bytes(lockfile.read_bytes() + b"\n")
+            return result
+
+        with self.assertRaisesRegex(locked.Refused, "npm ci changed package-lock") as ctx:
+            self.install(npm=run)
+        self.assertEqual(ctx.exception.code, 2)
+        self.assert_old_untouched()
 
     def test_npm_without_min_release_age_is_refused(self):
         for version in ("11.9.0", "10.9.2", "garbage"):
@@ -414,6 +431,20 @@ class NpmInstall(unittest.TestCase):
                     self.install(npm=npm, **case)
                 self.assertEqual(ctx.exception.code, 2)
                 self.assertEqual(npm.commands, [])
+
+    def test_invalid_fast_lane_name_never_reaches_npm(self):
+        invalid = f"dep&{chr(34)}%"
+        stage = Path(self.tmp.name)
+        for overrides, excludes in (({invalid: "1.0.3"}, []), ({}, [invalid])):
+            with self.subTest(overrides=overrides, excludes=excludes):
+                run = mock.Mock(return_value=(1, "unexpected npm call"))
+                with self.assertRaisesRegex(locked.Refused, "invalid npm package name") as ctx:
+                    npm_mod._resolve(run, "npm", stage, name="files", package=PKG, version="1.2.3",
+                                     overrides=overrides, reason="advisory", seed=None,
+                                     excludes=excludes, min_age_days=7)
+                self.assertEqual(ctx.exception.code, 2)
+                run.assert_not_called()
+                self.assertEqual(list(stage.iterdir()), [])
 
     def test_receipt_for_another_package_is_refused(self):
         npm = FakeNpm()
@@ -500,7 +531,7 @@ class NpmCli(unittest.TestCase):
         self.assertNotIn("env", entry)
         self.assertFalse(dry)
 
-    def install_with_fake_npm(self, *options):
+    def install_with_fake_npm(self, *options, mock_delivery=True):
         install_skill = importlib.import_module("install_skill")
         root = self.base / "mcp"
         receipts.write_receipt(root, receipt())
@@ -509,7 +540,9 @@ class NpmCli(unittest.TestCase):
 
         def install(args, **kwargs):
             kwargs.update(config={"mcp": {"install_dir": str(root)}}, run=npm,
-                          which=which, check=stub_check(0), deliver=lambda *a, **k: None)
+                          which=which, check=stub_check(0), fetch=FakeRegistry())
+            if mock_delivery:
+                kwargs["deliver"] = lambda *a, **k: None
             return cmd_mcp_npm(args, **kwargs)
 
         argv = ["install_skill.py", "mcp-npm", "--package", PKG, "--version", "1.2.3", *options]
@@ -531,6 +564,36 @@ class NpmCli(unittest.TestCase):
         status = json.loads(stdout.getvalue())
         self.assertEqual((status["code"], status["tier"]), (0, "s2"))
         self.assertIn("[DRY]", stderr.getvalue())
+
+    def test_corrupt_agent_config_leaves_tree_installed_and_exits_two(self):
+        install_skill = importlib.import_module("install_skill")
+        config_path = self.base / "agent.json"
+        config_path.write_text("{", encoding="utf-8")
+        for options, name in (([], "text-server"), (["--json"], "json-server")):
+            with self.subTest(options=options):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (mock.patch.object(sys, "stdout", stdout),
+                      mock.patch.object(sys, "stderr", stderr),
+                      mock.patch.object(install_skill, "CLAUDE_DESKTOP_CONFIG", config_path),
+                      mock.patch.object(install_skill, "detect_tools",
+                                        return_value={"claude-desktop": True}),
+                      self.assertRaises(SystemExit) as ctx):
+                    self.install_with_fake_npm("--name", name, *options, mock_delivery=False)
+                tree = self.base / "mcp" / name
+                script = tree / "node_modules" / PKG / "dist" / "index.js"
+                self.assertEqual(script.read_text(encoding="utf-8"), "// server")
+                self.assertEqual(config_path.read_text(encoding="utf-8"), "{")
+                self.assertEqual(ctx.exception.code, 2)
+                message = "installed but not registered: "
+                self.assertIn(message, stderr.getvalue())
+                self.assertIn("is not valid JSON", stderr.getvalue())
+                hint = f"python scripts/install_skill.py mcp-register {tree}"
+                self.assertIn(hint, stderr.getvalue())
+                if options:
+                    result = json.loads(stdout.getvalue())
+                    self.assertEqual(result["code"], 2)
+                    self.assertTrue(result["message"].startswith(message))
+                    self.assertIn(hint, result["message"])
 
     def test_register_setting_hands_over_instead_of_writing_configs(self):
         install_skill = importlib.import_module("install_skill")
@@ -1208,6 +1271,11 @@ class HelpTexts(unittest.TestCase):
                                  mode, "--help"], capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         return " ".join(result.stdout.split())
+
+    def test_mcp_help_says_ad_hoc_launchers_are_refused(self):
+        text = self.help_of("mcp")
+        self.assertIn("Executable to start (ad-hoc launchers such as npx or uvx are refused; "
+                      "use mcp-npm, mcp-pypi or mcp-git)", text)
 
     def test_npm_options_describe_their_effect(self):
         text = self.help_of("mcp-npm")

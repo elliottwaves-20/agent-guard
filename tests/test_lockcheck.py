@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")
 lockcheck = importlib.import_module("_lockcheck")
+fastlane = importlib.import_module("_fastlane")
 
 NOW = dt.datetime(2026, 11, 22, 12, 0, tzinfo=dt.timezone.utc)
 OLD = "2026-10-01T00:00:00.000Z"
@@ -48,7 +49,7 @@ class FakeNet:
     """Answers the registry, OSV and GitHub requests from tables."""
 
     def __init__(self, osv=None, ghsa=None, npm_time=None, npm_integrity=None,
-                 pypi_files=None, fail=None, osv_details=None):
+                 pypi_files=None, fail=None, osv_details=None, osv_paginated=()):
         self.osv = osv or {}
         self.ghsa = ghsa or {}
         self.npm_time = npm_time or {}
@@ -56,6 +57,7 @@ class FakeNet:
         self.pypi_files = pypi_files or {}
         self.fail = fail
         self.osv_details = osv_details or {}
+        self.osv_paginated = set(osv_paginated)
         self.calls = []
 
     def __call__(self, url, payload=None):
@@ -67,7 +69,10 @@ class FakeNet:
             for q in payload["queries"]:
                 key = (q["package"]["name"], q["version"])
                 ids = self.osv.get(key, [])
-                results.append({"vulns": [{"id": i} for i in ids]} if ids else {})
+                result = {"vulns": [{"id": i} for i in ids]} if ids else {}
+                if key in self.osv_paginated:
+                    result["next_page_token"] = "next-page"
+                results.append(result)
             return {"results": results}, None
         if url.startswith(OSV_DETAIL_URL):
             advisory_id = url.removeprefix(OSV_DETAIL_URL)
@@ -175,14 +180,14 @@ class NpmLockParsing(unittest.TestCase):
             lockcheck.npm_lock_entries(npm_lock({"node_modules/srv": entry}))
 
     def test_link_entry_has_no_verdict(self):
-        lock = npm_lock({"node_modules/srv": {"resolved": "../srv", "link": True}})
-        with self.assertRaises(lockcheck.NoVerdict):
+        lock = npm_lock({"node_modules/srv": npm_pkg("srv", "1.0.0", link=True)})
+        with self.assertRaisesRegex(lockcheck.NoVerdict, "linked or bundled entry"):
             lockcheck.npm_lock_entries(lock)
 
     def test_bundled_entry_has_no_verdict(self):
         lock = npm_lock({"node_modules/srv": npm_pkg("srv", "1.0.0"),
-                         "node_modules/srv/node_modules/b": {"version": "1.0.0", "inBundle": True}})
-        with self.assertRaises(lockcheck.NoVerdict):
+                         "node_modules/srv/node_modules/b": npm_pkg("b", "1.0.0", inBundle=True)})
+        with self.assertRaisesRegex(lockcheck.NoVerdict, "linked or bundled entry"):
             lockcheck.npm_lock_entries(lock)
 
     def test_old_lockfile_version_has_no_verdict(self):
@@ -436,6 +441,28 @@ class StructuredCheck(unittest.TestCase):
         self.assertEqual([url for url in net.calls if url.startswith(OSV_DETAIL_URL)],
                          [OSV_DETAIL_URL + "OSV-review"])
         self.assertEqual(self.advisory(result).id, "OSV-review")
+
+    def test_paginated_osv_result_cannot_clear_the_lockfile(self):
+        net = clean_npm_net(osv_paginated=[("srv", "1.0.0")])
+        result = lockcheck.check(npm_entries(), now=NOW, fetch=net)
+        self.assertEqual(result.code, 2)
+        self.assertEqual(result.failures, ["OSV srv@1.0.0: more batch results are available"])
+
+    def test_paginated_osv_result_prevents_fast_lane(self):
+        key = ("srv", "1.0.0")
+        net = clean_npm_net(osv={key: ["OSV-review"]}, osv_paginated=[key])
+        eligible = {"package": "srv", "installed": "1.0.0", "version": "1.0.3",
+                    "action": "install", "advisories": ["OSV-review"]}
+        with patch.object(fastlane, "kev_cves", return_value=set()), \
+                patch.object(fastlane, "_decide_entry", return_value=eligible), \
+                patch.object(fastlane, "_collect_fixes") as collect:
+            verdict = fastlane.judge_tree(
+                npm_entries(), {}, receipts_root=Path("receipts"), kind="npm",
+                user_overrides={}, policy=fastlane.Policy(), fetch=net, now=NOW)
+        self.assertEqual(verdict.code, 2)
+        self.assertEqual(verdict.decisions[0]["reason"], "incomplete_lookup")
+        self.assertEqual(verdict.fixes, {})
+        collect.assert_not_called()
 
     def test_osv_severity_from_database_specific(self):
         result = self.osv(osv_advisory(severity="HIGH"))

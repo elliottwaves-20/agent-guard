@@ -1,9 +1,8 @@
 """User-level agent-guard configuration (outside the repository).
 
-One TOML file holds everything that is personal to a machine: LLM profiles
-the local skill distribution and the locked MCP install directory. The repository ships only the mechanism and
-`config.example.toml`; without a config file every wrapper behaves exactly as
-before.
+One TOML file holds the machine's LLM profiles, local skill distribution
+settings and locked MCP install directory. The repository ships the mechanism
+and `config.example.toml`. Without a config file every wrapper behaves as before.
 
 Lookup order (first hit wins):
   1. AGENT_GUARD_CONFIG=<path>             (must exist; AGENT_GUARD_NO_USER_CONFIG=1

@@ -15,6 +15,10 @@
   `node <bin>` or `uv run --project <tree> --locked`. An advisory without a fast-lane fix is exit 1;
   anything unchecked or too young is exit 2 and the installed tree stays.
   Locked trees never update themselves: run `mcp-audit` regularly.
+- Locked MCP installs restore the previous tree if finishing fails or is
+  interrupted. Unreadable Python entry-point metadata gives exit 2.
+- Invalid fast-lane dependency names in pins or age exemptions stop the
+  rebuild with exit 2 before invoking npm or uv on the rebuilt tree.
 - Scan receipts bind an install to the scanned archive: `scan_url.py` records
   each SAFE or BLOCK verdict with the archive hash (npm tarball and its
   integrity, the pure PyPI wheel, the GitHub ZIP), and the locked installers
@@ -24,6 +28,8 @@
   npm tarballs are verified against their registry integrity.
 - `mcp-git` additionally requires the commit to meet the age policy on the
   default branch and pins and checks the build tools from `[build-system]`.
+  Offers after GitHub subdirectory scans retain the subdirectory in the
+  install URL, match its scan receipt and read metadata from that directory.
 - Locked MCP installers accept `--min-age-days` for the normal waiting period
   and `--trusted-days` for the top package of a same-repository npm update
   with verified provenance. The default waits are 7 and 2 days. Git applies
@@ -40,10 +46,12 @@
   checking age.
 - `install_skill.py mcp-audit` checks installed lockfiles for advisories
   without age or receipt checks. It reports every advisory as a finding and
-  leaves the trees untouched.
+  leaves the trees untouched. If the install directory is missing, it
+  reports that nothing was audited (JSON `note`) and exits 0.
 - `install_skill.py mcp` refuses ad-hoc launchers (`npx`, `uvx`, `bunx`,
-  `pipx run`, `uv tool run`, `uv run --with`, `pnpm dlx`, `yarn dlx`, …) with
-  exit 2; `scan_url.py` offers only the locked installers.
+  `pipx run`, `uv tool run`, `uv run --with*`, `pnpm dlx`, `yarn dlx`, …) with
+  exit 2, including launches through common shells or `env` and leading
+  launcher options. `scan_url.py` offers only the locked installers.
 
 ### Added
 
@@ -52,6 +60,9 @@
   agent configs, and `install_skill.py mcp-register <tree>` to repeat a
   failed handoff. `--secret NAME` names keys a server needs (names only,
   never values).
+- Registration failures after a successful locked install, including invalid
+  agent JSON, report "installed but not registered" and exit 2 in text and
+  JSON. The installed tree stays in place.
 
 ### Changed
 

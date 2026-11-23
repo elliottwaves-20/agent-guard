@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -38,8 +39,14 @@ VERSION_FILE = Path(__file__).resolve().parents[1] / "VERSION"
 
 # Launchers that resolve a package tree at every start instead of running a fixed one.
 ADHOC_RUNNERS = frozenset({"npx", "bunx", "uvx", "pnpx"})
-ADHOC_SUBCOMMANDS = {"npm": ({"exec", "x"},), "bun": ({"x"},), "pnpm": ({"dlx"},),
-                     "yarn": ({"dlx"},), "pipx": ({"run"},)}
+ADHOC_SUBCOMMANDS = {"npm": {"exec", "x"}, "bun": {"x"}, "pnpm": {"dlx"},
+                    "yarn": {"dlx"}, "pipx": {"run"}}
+UV_GLOBAL_VALUES = {"--directory", "--project", "--cache-dir", "--config-file", "--python", "-p"}
+ENV_OPTION_VALUES = {"-u", "--unset", "-C", "--chdir", "-a", "--argv0"}
+POSIX_SHELLS = {"sh", "bash", "zsh"}
+SHELL_COMMAND_OPTIONS = {"cmd": {"/c", "/k"}, "powershell": {"-command", "-c"},
+                         "pwsh": {"-command", "-c"},
+                         **dict.fromkeys(POSIX_SHELLS, {"-c"})}
 
 Runner = Callable[[list, Path], tuple]
 
@@ -212,18 +219,65 @@ def _program(command: str) -> str:
     return base
 
 
+def _command_index(args: list, value_options: set) -> int:
+    index = 0
+    while index < len(args) and args[index].startswith("-"):
+        option = args[index]
+        if option == "--":
+            return index + 1
+        index += 2 if option in value_options else 1
+    return index
+
+
+def _wrapped_command(program: str, args: list) -> list:
+    if program == "env":
+        start = _command_index(args, ENV_OPTION_VALUES)
+        if any(a.startswith(("-S", "--split-string")) for a in args[:start]):
+            raise ValueError("env split-string may expand variables")
+        while start < len(args) and "=" in args[start]:
+            start += 1
+        return args[start:]
+
+    options = SHELL_COMMAND_OPTIONS[program]
+    posix = program in POSIX_SHELLS
+    for index, arg in enumerate(args[:-1]):
+        if arg.lower() not in options:
+            continue
+        words = shlex.split(args[index + 1], posix=posix)
+        if posix:
+            return words
+        unquoted = [w[1:-1] if w[0] == w[-1] and w[0] in "'\"" else w for w in words]
+        return unquoted + args[index + 2:]
+    return []
+
+
 def is_adhoc_launch(command: str, args: list) -> bool:
     """True for a launcher that resolves its package tree at every start."""
     program = _program(command)
+    while program == "env" or program in SHELL_COMMAND_OPTIONS:
+        try:
+            wrapped = _wrapped_command(program, args)
+        except ValueError:
+            return True
+        if not wrapped:
+            return False
+        command, *args = wrapped
+        program = _program(command)
+
     if program in ADHOC_RUNNERS:
         return True
+    if program in ADHOC_SUBCOMMANDS or program == "uv":
+        values = UV_GLOBAL_VALUES if program == "uv" else set()
+        args = args[_command_index(args, values):]
     first = args[0] if args else ""
-    if program in ADHOC_SUBCOMMANDS and first in ADHOC_SUBCOMMANDS[program][0]:
+    if first in ADHOC_SUBCOMMANDS.get(program, ()):
         return True
     if program == "uv":
-        if args[:2] == ["tool", "run"]:
-            return True
-        if first == "run" and any(a == "--with" or a.startswith("--with=") for a in args):
+        if first == "tool":
+            tool_args = args[1:]
+            start = _command_index(tool_args, UV_GLOBAL_VALUES)
+            return tool_args[start:start + 1] == ["run"]
+        if first == "run" and any(a.startswith("--with") for a in args[1:]):
             return True
     return False
 
@@ -280,13 +334,15 @@ def replace_tree(stage: Path, target: Path,
     if finish is not None:
         try:
             finish(target)
-        except (Refused, OSError, subprocess.SubprocessError) as exc:
+        except BaseException as exc:
             shutil.rmtree(target, ignore_errors=True)
             if old is not None:
                 if target.exists():
                     raise Refused(2, f"{exc}; the new tree could not be removed, the previous "
                                      f"one is kept at {old}") from exc
                 os.replace(old, target)
+            if not isinstance(exc, (Refused, OSError, subprocess.SubprocessError)):
+                raise
             raise Refused(getattr(exc, "code", 2),
                           f"{exc}; the previous tree is back in place") from exc
     if old is not None:
@@ -460,7 +516,7 @@ def audit_trees(root: Path, *, policy, fetch, now=None) -> dict:
         try:
             info = _audit_stat(root)
         except FileNotFoundError:
-            return audit
+            return {**audit, "note": f"no install directory at {root}, nothing audited"}
         if not stat.S_ISDIR(info.st_mode):
             raise Refused(2, f"{root} is not a directory")
         children = sorted(root.iterdir(), key=lambda child: child.name)
@@ -552,6 +608,19 @@ def deliver(installed: Installed, settings: Settings, *, dry: bool, selected, in
             run=None) -> int:
     """Hand the start command to the agents: install(...) by default, the register command
     when [mcp] register is set (then no agent config is written here)."""
+    try:
+        return _deliver_start_command(installed, settings, dry=dry, selected=selected,
+                                      install=install, run=run)
+    except (Exception, SystemExit) as exc:
+        if dry or (isinstance(exc, Refused) and exc.code == 2):
+            raise
+        detail = str(exc).removeprefix("ERROR: ") or type(exc).__name__
+        raise Refused(2, f"installed but not registered: {detail}; "
+                         f"retry: {_retry_hint(installed.tree)}") from exc
+
+
+def _deliver_start_command(installed: Installed, settings: Settings, *, dry: bool, selected,
+                           install, run) -> int:
     if settings.register is None:
         if installed.secrets:
             print(f"   This server needs {', '.join(installed.secrets)}; start it through your "

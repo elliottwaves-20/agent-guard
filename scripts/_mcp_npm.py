@@ -209,6 +209,8 @@ def _trusted_period_applies(package, version, old_version, policy, fetch, now) -
 def _resolve(run, npm, stage, *, name, package, version, overrides, reason, seed, excludes,
              min_age_days):
     """Write the manifest, let npm resolve the lockfile and read it back."""
+    for dep in (*overrides, *excludes):
+        check_package(dep)
     manifest = _manifest(name, package, version, overrides, reason)
     (stage / "package.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     (stage / ".gitignore").write_text("node_modules/\n", encoding="utf-8")

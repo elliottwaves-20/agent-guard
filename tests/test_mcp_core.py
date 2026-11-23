@@ -6,6 +6,7 @@ failed swap must leave the previous tree exactly where it was.
 import importlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -41,8 +42,8 @@ class Settings(unittest.TestCase):
         self.assertEqual(result.register_timeout, 60)
 
     def test_unknown_mcp_setting_is_refused(self):
-        with self.assertRaises(locked.Refused) as ctx:
-            locked.settings({"mcp": {"install_dri": "x"}}, {}, "win32")
+        with self.assertRaisesRegex(locked.Refused, "unknown key.*install_dri") as ctx:
+            locked.settings({"mcp": {"install_dri": "x"}}, {"LOCALAPPDATA": "C:/L"}, "win32")
         self.assertEqual(ctx.exception.code, 2)
 
     def test_relative_install_dir_is_refused(self):
@@ -72,6 +73,29 @@ class Settings(unittest.TestCase):
                 with self.assertRaises(locked.Refused):
                     locked.settings({"mcp": {"register_timeout": bad}},
                                     {"LOCALAPPDATA": "C:/L"}, "win32")
+
+
+class ToolRunner(unittest.TestCase):
+    def test_run_tool_passes_hardened_environment_and_preserves_exit_code(self):
+        cmd = ["npm", "--version"]
+        cwd = Path("build")
+        completed = subprocess.CompletedProcess(cmd, 7, stdout="output", stderr="error")
+        with mock.patch("_skillspector.run_bounded", return_value=completed) as run:
+            self.assertEqual(locked.run_tool(cmd, cwd), (7, "outputerror"))
+        hardened_env = importlib.import_module("_skills_cli").hardened_env
+        run.assert_called_once_with(cmd, env=hardened_env(), timeout=locked.TOOL_TIMEOUT,
+                                    cwd=str(cwd))
+        self.assertEqual(run.call_args.kwargs["env"]["npm_config_ignore_scripts"], "true")
+
+    def test_run_tool_refuses_timeout_and_launch_failure(self):
+        failures = ((subprocess.TimeoutExpired("npm", 1), "timed out"),
+                    (OSError("launch failure"), "could not start"))
+        for error, message in failures:
+            with self.subTest(error=error), mock.patch("_skillspector.run_bounded",
+                                                       side_effect=error):
+                with self.assertRaisesRegex(locked.Refused, message) as ctx:
+                    locked.run_tool(["npm", "--version"], Path("build"))
+                self.assertEqual(ctx.exception.code, 2)
 
 
 class Names(unittest.TestCase):
@@ -104,6 +128,46 @@ class Names(unittest.TestCase):
         for command, args in fixed:
             with self.subTest(command=command, args=args):
                 self.assertFalse(locked.is_adhoc_launch(command, args))
+
+    def test_wrapped_adhoc_launchers_are_recognised(self):
+        assignment = "=".join(("MODE", "test"))
+        commands = [
+            ["cmd", "/c", "npx", "-y", "pkg"],
+            ["cmd.exe", "/C", "npx -y pkg"],
+            ["cmd", "/k", "npx x"],
+            ["sh", "-c", "npx x"],
+            ["bash", "-c", "npx x"],
+            ["zsh", "-c", "npx x"],
+            ["pwsh", "-Command", "npx x"],
+            ["powershell", "-c", "npx x"],
+            ["env", "npx", "x"],
+            ["env", "-i", "-u", "MODE", assignment, "npx", "x"],
+            ["sh", "-c", "npx " + chr(34) + "x"],
+        ]
+        for command, *args in commands:
+            with self.subTest(command=command, args=args):
+                self.assertTrue(locked.is_adhoc_launch(command, args))
+
+    def test_options_before_adhoc_subcommands_are_skipped(self):
+        commands = [
+            ["uv", "--quiet", "tool", "run", "x"],
+            ["uv", "--directory", "d", "tool", "run", "x"],
+            ["uv", "--project", "d", "tool", "run", "x"],
+            ["uv", "--cache-dir", "d", "tool", "run", "x"],
+            ["uv", "--config-file", "f", "tool", "run", "x"],
+            ["uv", "--python", "3.12", "tool", "run", "x"],
+            ["uv", "-p", "3.12", "tool", "run", "x"],
+            ["uv", "run", "--with-requirements", "r.txt", "x"],
+            ["uv", "run", "--with-editable", ".", "x"],
+            ["npm", "--silent", "exec", "pkg"],
+            ["bun", "--silent", "x", "pkg"],
+            ["pnpm", "--silent", "dlx", "pkg"],
+            ["yarn", "--silent", "dlx", "pkg"],
+            ["pipx", "--verbose", "run", "pkg"],
+        ]
+        for command, *args in commands:
+            with self.subTest(command=command, args=args):
+                self.assertTrue(locked.is_adhoc_launch(command, args))
 
     def test_python_310_is_refused(self):
         with mock.patch.object(locked.sys, "version_info", (3, 10, 12)):
@@ -165,6 +229,28 @@ class TreeSwap(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
         self.assertEqual(self.marker(), "old")
         self.assertEqual([p.name for p in self.root.iterdir()], ["srv"])
+
+    def test_unexpected_finish_failure_restores_the_old_tree(self):
+        for error in (ValueError("invalid metadata"), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__):
+                with tempfile.TemporaryDirectory(dir=self.root) as case:
+                    root = Path(case)
+                    target = root / "srv"
+                    target.mkdir()
+                    before = b"old\x00\xff"
+                    (target / "marker").write_bytes(before)
+                    stage = locked.new_stage(root, "srv")
+                    (stage / "marker").write_bytes(b"new")
+
+                    def finish(_target):
+                        raise error
+
+                    with self.assertRaises(type(error)) as caught:
+                        locked.replace_tree(stage, target, finish=finish)
+
+                    self.assertIs(caught.exception, error)
+                    self.assertEqual((target / "marker").read_bytes(), before)
+                    self.assertEqual(list(root.iterdir()), [target])
 
     def test_locked_old_tree_keeps_everything(self):
         self.old_tree()

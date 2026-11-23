@@ -73,6 +73,7 @@ class ResolvedSource:
     install_commands: list[str] | None = None
     archive_sha256: str = ""  # sha256 of the downloaded GitHub ZIP (scan receipt, #48)
     subpath: str = ""  # part of the repository that was scanned ("" = all of it)
+    repo_root: Path | None = None
 
 
 class CompactHTMLText(HTMLParser):
@@ -306,13 +307,16 @@ def resolve_github(url: str, dest: Path) -> ResolvedSource:
     if not source.exists():
         raise FetchError(f"GitHub subpath not found in the repository archive: {url}")
     label = f"github:{owner}/{repo}@{sha}"
+    install_hint = f"https://github.com/{owner}/{repo}@{sha}"
+    subdir = "/".join(subpath)
     if subpath:
-        label += "/" + "/".join(subpath)
+        label += f"/{subdir}"
+        install_hint += f"#subdirectory={subdir}"
     return ResolvedSource(kind="github", source_path=source, label=label,
                           pinned_ref=sha,
-                          install_hint=f"https://github.com/{owner}/{repo}@{sha}",
+                          install_hint=install_hint,
                           archive_sha256=hashlib.sha256(data).hexdigest(),
-                          subpath="/".join(subpath or ()))
+                          subpath=subdir, repo_root=root)
 
 
 def resolve_archive(url: str, dest: Path) -> ResolvedSource:

@@ -400,6 +400,8 @@ version: `install_skill.py mcp-npm`, `mcp-pypi` or `mcp-git` (see
 [Install after a SAFE verdict](#install-after-a-safe-verdict)). Every package
 scan writes a receipt for its SAFE or BLOCK verdict, and the locked installers
 only run for a version with a receipt. No prompt offers `npx` or `uvx`.
+For a GitHub subdirectory scan, the `mcp-git` offer includes
+`#subdirectory=<path>` so the installer uses the receipt for that directory.
 
 By default URL scans use a temporary directory. Use `--keep-source <dir>` when
 you want to install the exact source that was scanned after a SAFE verdict.
@@ -752,9 +754,11 @@ lockfile:
    the [security fix fast lane](#security-fix-fast-lane).
 4. **Build and swap.** The checked tree is staged in a hidden directory.
    npm runs `npm ci --ignore-scripts` there before replacing the old tree.
-   PyPI runs `uv sync --locked --no-build` at the final path and rolls back
-   a failed sync. If the new tree cannot be removed during rollback, the
-   installer reports where it kept the previous tree.
+   PyPI runs `uv sync --locked --no-build` at the final path, and Git runs
+   `uv sync --locked` with builds disabled for registry dependencies. The
+   installer restores the previous tree if finishing fails or is interrupted,
+   including when entry-point metadata is unreadable. If the new tree cannot
+   be removed during rollback, the installer reports where it kept the previous tree.
 
 ```bash
 # npm: agents start node with the package bin from the tree
@@ -788,8 +792,10 @@ and version in `needs_scan`.
 
 `install_skill.py mcp` still writes any explicit launch command, but refuses
 launchers that resolve their packages at every start (`npx`, `uvx`, `bunx`,
-`pipx run`, `uv tool run`, `uv run --with`, `pnpm dlx`, `yarn dlx`, …). Pass
-each server argument as its own repeated `--arg`. The legacy `--args` form
+`pipx run`, `uv tool run`, `uv run --with*`, `pnpm dlx`, `yarn dlx`, …),
+including when launched through `cmd`, `sh`, `bash`, `zsh`, PowerShell, or
+`env`, or when launcher options precede the subcommand. Pass each server
+argument as its own repeated `--arg`. The legacy `--args` form
 consumes *everything* after it (including `--env` and `--dry-run`), so the
 installer rejects installer options placed after `--args` instead of silently
 misconfiguring the server.
@@ -813,10 +819,12 @@ Without `register` agent-guard writes the agent configs itself. With
 into the tree (name, kind, package, version or commit, start command, tree,
 lockfile hash, overrides, verdict, secret names) and runs the register command
 with that file's path as last argument and without credentials in its
-environment — for a machine that keeps its own MCP manifest and distributes it
-to every agent. A failing or timed-out register command gives exit 2
-"installed but not registered"; `python scripts/install_skill.py mcp-register
-<tree>` repeats the handoff. Unknown keys in `[mcp]` stop the installer (exit 2).
+environment, for a machine that registers MCP servers with its own tooling.
+If registration fails after the tree is installed, the installer reports
+"installed but not registered" and exits 2. The installed tree is kept.
+`python scripts/install_skill.py mcp-register <tree>` repeats a configured
+handoff. If writing an agent config failed, fix the config and rerun the
+locked installer. Unknown keys in `[mcp]` stop the installer (exit 2).
 
 Set the age and fast-lane policy with command-line flags.
 
@@ -875,6 +883,8 @@ are CLI options. The `[mcp]` table accepts `install_dir`, `register` and
    `override-dependencies`. A fix for the top package changes its exact
    pin. npm uses `--min-release-age-exclude` and uv uses
    `exclude-newer-package` to exempt the fixes from the normal age rule.
+   An invalid dependency name in a pin or exemption stops the rebuild
+   with exit 2 before running npm or uv on the rebuilt tree.
    The installer resolves the tree again and checks every entry, including
    any new dependencies. It binds the selected fix artifacts to their SAFE
    receipts by integrity or SHA-256 and verifies that installation leaves
@@ -932,6 +942,8 @@ findings and any error. A finding can carry a fast-lane decision. Missing
 or invalid metadata, a lockfile hash mismatch, or links in the audited
 paths can prevent a verdict. Hidden staging and backup directories are
 listed as leftovers when found and excluded from the advisory check.
+If the install directory does not exist, the audit exits 0 and reports
+`no install directory at <path>, nothing audited` (the `note` field in JSON).
 
 Locked trees never update themselves: a server keeps running exactly the
 installed lockfile, also after an advisory for one of its packages appears.

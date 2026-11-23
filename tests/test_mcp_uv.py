@@ -154,6 +154,16 @@ def which(name):
     return {"uv": "C:/uv/uv.exe"}.get(name)
 
 
+def change_lock_after_sync(uv):
+    def run(cmd, cwd):
+        result = uv(cmd, cwd)
+        if cmd[1] == "sync":
+            lockfile = Path(cwd) / uv_mod.LOCKFILE
+            lockfile.write_bytes(lockfile.read_bytes() + b"\n")
+        return result
+    return run
+
+
 def receipt(package=PKG, version="1.2.3", sha=WHEEL_SHA):
     return receipts.Receipt(kind="pypi", package=package, version=version, archive_sha256=sha,
                             integrity="", verdict="SAFE", at="2026-11-22T00:00:00+00:00",
@@ -207,6 +217,20 @@ class PypiInstall(unittest.TestCase):
         data = lib.loads((self.root / "time" / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(data["tool"]["uv"]["exclude-newer"], "10 days")
 
+    def test_invalid_fast_lane_name_never_reaches_uv(self):
+        invalid = f"dep&{chr(34)}%"
+        stage = Path(self.tmp.name)
+        for overrides, excludes in (({invalid: "1.0.3"}, {}),
+                                    ({}, {invalid: "2026-11-22T12:00:00Z"})):
+            with self.subTest(overrides=overrides, excludes=excludes):
+                run = mock.Mock(return_value=(1, "unexpected uv call"))
+                with self.assertRaisesRegex(locked.Refused, "invalid PyPI package name") as ctx:
+                    uv_mod._lock(run, "uv", stage, name="time", package=PKG, version="1.2.3",
+                                 overrides=overrides, excludes=excludes, min_age_days=7)
+                self.assertEqual(ctx.exception.code, 2)
+                run.assert_not_called()
+                self.assertEqual(list(stage.iterdir()), [])
+
     def test_check_sees_the_registry_entries(self):
         check = stub_check(0)
         self.install(check=check)
@@ -237,6 +261,13 @@ class PypiInstall(unittest.TestCase):
         self.old_install()
         with self.assertRaises(locked.Refused) as ctx:
             self.install(uv=FakeUv(sync_rc=1))
+        self.assertEqual(ctx.exception.code, 2)
+        self.assert_old_untouched()
+
+    def test_sync_that_changes_the_lockfile_restores_the_old_pypi_tree(self):
+        self.old_install()
+        with self.assertRaisesRegex(locked.Refused, r"uv sync changed uv\.lock") as ctx:
+            self.install(uv=change_lock_after_sync(FakeUv()))
         self.assertEqual(ctx.exception.code, 2)
         self.assert_old_untouched()
 
@@ -372,6 +403,18 @@ class PypiInstall(unittest.TestCase):
         (info / "entry_points.txt").write_text("[console_scripts]\nrun-it = m:main\n",
                                                encoding="utf-8")
         self.assertEqual(uv_mod.console_scripts(venv, PKG), {"run-it": "m:main"})
+
+    def test_console_scripts_refuses_invalid_utf8(self):
+        venv = Path(self.tmp.name) / "venv"
+        info = venv / "Lib" / "site-packages" / "Mcp_Server.Time-1.2.3.dist-info"
+        info.mkdir(parents=True)
+        (info / "entry_points.txt").write_bytes(b"\xff")
+
+        with self.assertRaises(locked.Refused) as caught:
+            uv_mod.console_scripts(venv, PKG)
+
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("entry_points.txt", str(caught.exception))
 
 
 SHA = "a" * 40
@@ -594,6 +637,29 @@ class GitInstall(unittest.TestCase):
             self.install(uv=uv, check=stub_check(1))
         self.assertEqual(ctx.exception.code, 1)
         self.assertFalse(any(c[1] == "lock" for c in uv.commands))
+
+    def test_registry_check_preserves_exit_code_and_does_not_replace_git_tree(self):
+        self.old_install()
+        for code in (1, 2):
+            with self.subTest(code=code):
+                uv = FakeGitUv()
+                check = mock.Mock(side_effect=[lockcheck.Result(0, []), lockcheck.Result(code, [])])
+                with self.assertRaisesRegex(locked.Refused, "lockfile check for") as ctx:
+                    self.install(uv=uv, check=check)
+                self.assertEqual(ctx.exception.code, code)
+                registry_entries = check.call_args.args[0]
+                self.assertEqual([entry.label for entry in registry_entries], ["anyio@4.0.0"])
+                self.assertFalse(any(c[1] == "sync" for c in uv.commands))
+                self.assert_old_untouched()
+                self.assertEqual(sorted(p.name for p in (self.root / "ex").iterdir()),
+                                 ["marker.txt"])
+
+    def test_sync_that_changes_the_lockfile_restores_the_old_git_tree(self):
+        self.old_install()
+        with self.assertRaisesRegex(locked.Refused, r"uv sync changed uv\.lock") as ctx:
+            self.install(uv=change_lock_after_sync(FakeGitUv()))
+        self.assertEqual(ctx.exception.code, 2)
+        self.assert_old_untouched()
 
     def test_default_build_backend_without_build_system(self):
         self.assertEqual(uv_mod.build_requires('[project]\nname = "x"\n'), ["setuptools>=40.8.0"])

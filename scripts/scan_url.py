@@ -403,9 +403,15 @@ def offer_git_mcp_install(source: ResolvedSource, dry_run: bool) -> None:
     package, script = infer_python_project(source.source_path)
     if not package:
         print("MCP source scan complete. No Python package metadata found for "
-              "automatic uv tool installation; provide an explicit launch command.")
+              "a locked mcp-git install; provide an explicit launch command.")
         return
+    from _mcp_uv import parse_git_url
     git_url = f"git+{source.install_hint}"
+    try:
+        parse_git_url(git_url)
+    except _mcp_locked.Refused as exc:
+        print(f"MCP source scan complete. Cannot offer a locked mcp-git install: {exc}")
+        return
     name = mcp_name_from_package(package)
     parts = [
         "python scripts/install_skill.py mcp-git",
@@ -428,7 +434,7 @@ def offer_git_mcp_install(source: ResolvedSource, dry_run: bool) -> None:
     selected = choose_install_tools()
     try:
         install_mcp_git(name, git_url, package, dry=False, selected=selected,
-                        executable=script, scanned_dir=source.source_path)
+                        executable=script, scanned_dir=source.repo_root or source.source_path)
     except _mcp_locked.Refused as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
 
@@ -767,7 +773,7 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
     if kind == "mcp-source":
         rc = run_mcp_static(path)
         match = re.fullmatch(r"https://github\.com/([^/@]+/[^/@]+)@([0-9a-f]{40})",
-                             source.install_hint or "")
+                             source.install_hint.partition("#")[0])
         if source.kind == "github" and match:
             scanned = match.group(1).lower() + (f"#{source.subpath}" if source.subpath else "")
             record_receipt("git", scanned, match.group(2),

@@ -213,6 +213,8 @@ scanned version (`mcp-npm`, `mcp-pypi`, `mcp-git`; remote HTTP/SSE MCPs as
 URL-only config) and never `npx` or `uvx`. Every package scan writes a receipt
 for its SAFE or BLOCK verdict. The locked installers require a receipt for the
 requested version and a separate SAFE receipt for each fast-lane fix.
+A GitHub subdirectory scan includes `#subdirectory=<path>` in the `mcp-git`
+offer so the install uses the receipt for that directory.
 
 Without any usable SkillSpector provider, skill/static scans run static-only
 (patterns, taint, YARA, OSV.dev still run), but the verdict is exit 2 (no
@@ -634,8 +636,11 @@ Options: `--name`, `--bin`/`--executable`/`--module`, `--override NAME=VERSION`
 with `--override-reason` (npm and PyPI), `--secret NAME` (key name only),
 `--accept "<reason>"` for a reviewed BLOCK of exactly this version, `--tools`,
 `--dry-run`. With `[mcp] register = [...]` in the config the installer writes
-no agent config but hands `agent-guard-register.json` to that command; a
-failed handoff is repeated with `python "$INSTALLER" mcp-register <tree>`.
+no agent config but hands `agent-guard-register.json` to that command. Retry
+a configured handoff with `python "$INSTALLER" mcp-register <tree>`.
+If registration fails after install, the tree stays in place. The installer
+reports installed but not registered and gives exit 2. If writing an agent
+config failed, fix the config and rerun the locked installer.
 `--min-age-days N` sets the wait for registry packages and, for Git, the
 commit and build tools. The default is 7. `--trusted-days N` (default 2)
 applies only to the top package of an npm update with same-repository SLSA
@@ -661,14 +666,17 @@ On exit 2 with `needs_scan` (items have `kind`, `package`, `version`), use the
 printed `scan_url.py` commands for the exact versions. For a fast-lane fix,
 require SAFE before retrying the same install. The installer pins the fixes,
 resolves again, and checks the whole tree and the receipt hashes before
-finishing. For an age-only wait, retry on the reported date. Failed advisory
-or KEV lookups prevent a fast-lane rebuild. A confirmed finding with no
-fast-lane fix takes precedence over incomplete lookups.
+finishing. Invalid dependency names in pins or age exemptions give exit 2
+before the rebuild runs. For an age-only wait, retry on the reported date.
+Failed advisory or KEV lookups prevent a fast-lane rebuild. A confirmed
+finding with no fast-lane fix takes precedence over incomplete lookups.
 
 Run `python "$INSTALLER" mcp-audit --json` for periodic advisory checks on
 installed local MCP trees. It checks lockfiles without age or receipt checks
 and never installs. Exit 0 means clean, 1 means a finding even if a fix is
-available, and 2 means incomplete without a finding. Git audits cover only
+available, and 2 means incomplete without a finding. A missing install
+directory gives exit 0 with `no install directory at <path>, nothing audited`
+in text output or the JSON `note` field. Git audits cover only
 registry entries in the lockfile. Locked trees never update themselves, so
 suggest running `mcp-audit` regularly; on a finding, install the fixed
 version with the locked installer. To check a candidate file, use
@@ -679,7 +687,9 @@ without an age check. In that mode any lookup failure takes precedence,
 giving exit 2 even when findings are present.
 
 `mcp` refuses `npx`, `uvx`, `bunx`, `pipx run`, `uv tool run`,
-`uv run --with`, `pnpm dlx`, `yarn dlx` as launch commands (exit 2).
+`uv run --with*`, `pnpm dlx`, `yarn dlx` as launch commands (exit 2), including
+through `cmd`, `sh`, `bash`, `zsh`, PowerShell, or `env`, and when launcher
+options precede the subcommand.
 
 For remote HTTP/SSE MCPs, no local dependency installation is needed:
 
@@ -714,6 +724,9 @@ the tree that was checked. Each local server runs from its own locked tree:
 | Remote/HTTP | `mcp-remote --url URL` | URL directly in config, no local code |
 
 Keep `install_dir` out of synced folders (OneDrive paths are refused).
+
+If finishing a tree fails or is interrupted, the installer restores the
+previous tree. Unreadable entry-point metadata gives exit 2.
 
 **Never:** `pip install` for MCP dependencies, global node modules, or `npx` /
 `uvx` / `bunx` / `pipx run` / `uv tool run` / `uv run --with` / `dlx` in an

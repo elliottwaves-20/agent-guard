@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -182,6 +183,51 @@ class Receipts(unittest.TestCase):
                 self.assertEqual(scan_url.scan_resolved(source, "mcp-source", dry_run=True), 0)
         receipt, _ = receipts.require_receipt(self.root, "git", "o/r", sha, None)
         self.assertEqual(receipt.archive_sha256, "cd" * 32)
+
+    def test_git_subdirectory_offer_matches_receipt_and_reads_scanned_project(self):
+        from tests.test_mcp_uv import FakeGitUv, SHA, git_lock, git_which, stub_check
+        from _mcp_uv import git_scan_ids, parse_git_url
+
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("repo/server/pyproject.toml",
+                        '[project]\nname = "example-mcp"\n'
+                        '[project.scripts]\nexample-server = "ex:main"\n'
+                        '[build-system]\nrequires = ["setuptools>=70"]\n')
+        with tempfile.TemporaryDirectory() as src:
+            url = f"https://github.com/example/mcp/tree/{SHA}/server"
+            with patch.object(resolver, "http_bytes", return_value=archive.getvalue()):
+                source = resolver.resolve_github(url, Path(src))
+            output = io.StringIO()
+            with patch.object(scan_url, "run_mcp_static", return_value=0), \
+                    patch.object(scan_url, "receipt_root", return_value=self.root), \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(scan_url.scan_resolved(source, "mcp-source", dry_run=True), 0)
+            git_url = output.getvalue().partition("--git-url ")[2].split()[0]
+            owner, repo, sha, subdir = parse_git_url(git_url)
+            self.assertEqual(subdir, "server")
+            identity = git_scan_ids(f"{owner}/{repo}", subdir)[0]
+            receipts.require_receipt(self.root, "git", identity, sha, None)
+
+            uv = FakeGitUv(lock_text=lambda name: git_lock(name, query_extra="subdirectory=server&"))
+            install_git = scan_url.install_mcp_git
+
+            def install(*args, **kwargs):
+                return install_git(
+                    *args, **kwargs, config={"mcp": {"install_dir": str(self.root)}},
+                    run=uv, which=git_which, check=stub_check(0), deliver=lambda *a, **kw: None,
+                    settled=lambda *a: ("c" * 40, None), branch_head=lambda *a: ("main", "d" * 40),
+                    compare=lambda *a: "behind")
+
+            with patch.object(scan_url, "interactive", return_value=True), \
+                    patch.object(scan_url, "confirm_install", return_value=True), \
+                    patch.object(scan_url, "choose_install_tools", return_value=["codex"]), \
+                    patch.object(scan_url, "install_mcp_git", side_effect=install), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                scan_url.offer_git_mcp_install(source, dry_run=False)
+            self.assertEqual(uv.requires.strip(), "setuptools>=70")
+            self.assertTrue((self.root / "example-mcp" / "uv.lock").is_file())
 
 
 class Fetch(unittest.TestCase):
