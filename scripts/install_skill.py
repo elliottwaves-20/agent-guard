@@ -57,18 +57,36 @@ import tempfile
 import traceback
 from pathlib import Path
 
-import _distribution
 import _fastlane
 import _mcp_locked
-import _skills_cli
-import _skillspector
+import _user_config
 from _mcp_locked import age_arg, parse_overrides
-from _skillspector import run_skillspector
 from _user_config import ConfigError
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10: automatic pyproject inference is optional.
     tomllib = None
+
+
+def _audit_cli_requested(argv):
+    # Select the mode before importing the scanner, which loads config on import.
+    selector = argparse.ArgumentParser(add_help=False, exit_on_error=False)
+    selector.add_argument("--workspace")
+    selector.add_argument("mode", nargs="?")
+    try:
+        args, _ = selector.parse_known_args(argv)
+    except argparse.ArgumentError:
+        return False
+    return args.mode == "mcp-audit"
+
+
+_AUDIT_CLI = __name__ == "__main__" and _audit_cli_requested(sys.argv[1:])
+if not _AUDIT_CLI:
+    import _distribution
+    import _skills_cli
+    import _skillspector
+    from _skillspector import run_skillspector
+
 
 # ── Base paths (no hardcoded usernames) ──────────────────────────────────────
 
@@ -807,6 +825,16 @@ def cmd_mcp_register(args, *, config: dict, env, platform: str, register_run=Non
     return _mcp_locked.rerun_register(args.tree, settings, run=register_run)
 
 
+def cmd_mcp_audit(args, *, config: dict, env, platform: str, fetch=None):
+    """Inspect the installed lockfiles without running any installer."""
+    import _lockcheck
+
+    policy = _mcp_policy(args)
+    root = _mcp_locked.settings(config, env, platform).install_dir
+    return _mcp_locked.audit_trees(root, policy=policy,
+                                  fetch=_lockcheck.http_fetch if fetch is None else fetch)
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 _POLICY_HELP = {
@@ -817,6 +845,8 @@ _POLICY_HELP = {
              "Never rebuild the tree with a younger scanned security fix; report the advisory"),
     "git": ("Accepted; no effect for Git sources (default: 2)",
             "Accepted; no effect for Git sources"),
+    "audit": ("Trusted age policy in days (default: 2; at most --min-age-days)",
+              "Disable fast-lane fix recommendations"),
 }
 
 
@@ -858,6 +888,47 @@ def _run_locked_mcp(args, handler):
                           "tier": installed.tier if installed else ""}))
     if code:
         sys.exit(code)
+
+
+def _audit_output(result, as_json):
+    code = result["code"]
+    if "error" in result:
+        print(f"NO VERDICT -- {result['error']}", file=sys.stderr)
+    if as_json:
+        print(json.dumps(result))
+    else:
+        for tree in result["trees"]:
+            label = tree["status"].replace("_", " ").upper()
+            error = " | ".join(tree["error"].splitlines()) if tree["error"] else ""
+            detail = f" ({error})" if error else ""
+            print(f"{tree['name']}: {label} ({tree['scope']}){detail}")
+            for finding in tree["findings"]:
+                package = (f"{finding['package']}@{finding['version']}"
+                           if finding["package"] is not None else "unmatched advisory")
+                decision = finding["decision"]
+                action = ""
+                if decision is not None:
+                    version = f" {decision['version']}" if decision["version"] else ""
+                    action = f" -> {decision['action']}{version} ({decision['reason']})"
+                print(f"  {package}: {', '.join(finding['advisories'])}{action}")
+        for name in result["leftovers"]:
+            print(f"Leftover: {name}", file=sys.stderr)
+    return code
+
+
+def _run_mcp_audit(args):
+    output = contextlib.redirect_stdout(sys.stderr) if args.json else contextlib.nullcontext()
+    try:
+        with output:
+            config = _user_config.load_config()
+            result = cmd_mcp_audit(args, config=config, env=os.environ, platform=sys.platform)
+        return _audit_output(result, args.json)
+    except (_mcp_locked.Refused, ConfigError) as exc:
+        result = {"code": 2, "trees": [], "leftovers": [], "error": str(exc)}
+    except (Exception, SystemExit, KeyboardInterrupt) as exc:
+        result = {"code": 2, "trees": [], "leftovers": [],
+                  "error": f"unexpected error: {type(exc).__name__}: {exc}"}
+    return _audit_output(result, args.json)
 
 
 def main():
@@ -991,7 +1062,22 @@ def main():
                                                 "[mcp] register command again")
     p_reg.add_argument("tree", type=Path, help="Directory of the installed server")
 
-    args = parser.parse_args()
+    p_audit = sub.add_parser("mcp-audit", help="Check installed locked MCP trees for advisories")
+    _add_mcp_policy_options(p_audit, "audit")
+
+    parsed = argparse.Namespace()
+    try:
+        args = parser.parse_args(namespace=parsed)
+    except SystemExit as exc:
+        if exc.code == 2 and getattr(parsed, "mode", None) == "mcp-audit":
+            return _audit_output({"code": 2, "trees": [], "leftovers": [],
+                                  "error": "invalid mcp-audit arguments"}, "--json" in sys.argv[1:])
+        raise
+
+    if args.mode == "mcp-audit":
+        return _run_mcp_audit(args)
+    if _AUDIT_CLI:
+        sys.exit(2)
 
     locked_modes = {"mcp-npm": cmd_mcp_npm, "mcp-pypi": cmd_mcp_pypi,
                     "mcp-git": cmd_mcp_git, "mcp-register": cmd_mcp_register}
@@ -1066,4 +1152,4 @@ if __name__ == "__main__":
     import _console
 
     _console.utf8_stdio()
-    main()
+    raise SystemExit(main())

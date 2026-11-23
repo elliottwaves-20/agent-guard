@@ -11,15 +11,18 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import hashlib
 import json
 import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 METADATA = "agent-guard-mcp.json"
@@ -245,12 +248,15 @@ def staged(root: Path, name: str):
             shutil.rmtree(stage, ignore_errors=True)
 
 
+def _is_leftover(path: Path, name_pattern: str) -> bool:
+    return bool(re.match(rf"\.{name_pattern}\.(?:staging|old)-", path.name))
+
+
 def stale_leftovers(root: Path, name: str) -> list:
     """Staging and old trees an aborted earlier run left behind (reported, never removed)."""
     if not root.is_dir():
         return []
-    return [p for p in root.iterdir()
-            if p.name.startswith((f".{name}.staging-", f".{name}.old-"))]
+    return [p for p in root.iterdir() if _is_leftover(p, re.escape(name))]
 
 
 def replace_tree(stage: Path, target: Path,
@@ -310,6 +316,193 @@ def write_metadata(directory: Path, installed: Installed) -> None:
             "agent_guard": agent_guard_version(), "tier": installed.tier,
             "fast_lane": installed.fast_lane, "source": installed.source}
     (directory / METADATA).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _audit_stat(path: Path) -> os.stat_result:
+    info = path.lstat()
+    if (stat.S_ISLNK(info.st_mode)
+            or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        raise Refused(2, f"{path} is a link or reparse point (including junctions)")
+    return info
+
+
+def _audit_stamp(info: os.stat_result) -> tuple:
+    return info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns
+
+
+def _audit_verify(snapshot: dict) -> None:
+    for path, stamp in snapshot.items():
+        if _audit_stamp(_audit_stat(path)) != stamp:
+            raise Refused(2, f"{path} changed during the audit")
+
+
+def _audit_open(path, flags):
+    return os.open(path, flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+
+
+def _audit_read(path: Path, snapshot: dict) -> bytes:
+    _audit_verify(snapshot)
+    info = _audit_stat(path)
+    if not stat.S_ISREG(info.st_mode):
+        raise Refused(2, f"{path} is not a regular file")
+    snapshot[path] = _audit_stamp(info)
+    with open(path, "rb", opener=_audit_open) as stream:
+        if _audit_stamp(os.fstat(stream.fileno())) != snapshot[path]:
+            raise Refused(2, f"{path} changed before it could be read")
+        _audit_verify(snapshot)
+        return stream.read()
+
+
+def _audit_entries(path: Path, metadata: dict, snapshot: dict):
+    import _lockcheck
+    import _mcp_npm
+    import _mcp_uv
+
+    kind, package = metadata["kind"], metadata["package"]
+    lock = path / (_mcp_npm.LOCKFILE if kind == "npm" else _mcp_uv.LOCKFILE)
+    content = _audit_read(lock, snapshot)
+    if metadata.get("lockfile_sha256") != hashlib.sha256(content).hexdigest():
+        raise Refused(2, f"{lock.name} SHA-256 does not match installed metadata")
+    text = content.decode("utf-8")
+    if kind == "npm":
+        return _lockcheck.npm_lock_entries(json.loads(text))
+    pin = None
+    if kind == "git":
+        source = metadata.get("source")
+        if not isinstance(source, str) or not source.strip():
+            raise Refused(2, "Git metadata is missing a source")
+        owner, repo, sha, subdirectory = _mcp_uv.parse_git_url(source)
+        pin = _lockcheck.GitPin(normalize_pypi(package), f"https://github.com/{owner}/{repo}",
+                                sha, subdirectory)
+    return _lockcheck.uv_lock_entries(text, _mcp_uv.project_name(path.name), pin)
+
+
+def _audit_findings(advisories: list, decisions: list) -> list:
+    from _lockcheck import entry_key
+
+    records = {(record["package"], record["installed"]): record for record in decisions}
+    groups = {}
+    for advisory in advisories:
+        entry = advisory.entry
+        key = entry_key(entry) if entry is not None else None
+        if key not in groups:
+            package, version = (entry.name, entry.version) if entry is not None else (None, None)
+            groups[key] = {"package": package, "version": version, "advisories": [],
+                           "decision": records.get((package, version))}
+        ids = groups[key]["advisories"]
+        if advisory.id not in ids:
+            ids.append(advisory.id)
+    return list(groups.values())
+
+
+def _audit_tree(path: Path, snapshot: dict, *, policy, fetch, now) -> dict | None:
+    import _fastlane
+    import _lockcheck
+
+    tree = {"name": path.name, "kind": None, "path": str(path), "status": "no_verdict",
+            "scope": "all locked entries", "findings": [], "error": None}
+    try:
+        _audit_verify(snapshot)
+        info = _audit_stat(path)
+        if not stat.S_ISDIR(info.st_mode):
+            return None
+        snapshot[path] = _audit_stamp(info)
+        check_name(path.name)
+        metadata = json.loads(_audit_read(path / METADATA, snapshot))
+        if not isinstance(metadata, dict):
+            raise Refused(2, f"{METADATA} must contain a JSON object")
+        kind, package = metadata.get("kind"), metadata.get("package")
+        if kind not in ("npm", "pypi", "git"):
+            raise Refused(2, f"{METADATA} has an invalid kind")
+        tree["kind"] = kind
+        if kind == "git":
+            tree["scope"] = "registry entries; the git commit itself has no advisory source"
+        if not isinstance(package, str) or not package.strip():
+            raise Refused(2, f"{METADATA} has no package")
+        entries = _audit_entries(path, metadata, snapshot)
+        verdict = _fastlane.judge_tree(
+            entries, {}, receipts_root=path.parent, kind=kind, user_overrides={},
+            policy=policy, fetch=fetch, now=now, check=partial(_lockcheck.check, ages=False),
+            check_receipts=False)
+        checked = verdict.check_result
+        if checked is None:
+            tree["error"] = " | ".join(verdict.lines) or "lockfile check gave no verdict"
+            return tree
+
+        tree["findings"] = _audit_findings(checked.advisories, verdict.decisions)
+        errors = list(checked.failures)
+        if verdict.kev_unavailable:
+            errors.append("KEV feed unavailable")
+        errors.extend(f"{record['package']}@{record['installed']}: {record['reason']}"
+                      for record in verdict.decisions if record["action"] == "no_verdict")
+        if checked.advisories or checked.blocking or checked.code == 1:
+            tree["status"] = "finding"
+            if not checked.advisories:
+                errors.extend(checked.blocking or checked.lines)
+        elif checked.code != 0 or errors:
+            if not errors:
+                errors.extend(checked.lines or ["lockfile check gave no verdict"])
+        else:
+            tree["status"] = "clean"
+        tree["error"] = " | ".join(errors) or None
+    except (Refused, _lockcheck.NoVerdict) as exc:
+        tree["error"] = str(exc)
+    except Exception as exc:
+        tree["error"] = f"{type(exc).__name__}: {exc}"
+    return tree
+
+
+def audit_trees(root: Path, *, policy, fetch, now=None) -> dict:
+    """Check installed lockfiles and report findings without changing the trees."""
+    audit = {"code": 0, "trees": [], "leftovers": []}
+    try:
+        root = Path(root)
+        try:
+            info = _audit_stat(root)
+        except FileNotFoundError:
+            return audit
+        if not stat.S_ISDIR(info.st_mode):
+            raise Refused(2, f"{root} is not a directory")
+        children = sorted(root.iterdir(), key=lambda child: child.name)
+    except Exception as exc:
+        return {**audit, "code": 2, "error": str(exc)}
+
+    root_snapshot = {root: _audit_stamp(info)}
+    checked_trees = []
+    for child in children:
+        if child.name.startswith("."):
+            if _is_leftover(child, NAME_RE.pattern):
+                try:
+                    if stat.S_ISDIR(child.lstat().st_mode):
+                        audit["leftovers"].append(child.name)
+                except OSError as exc:
+                    audit["error"] = str(exc)
+            continue
+        snapshot = dict(root_snapshot)
+        tree = _audit_tree(child, snapshot, policy=policy, fetch=fetch, now=now)
+        if tree is not None:
+            audit["trees"].append(tree)
+            if tree["status"] != "no_verdict":
+                checked_trees.append((tree, snapshot))
+
+    for tree, snapshot in checked_trees:
+        try:
+            _audit_verify(snapshot)
+        except (OSError, Refused) as exc:
+            tree["error"] = " | ".join(filter(None, (tree["error"], str(exc))))
+            if tree["status"] == "clean":
+                tree["status"] = "no_verdict"
+    try:
+        _audit_verify(root_snapshot)
+    except (OSError, Refused) as exc:
+        audit["error"] = str(exc)
+
+    statuses = {tree["status"] for tree in audit["trees"]}
+    if "finding" in statuses:
+        audit["code"] = 1
+    elif "no_verdict" in statuses or "error" in audit:
+        audit["code"] = 2
+    return audit
 
 
 # ── Handoff (A5) ─────────────────────────────────────────────────────────────

@@ -566,6 +566,8 @@ class TreeVerdict:
     young: list = field(default_factory=list)
     fixes: dict = field(default_factory=dict)
     notes: list = field(default_factory=list)
+    check_result: _lockcheck.Result | None = None
+    kev_unavailable: bool = False
 
 
 def _record(entry: Entry, decision: dict, repo: str | None) -> dict:
@@ -626,7 +628,8 @@ def user_override(entry: Entry, user_overrides: dict) -> str | None:
 def judge_tree(entries: list[Entry], previous: dict, *, receipts_root: Path, kind: str,
                user_overrides: dict, policy: Policy, fetch, now=None, age_limits=None,
                check=_lockcheck.check, unavailable: str | None = None,
-               pypi_installed: dict[tuple, Entry] | None = None) -> TreeVerdict:
+               pypi_installed: dict[tuple, Entry] | None = None,
+               check_receipts: bool = True) -> TreeVerdict:
     """The one rule for a resolved tree: lockfile check, then a decision per affected entry.
 
     Exit mapping: any report gives 1; otherwise any no verdict, lookup failure or
@@ -635,14 +638,15 @@ def judge_tree(entries: list[Entry], previous: dict, *, receipts_root: Path, kin
     caller cannot rebuild a tree with a fix). `previous` is accepted for the
     callers that judge a list against an installed state; the build path of
     npm_install does not use it. If supplied, `pypi_installed` is the evidence
-    for installed PyPI artifacts by exact entry key."""
+    for installed PyPI artifacts by exact entry key. An audit can skip receipt
+    checks and use the lockfile result and decisions directly."""
     try:
         result = check(entries, now=now, fetch=fetch, min_age_days=policy.min_age_days,
                        age_limits=age_limits)
     except Exception as exc:
         return TreeVerdict(2, [f"NO VERDICT -- lockfile check failed: {type(exc).__name__}: {exc}"])
     verdict = TreeVerdict(result.code, list(result.lines), list(result.advisories),
-                          young=list(result.young))
+                          young=list(result.young), check_result=result)
     # A finding that is no advisory (hash or integrity differs) has no fast lane.
     if result.code != 1 or not result.advisories or result.blocking:
         return verdict
@@ -651,6 +655,7 @@ def judge_tree(entries: list[Entry], previous: dict, *, receipts_root: Path, kin
         kev = kev_cves(fetch)
     except Exception:
         kev = None
+    verdict.kev_unavailable = kev is None
     groups: dict = {}
     unmatched = []
     for advisory in result.advisories:
@@ -690,7 +695,8 @@ def judge_tree(entries: list[Entry], previous: dict, *, receipts_root: Path, kin
         verdict.code = 2  # a young entry next to the fixes waits; it is not a fix
     else:
         verdict.code = 0
-        _collect_fixes(verdict, receipts_root, kind)
+        if check_receipts:
+            _collect_fixes(verdict, receipts_root, kind)
     return verdict
 
 
