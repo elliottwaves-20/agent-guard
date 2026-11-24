@@ -328,6 +328,16 @@ def receipt_root() -> Path:
     return _mcp_locked.settings(_skillspector.USER_CONFIG, os.environ, sys.platform).install_dir
 
 
+def receipt_verdict(stages: tuple) -> int:
+    """The verdict a receipt may carry: SAFE or BLOCK only when every stage
+    reached a verdict. A stage without one (exit 2, e.g. Docker not running)
+    leaves no receipt even beside a BLOCK, because a missing verdict can never
+    be accepted (#48, K1); the scan's own exit code still shows the findings."""
+    if any(code not in (0, 1) for code in stages):
+        return 2
+    return combine_verdicts(*stages)
+
+
 def record_receipt(kind: str, package: str, version: str, meta: dict, rc: int) -> None:
     """Record a SAFE or BLOCK verdict for the exact scanned archive (#48, K1).
 
@@ -707,10 +717,11 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
         meta: dict = {}
         with tempfile.TemporaryDirectory() as d:
             pinned = fetch_pypi(source.install_hint, Path(d), meta=meta, wheel=True)
-            rc = run_mcp_static(Path(d))
-        rc = combine_verdicts(rc, run_dynamic_stage("pypi", pinned, dynamic))
+            static_rc = run_mcp_static(Path(d))
+        stages = (static_rc, run_dynamic_stage("pypi", pinned, dynamic))
+        rc = combine_verdicts(*stages)
         package, _, version = pinned.partition("==")
-        record_receipt("pypi", package, version, meta, rc)
+        record_receipt("pypi", package, version, meta, receipt_verdict(stages))
         if rc == 0:
             offer_locked_mcp_install("pypi", package, version, dry_run)
         return rc
@@ -719,10 +730,11 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
         meta = {}
         with tempfile.TemporaryDirectory() as d:
             pinned = fetch_npm(source.install_hint, Path(d), meta=meta)
-            rc = run_mcp_static(Path(d))
-        rc = combine_verdicts(rc, run_dynamic_stage("npm", pinned, dynamic))
+            static_rc = run_mcp_static(Path(d))
+        stages = (static_rc, run_dynamic_stage("npm", pinned, dynamic))
+        rc = combine_verdicts(*stages)
         package, _, version = pinned.rpartition("@")
-        record_receipt("npm", package, version, meta, rc)
+        record_receipt("npm", package, version, meta, receipt_verdict(stages))
         if rc == 0:
             offer_locked_mcp_install("npm", package, version, dry_run)
         return rc

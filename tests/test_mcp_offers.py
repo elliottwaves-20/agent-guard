@@ -115,7 +115,7 @@ class Receipts(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def scan_npm(self, static_rc, meta=None):
+    def scan_npm(self, static_rc, meta=None, dynamic_rc=0):
         def fetch(spec, dest, meta_out=None, **_kw):
             if meta_out is not None and meta is not None:
                 meta_out.update(meta)
@@ -123,7 +123,7 @@ class Receipts(unittest.TestCase):
         source = resolver.ResolvedSource(kind="npm", install_hint="@s/x@1.2.3", label="npm")
         with patch.object(scan_url, "fetch_npm", side_effect=lambda s, d, meta=None: fetch(s, d, meta)), \
                 patch.object(scan_url, "run_mcp_static", return_value=static_rc), \
-                patch.object(scan_url._dynamic, "run", return_value=0), \
+                patch.object(scan_url._dynamic, "run", return_value=dynamic_rc), \
                 patch.object(scan_url, "receipt_root", lambda: self.root), \
                 patch.object(scan_url, "offer_locked_mcp_install") as offer, \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -146,6 +146,33 @@ class Receipts(unittest.TestCase):
                     self.assertEqual((data["verdict"], data["integrity"], data["archive_sha256"]),
                                      (verdict, "sha512-x", "ab" * 32))
                 self.assertEqual(offer.called, static_rc == 0)
+
+    def test_stage_without_verdict_writes_no_receipt_even_beside_block(self):
+        """K1: no verdict cannot be accepted. A BLOCK from one stage next to a
+        stage without verdict (e.g. Docker not running) must not become an
+        acceptable BLOCK receipt; the exit code still shows the findings."""
+        meta = {"archive_sha256": "ab" * 32, "integrity": "sha512-x"}
+        for static_rc, dynamic_rc, exit_rc in ((1, 2, 1), (2, 1, 1), (0, 2, 2), (1, 7, 1)):
+            with self.subTest(static=static_rc, dynamic=dynamic_rc):
+                for p in (self.root / ".receipts").glob("*"):
+                    p.unlink()
+                rc, offer = self.scan_npm(static_rc, meta, dynamic_rc=dynamic_rc)
+                self.assertEqual(rc, exit_rc)
+                self.assertFalse(receipts.receipt_path(self.root, "npm", "@s/x", "1.2.3").exists())
+                self.assertFalse(offer.called)
+
+    def test_pypi_stage_without_verdict_writes_no_receipt(self):
+        def fetch(spec, dest, meta=None, wheel=False):
+            meta.update({"archive_sha256": "ab" * 32})
+            return "x==1.0"
+        source = resolver.ResolvedSource(kind="pypi", install_hint="x==1.0", label="pypi")
+        with patch.object(scan_url, "fetch_pypi", side_effect=fetch), \
+                patch.object(scan_url, "run_mcp_static", return_value=1), \
+                patch.object(scan_url._dynamic, "run", return_value=2), \
+                patch.object(scan_url, "receipt_root", lambda: self.root), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(scan_url.scan_resolved(source, "auto", dry_run=True), 1)
+        self.assertFalse(receipts.receipt_path(self.root, "pypi", "x", "1.0").exists())
 
     def test_unknown_archive_hash_writes_no_receipt(self):
         rc, _offer = self.scan_npm(0, meta=None)
