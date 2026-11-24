@@ -355,6 +355,9 @@ class SandboxIntegrationTests(unittest.TestCase):
         self.runtime = patch.object(sm, "launch_runtime_problem", return_value=None)
         self.runtime_mock = self.runtime.start()
         self.patches.append(self.runtime)
+        self.parity = patch.object(sm, "runtime_parity_warnings", return_value=[])
+        self.parity.start()
+        self.patches.append(self.parity)
         self.start = patch.object(sm._egress.Capture, "start", return_value=self.capture)
         self.start_mock = self.start.start()
         self.cisco = patch.object(sm, "run_cisco", return_value=0)
@@ -384,6 +387,13 @@ class SandboxIntegrationTests(unittest.TestCase):
         self.runtime_mock.assert_called_once_with(["uvx", "some-mcp"], "sandbox:tag")
         self.cisco_mock.assert_not_called()
         self.start_mock.assert_not_called()
+
+    def test_parity_warning_is_printed_and_keeps_the_verdict(self):
+        with patch.object(self.scan_mcp, "runtime_parity_warnings",
+                          return_value=["sandbox runs python 3.14.10, this machine 3.13.18"]):
+            code, out = self.sandbox()
+        self.assertEqual(code, 0)
+        self.assertIn("[WARN] sandbox runs python 3.14.10, this machine 3.13.18", out)
 
     def test_sandbox_environment_makes_npm_strict_about_engines(self):
         self.sandbox()
@@ -458,6 +468,37 @@ class SandboxImageTests(unittest.TestCase):
         sm = importlib.import_module("scan_mcp")
         self.assertNotIn("cisco-ai-mcp-scanner", sm.SANDBOX_DOCKERFILE)
         self.assertTrue(sm.sandbox_image().startswith(sm.DOCKER_IMAGE + ":"))
+
+
+class RuntimeParityTests(unittest.TestCase):
+    """The sandbox should run the runtime line this machine runs the server on."""
+
+    def setUp(self):
+        self.sm = importlib.import_module("scan_mcp")
+
+    def test_same_node_major_is_quiet(self):
+        self.assertIsNone(self.sm.parity_warning("node", "26.13.1", "26.9.0"))
+
+    def test_other_node_major_warns_with_both_versions(self):
+        text = self.sm.parity_warning("node", "26.13.1", "24.22.3")
+        self.assertIn("26.13.1", text)
+        self.assertIn("24.22.3", text)
+
+    def test_python_compares_major_and_minor(self):
+        self.assertIsNone(self.sm.parity_warning("python", "3.14.10", "3.14.2"))
+        self.assertIn("3.13.18", self.sm.parity_warning("python", "3.14.10", "3.13.18"))
+
+    def test_missing_host_runtime_is_said_not_hidden(self):
+        self.assertIn("not found", self.sm.parity_warning("node", "26.13.1", None))
+
+    def test_launcher_picks_the_runtime_it_needs(self):
+        with patch.object(self.sm, "host_runtime_version", return_value="24.1.0") as host:
+            warnings = self.sm.runtime_parity_warnings(["npx", "-y", "pkg@1"])
+        host.assert_called_once_with("node")
+        self.assertEqual(len(warnings), 1)
+        with patch.object(self.sm, "host_runtime_version") as host:
+            self.assertEqual(self.sm.runtime_parity_warnings(["docker", "run", "x"]), [])
+        host.assert_not_called()
 
 
 class CommandLineTests(unittest.TestCase):

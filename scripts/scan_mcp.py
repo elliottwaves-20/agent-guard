@@ -631,6 +631,8 @@ def run_sandbox(command: list, *, allow_hosts=(), network: bool = True) -> int:
         print(f"[BLOCK] NO VERDICT -- {mismatch}. A scan on another runtime would "
               "judge a server that behaves differently. Do NOT install on this result.")
         return 2
+    for warning in runtime_parity_warnings(command):
+        print(f"  [WARN] {warning}")
 
     capture = None
     if network:
@@ -775,6 +777,54 @@ def launch_runtime_problem(command: list, image: str) -> str | None:
     if not ok:
         return f"{package} needs {runtime} {spec}, the sandbox runs {runtime} {have}"
     return None
+
+
+def host_runtime_version(runtime: str) -> str | None:
+    """Version of the runtime this machine runs installed servers on: `node`
+    for npm trees, the interpreter `uv run --project` picks for PyPI trees."""
+    try:
+        if runtime == "node":
+            node = shutil.which("node")
+            if not node:
+                return None
+            out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=30)
+            return out.stdout.strip().lstrip("v") or None
+        uv = shutil.which("uv")
+        if not uv:
+            return None
+        found = subprocess.run([uv, "python", "find", "--no-project"],
+                               capture_output=True, text=True, timeout=60).stdout.strip()
+        if not found:
+            return None
+        out = subprocess.run([found, "-c", "import platform; print(platform.python_version())"],
+                             capture_output=True, text=True, timeout=30)
+        return out.stdout.strip() or None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def parity_warning(runtime: str, sandbox: str, host: str | None) -> str | None:
+    """Warn when the sandbox runs another runtime line than this machine
+    (Node: major; Python: major.minor). The verdict stays; the reader decides."""
+    if host is None:
+        return (f"{runtime} not found on this machine: the sandbox runs {runtime} "
+                f"{sandbox}; cannot tell whether the installed server will behave the same")
+    parts = 1 if runtime == "node" else 2
+    if sandbox.split(".")[:parts] == host.split(".")[:parts]:
+        return None
+    return (f"the sandbox runs {runtime} {sandbox}, this machine runs {runtime} {host}: "
+            "the installed server may behave differently than in this scan")
+
+
+def runtime_parity_warnings(command: list) -> list[str]:
+    from audit_installed import launcher_name
+
+    runtime = {"npx": "node", "uvx": "python"}.get(launcher_name(command[0]) if command else "")
+    if runtime is None:
+        return []
+    sandbox = {"node": SANDBOX_NODE, "python": SANDBOX_PYTHON}[runtime]
+    warning = parity_warning(runtime, sandbox, host_runtime_version(runtime))
+    return [warning] if warning else []
 
 
 def sandbox_image() -> str:

@@ -108,6 +108,15 @@ class SandboxImageTests(unittest.TestCase):
             problem = sm.launch_runtime_problem(["npx", "-y", "pkg@1.0.0"], self.tag)
         self.assertIn("offline", problem)
 
+    def test_host_runtime_versions_are_read_from_this_machine(self):
+        node = subprocess.run(["node", "--version"], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(sm.host_runtime_version("node"), node.lstrip("v"))
+        found = subprocess.run(["uv", "python", "find", "--no-project"],
+                               capture_output=True, text=True).stdout.strip()
+        version = subprocess.run([found, "-c", "import platform; print(platform.python_version())"],
+                                 capture_output=True, text=True).stdout.strip()
+        self.assertEqual(sm.host_runtime_version("python"), version)
+
     def test_registry_metadata_has_the_fields_the_pre_check_reads(self):
         # Contract for the http_json stand-ins above: the real registries answer
         # with these shapes.
