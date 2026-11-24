@@ -90,3 +90,21 @@ GUARDDOG_IMAGE = ("ghcr.io/datadog/guarddog:3.2.0@sha256:"
 MALCONTENT_VERSION = "1.28.1"
 MALCONTENT_IMAGE = ("cgr.dev/chainguard/malcontent:latest@sha256:"
                     "98734fbb8de4510ac4f5b6e820b74e38d5bd528884e579a2c44afa57aeba0fcf")
+
+# Runtimes of the MCP sandbox image (scan_mcp.py), from official images pinned
+# by digest. Pick a maintained line that MCP packages support and its latest
+# patch, not the newest line (Python 3.14 over 3.15: same security fixes, wider
+# package support; user, 2026-11-24). Docker Library rebuilds its tags daily, so
+# a digest is the newest build of the version that is at least 2 days old
+# (history: github.com/docker-library/repo-info, repos/<image>/remote/<tag>.md).
+# check_image_pins.py reports new patches, uv releases and end of life;
+# tests/test_sandbox_image.py checks the built image.
+SANDBOX_NODE = "26.13.1"     # LTS, released 2026-11-10 (security release)
+SANDBOX_NODE_IMAGE = ("node:26.13.1-trixie-slim@sha256:"
+                      "e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc")
+SANDBOX_PYTHON = "3.14.10"   # released 2026-10-25
+SANDBOX_PYTHON_IMAGE = ("python:3.14.10-slim-trixie@sha256:"
+                        "9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f")
+SANDBOX_UV = "0.13.9"        # released 2026-11-17, image attested by astral-sh/uv
+SANDBOX_UV_IMAGE = ("ghcr.io/astral-sh/uv:0.13.9@sha256:"
+                    "d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d")

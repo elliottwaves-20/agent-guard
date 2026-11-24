@@ -8,6 +8,15 @@
   or an unpinned `python:3.12-slim` and `pip install uv`. It is built from
   official images pinned by digest: Node 26.13.1, Python 3.14.10, uv 0.13.9.
   `tests/test_sandbox_image.py` builds the image and checks each version.
+- A sandbox scan of a package whose `engines.node` / `requires-python` the
+  sandbox runtime does not satisfy is NO VERDICT: npm used to warn
+  (`EBADENGINE`) and run it anyway, so a scan on the wrong runtime looked
+  normal. `NPM_CONFIG_ENGINE_STRICT=true` stops npm for dependencies the
+  pre-check cannot see. Another runtime line than on this machine prints a
+  `[WARN]`.
+- `check_image_pins.py` also reports new uv releases, new Node.js/Python
+  patches of the pinned sandbox lines and `[EOL]` when a line has ended or
+  ends within 90 days.
 - Local MCP servers no longer run through `npx`/`uvx`, which pin only the top
   package and resolve the rest of the tree again at every start, unchecked
   (#48). The locked `mcp-npm`, `mcp-pypi` and `mcp-git` installers give

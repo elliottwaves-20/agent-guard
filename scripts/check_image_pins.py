@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Report newer releases of the pinned scanner images (GuardDog, malcontent).
+"""Report newer releases of the pinned images (scanners and MCP sandbox).
 
 The images are pinned by digest in _pins.py and never follow a moving tag.
-This check keeps the pins from freezing: it compares the pinned versions with
-the projects' GitHub releases and says when a newer release may be pinned
-(at least 7 days after publication). It changes nothing.
+This check keeps the pins from freezing: it compares the pinned versions of
+GuardDog, malcontent and the sandbox's uv with the projects' GitHub releases,
+and the sandbox's Node.js and Python with the latest patch and end of life of
+their release line (endoflife.date). It says when a newer release may be
+pinned (at least 7 days after publication) and reports [EOL] when a line has
+ended or ends within 90 days. It changes nothing.
 
 Usage:
   check_image_pins.py                          report; exit 0 = up to date,
@@ -37,7 +40,15 @@ USER_AGENT = "agent-guard-check-image-pins"
 SCANNERS = {
     "DataDog/guarddog": ("GuardDog", _pins.GUARDDOG_VERSION),
     "chainguard-dev/malcontent": ("malcontent", _pins.MALCONTENT_VERSION),
+    "astral-sh/uv": ("uv (MCP sandbox)", _pins.SANDBOX_UV),
 }
+# endoflife.date product -> (display name, pinned version) of the MCP sandbox
+# runtimes. Reported: a newer patch of the pinned line, and its end of life.
+RUNTIMES = {
+    "nodejs": ("Node.js (MCP sandbox)", _pins.SANDBOX_NODE),
+    "python": ("Python (MCP sandbox)", _pins.SANDBOX_PYTHON),
+}
+EOL_WARNING = timedelta(days=90)
 # Packages that only the -dev variant (with a shell) carries.
 DEV_ONLY_PACKAGES = ("busybox", "apk-tools", "bash")
 _VERSION = re.compile(r"^v?(\d+(?:\.\d+)*)$")
@@ -88,9 +99,61 @@ def fetch_releases(repo: str) -> list:
                      {"Accept": "application/vnd.github+json"})
 
 
-def check(fetch=fetch_releases, now=None) -> int:
+def runtime_line(product: str, version: str) -> str:
+    """Release line endoflife.date files a version under: Node by major,
+    Python by major.minor."""
+    return ".".join(version.split(".")[:1 if product == "nodejs" else 2])
+
+
+def fetch_line(product: str, line: str) -> dict:
+    return _get_json(f"https://endoflife.date/api/v1/products/{product}/releases/{line}")["result"]
+
+
+def _day(value: str) -> datetime:
+    return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+
+def check_runtime(name: str, product: str, pinned: str, info: dict, now: datetime) -> int:
+    line = runtime_line(product, pinned)
+    if info.get("name") != line:
+        raise ValueError(f"answer is for line {info.get('name')!r}, not {line!r}")
+    rc = 0
+    eol = _day(info["eolFrom"])
+    if info["isEol"] or eol <= now:
+        print(f"[EOL] {name} line {line} reached end of life on {eol:%Y-%m-%d}: "
+              "move the sandbox to a maintained line (scripts/_pins.py).")
+        rc = 1
+    elif eol - now <= EOL_WARNING:
+        print(f"[EOL] {name} line {line} reaches end of life on {eol:%Y-%m-%d}: "
+              "plan the move to a maintained line (scripts/_pins.py).")
+        rc = 1
+    latest = info["latest"]["name"]
+    if parse_version(latest) is None or parse_version(pinned) is None:
+        raise ValueError(f"unreadable version: latest {latest!r}, pinned {pinned!r}")
+    if parse_version(latest) <= parse_version(pinned):
+        if rc == 0:
+            print(f"[OK] {name} {pinned} is up to date.")
+        return rc
+    published = _day(info["latest"]["date"])
+    if published + MIN_AGE <= now:
+        print(f"[UPDATE] {name} {latest} can be pinned (released {published:%Y-%m-%d}); "
+              f"pinned is {pinned}.")
+    else:
+        print(f"[WAIT] {name} {latest} released {published:%Y-%m-%d}; can be pinned from "
+              f"{published + MIN_AGE:%Y-%m-%d} (a security fix earlier, see scripts/_pins.py).")
+    return 1
+
+
+def check(fetch=fetch_releases, now=None, fetch_line=fetch_line) -> int:
     now = now or datetime.now(timezone.utc)
     rc = 0
+    for product, (name, pinned) in RUNTIMES.items():
+        try:
+            rc = max(rc, check_runtime(name, product, pinned,
+                                       fetch_line(product, runtime_line(product, pinned)), now))
+        except Exception as e:  # noqa: BLE001 -- any failure is a failed check (exit 2)
+            print(f"[ERROR] {name}: could not check the {product} release line: {e!r}")
+            rc = 2
     for repo, (name, pinned) in SCANNERS.items():
         try:
             newer = newer_releases(pinned, fetch(repo), now)

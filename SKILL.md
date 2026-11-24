@@ -366,6 +366,15 @@ finding). In the dynamic stage a listed resolver on a public address still
 blocks every package (exit 1), because OpenSSF cannot tell TCP from UDP there;
 only the sandbox's own resolvers `8.8.8.8`/`8.8.4.4` are exempt.
 
+The sandbox runs pinned runtimes (Node.js, Python, uv; `scripts/_pins.py`).
+Before the run it reads the `engines.node` / `requires-python` range of the
+exact version: a package the sandbox runtime does not satisfy, or a registry
+that cannot be read, gives **NO VERDICT** (exit 2) — a scan on another runtime
+would judge a server that behaves differently. Tell the user which runtime the
+package needs; do not retry with another launcher to get a verdict. When the
+sandbox runs another Node major or Python minor than this machine, the scan
+prints a `[WARN]` and keeps its verdict; mention it in the result.
+
 A clean Stage 1 verdict does not prove runtime safety — use `--sandbox` for
 unfamiliar servers. Only after SAFE: `install_skill.py mcp ...` (see below).
 
@@ -447,8 +456,9 @@ Notes the agent must respect:
   detects yet, so tell the user it is weak evidence, and prefer signed
   releases of well-known projects. The `--deep` malcontent image is also
   pinned by digest; a missing image that cannot be pulled gives NO VERDICT.
-  `scripts/check_image_pins.py` reports newer scanner releases; bumping a
-  pin is a manual, reviewed step.
+  `scripts/check_image_pins.py` reports newer scanner releases and new
+  patches or end of life of the MCP sandbox runtimes; bumping a pin is a
+  manual, reviewed step.
 - cargo runs GuardDog's `crates` scan (needs Docker on Windows) plus a
   SkillSpector static scan of the crate source; the worse verdict wins.
   GuardDog's crates rules are newer and thinner than npm/PyPI — still recommend

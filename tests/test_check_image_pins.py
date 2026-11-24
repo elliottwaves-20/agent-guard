@@ -57,12 +57,34 @@ class NewerReleaseTests(unittest.TestCase):
         self.assertFalse(found[0]["eligible"])
 
 
+def line(name, latest, latest_days_ago, eol="2030-10-31", is_eol=False):
+    """Shape of https://endoflife.date/api/v1/products/<p>/releases/<line> (result)."""
+    date = (NOW - timedelta(days=latest_days_ago)).strftime("%Y-%m-%d")
+    return {"name": name, "isEol": is_eol, "eolFrom": eol,
+            "latest": {"name": latest, "date": date}}
+
+
+def current_line(product, name):
+    pinned = cip.RUNTIMES[product][1]
+    return line(name, pinned, 30)
+
+
 class CheckTests(unittest.TestCase):
-    def run_check(self, fetch):
+    def run_check(self, fetch, fetch_line=current_line):
         out = io.StringIO()
         with redirect_stdout(out):
-            rc = cip.check(fetch=fetch, now=NOW)
+            rc = cip.check(fetch=fetch, fetch_line=fetch_line, now=NOW)
         return rc, out.getvalue()
+
+    def test_sandbox_uv_is_checked_like_a_scanner(self):
+        self.assertEqual(cip.SCANNERS["astral-sh/uv"][1], cip._pins.SANDBOX_UV)
+
+    def test_runtime_lines_follow_the_sandbox_pins(self):
+        self.assertEqual(cip.runtime_line("nodejs", "26.13.1"), "26")
+        self.assertEqual(cip.runtime_line("python", "3.14.10"), "3.14")
+        self.assertEqual(cip.RUNTIMES["nodejs"][1], cip._pins.SANDBOX_NODE)
+        self.assertEqual(cip.RUNTIMES["python"][1], cip._pins.SANDBOX_PYTHON)
+
 
     def test_up_to_date_exits_zero(self):
         def fetch(repo):
@@ -100,6 +122,75 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("could not check", out)
 
+
+class RuntimeCheckTests(unittest.TestCase):
+    def run_check(self, fetch_line):
+        def fetch(repo):
+            return [rel(cip.SCANNERS[repo][1], 30)]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = cip.check(fetch=fetch, fetch_line=fetch_line, now=NOW)
+        return rc, out.getvalue()
+
+    def test_current_patch_is_up_to_date(self):
+        rc, out = self.run_check(current_line)
+        self.assertEqual(rc, 0)
+        self.assertIn(f"Python (MCP sandbox) {cip._pins.SANDBOX_PYTHON} is up to date", out)
+
+    def test_new_patch_in_the_line_can_be_pinned_after_the_wait(self):
+        def fetch_line(product, name):
+            if product == "python":
+                return line(name, "3.14.99", 10)
+            return current_line(product, name)
+        rc, out = self.run_check(fetch_line)
+        self.assertEqual(rc, 1)
+        self.assertIn("[UPDATE] Python (MCP sandbox) 3.14.99 can be pinned", out)
+
+    def test_fresh_patch_waits(self):
+        def fetch_line(product, name):
+            if product == "nodejs":
+                return line(name, "26.99.0", 1)
+            return current_line(product, name)
+        rc, out = self.run_check(fetch_line)
+        self.assertEqual(rc, 1)
+        self.assertIn("[WAIT] Node.js (MCP sandbox) 26.99.0", out)
+
+    def test_end_of_life_line_is_reported(self):
+        def fetch_line(product, name):
+            if product == "nodejs":
+                return line(name, cip._pins.SANDBOX_NODE, 30, eol="2026-04-30", is_eol=True)
+            return current_line(product, name)
+        rc, out = self.run_check(fetch_line)
+        self.assertEqual(rc, 1)
+        self.assertIn("[EOL] Node.js (MCP sandbox) line 26 reached end of life on 2026-04-30", out)
+
+    def test_line_ending_soon_is_reported(self):
+        soon = (NOW + timedelta(days=30)).strftime("%Y-%m-%d")
+        def fetch_line(product, name):
+            if product == "python":
+                return line(name, cip._pins.SANDBOX_PYTHON, 30, eol=soon)
+            return current_line(product, name)
+        rc, out = self.run_check(fetch_line)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"[EOL] Python (MCP sandbox) line 3.14 reaches end of life on {soon}", out)
+
+    def test_unreadable_answer_exits_two(self):
+        rc, out = self.run_check(lambda product, name: {"message": "not found"})
+        self.assertEqual(rc, 2)
+        self.assertIn("could not check", out)
+
+
+@unittest.skipUnless(os.environ.get("AGENT_GUARD_INTEGRATION") == "1",
+                     "set AGENT_GUARD_INTEGRATION=1 to check the endoflife.date contract")
+class EndOfLifeContractTests(unittest.TestCase):
+    def test_real_answer_has_the_fields_the_check_reads(self):
+        for product, (_name, pinned) in cip.RUNTIMES.items():
+            info = cip.fetch_line(product, cip.runtime_line(product, pinned))
+            self.assertEqual(info["name"], cip.runtime_line(product, pinned))
+            self.assertIn("isEol", info)
+            self.assertRegex(info["eolFrom"], r"^\d{4}-\d{2}-\d{2}$")
+            self.assertIsNotNone(cip.parse_version(info["latest"]["name"]))
+            self.assertRegex(info["latest"]["date"], r"^\d{4}-\d{2}-\d{2}$")
 
 class MalcontentCandidateTests(unittest.TestCase):
     def build(self, created_days_ago, digest, packages):

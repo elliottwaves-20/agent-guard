@@ -643,8 +643,9 @@ python scripts/install_skill.py skill ~/path/to/workspace/repo-name --tools curs
 python scripts/verify_skills_cli.py
 python scripts/verify_skills_cli.py --latest
 
-# Newer GuardDog / malcontent releases for the pinned scanner images
-# (exit 0 = up to date, 1 = newer release, 2 = check failed):
+# Newer GuardDog / malcontent releases for the pinned scanner images, newer
+# patches and end of life of the MCP sandbox's Node.js, Python and uv
+# (exit 0 = up to date, 1 = newer release or [EOL], 2 = check failed):
 python scripts/check_image_pins.py
 # The malcontent build to pin for a release (newest minimal build >= 7 days old):
 python scripts/check_image_pins.py --malcontent-candidate 1.28.0

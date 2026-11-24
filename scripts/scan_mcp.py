@@ -69,6 +69,7 @@ from pathlib import Path
 import _dynamic
 import _egress
 import _llm_profile
+import _pins
 from _skillspector import (
     SCAN_TIMEOUT,
     USER_CONFIG,
@@ -194,22 +195,16 @@ DOCKER_IMAGE = "agent-guard-mcp-sandbox"
 # The target container only needs launchers (uv/uvx, node/npx, git). The Cisco
 # analyzer runs on the host, so it is not installed here. The image is tagged
 # by the hash of this text, so an edit here always builds a fresh image.
-# Runtimes in the target container; tests/test_sandbox_image.py checks the built image.
-# Choose a maintained, compatible line and its latest patch, not the newest line
-# (Python 3.14 over 3.15: same security fixes, wider package support).
-SANDBOX_NODE = "26.13.1"
-SANDBOX_PYTHON = "3.14.10"
-SANDBOX_UV = "0.13.9"
-# Pinned by digest to official images (provenance: nodejs/docker-node,
-# docker-library/python, astral-sh/uv). Node comes from the Node.js image, not
-# from Debian: Debian trixie ships the end-of-life Node 20 line.
+# Runtimes and their images are pinned in _pins.py (why these lines, how to bump).
+SANDBOX_NODE = _pins.SANDBOX_NODE
+SANDBOX_PYTHON = _pins.SANDBOX_PYTHON
+SANDBOX_UV = _pins.SANDBOX_UV
+# Node comes from the Node.js image, not from Debian: Debian trixie ships the
+# end-of-life Node 20 line.
 SANDBOX_DOCKERFILE = (
-    f"FROM node:{SANDBOX_NODE}-trixie-slim"
-    "@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS node\n"
-    f"FROM ghcr.io/astral-sh/uv:{SANDBOX_UV}"
-    "@sha256:d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d AS uv\n"
-    f"FROM python:{SANDBOX_PYTHON}-slim-trixie"
-    "@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f\n"
+    f"FROM {_pins.SANDBOX_NODE_IMAGE} AS node\n"
+    f"FROM {_pins.SANDBOX_UV_IMAGE} AS uv\n"
+    f"FROM {_pins.SANDBOX_PYTHON_IMAGE}\n"
     "RUN apt-get update && apt-get install -y --no-install-recommends "
     "git curl ca-certificates libatomic1 && rm -rf /var/lib/apt/lists/*\n"
     "COPY --from=node /usr/local/bin/node /usr/local/bin/node\n"
