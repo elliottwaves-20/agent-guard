@@ -351,6 +351,10 @@ class SandboxIntegrationTests(unittest.TestCase):
         ]
         for p in self.patches:
             p.start()
+        # The real runtime check needs Docker and the registries: tests/test_sandbox_image.py.
+        self.runtime = patch.object(sm, "launch_runtime_problem", return_value=None)
+        self.runtime_mock = self.runtime.start()
+        self.patches.append(self.runtime)
         self.start = patch.object(sm._egress.Capture, "start", return_value=self.capture)
         self.start_mock = self.start.start()
         self.cisco = patch.object(sm, "run_cisco", return_value=0)
@@ -371,6 +375,20 @@ class SandboxIntegrationTests(unittest.TestCase):
     def docker_args(self):
         argv = self.cisco_mock.call_args.args[0]
         return [a.split("=", 1)[1] for a in argv if a.startswith("--stdio-arg=")]
+
+    def test_runtime_mismatch_gives_no_verdict_and_no_target_run(self):
+        self.runtime_mock.return_value = "pkg needs node >=99, the sandbox runs node 26.13.1"
+        code, out = self.sandbox()
+        self.assertEqual(code, 2)
+        self.assertIn("NO VERDICT -- pkg needs node >=99", out)
+        self.runtime_mock.assert_called_once_with(["uvx", "some-mcp"], "sandbox:tag")
+        self.cisco_mock.assert_not_called()
+        self.start_mock.assert_not_called()
+
+    def test_sandbox_environment_makes_npm_strict_about_engines(self):
+        self.sandbox()
+        args = self.docker_args()
+        self.assertIn("NPM_CONFIG_ENGINE_STRICT=true", args)
 
     def test_target_joins_the_capture_namespace(self):
         code, _ = self.sandbox()

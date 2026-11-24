@@ -54,6 +54,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -624,6 +625,12 @@ def run_sandbox(command: list, *, allow_hosts=(), network: bool = True) -> int:
         die(f"sandbox scan needs a Cisco runtime LLM: {problem}")
     allow = sandbox_allow_list(allow_hosts) if network else set()
     image = build_sandbox_image()
+    mismatch = launch_runtime_problem(command, image)
+    if mismatch:
+        print("\n" + "=" * 60)
+        print(f"[BLOCK] NO VERDICT -- {mismatch}. A scan on another runtime would "
+              "judge a server that behaves differently. Do NOT install on this result.")
+        return 2
 
     capture = None
     if network:
@@ -647,12 +654,7 @@ def run_sandbox(command: list, *, allow_hosts=(), network: bool = True) -> int:
         "--network", net, "--read-only", "--tmpfs", "/tmp:exec",
         "--user", "1000:1000", "--security-opt", "no-new-privileges",
         _egress.NO_CAPABILITIES, "--pids-limit", "256",
-        "-e", "HOME=/tmp", "-e", "UV_CACHE_DIR=/tmp/uvcache",
-        # Launchers must not reach for hosts outside the allow list on their
-        # own: uv would fetch a Python build from GitHub, npm checks for updates.
-        "-e", "UV_PYTHON_DOWNLOADS=never",
-        "-e", "NPM_CONFIG_UPDATE_NOTIFIER=false", "-e", "NO_UPDATE_NOTIFIER=1",
-        image, *command,
+        *SANDBOX_ENV, image, *command,
     ]
     env = cisco_env()
     env["MCP_SCANNER_STDIO_TIMEOUT"] = str(STDIO_TIMEOUT)
@@ -681,6 +683,98 @@ def run_sandbox(command: list, *, allow_hosts=(), network: bool = True) -> int:
     if capture is not None:
         rc = combine_verdicts(rc, _egress.verdict(capture.finish(allow)))
     return rc
+
+
+SANDBOX_ENV = [
+    "-e", "HOME=/tmp", "-e", "UV_CACHE_DIR=/tmp/uvcache",
+    # Launchers must not reach for hosts outside the allow list on their
+    # own: uv would fetch a Python build from GitHub, npm checks for updates.
+    "-e", "UV_PYTHON_DOWNLOADS=never",
+    "-e", "NPM_CONFIG_UPDATE_NOTIFIER=false", "-e", "NO_UPDATE_NOTIFIER=1",
+    # npm only warns about an unsupported engine and runs the package anyway, so
+    # a scan on the wrong Node looked like a normal scan. Make it stop instead
+    # (covers dependencies the pre-check in launch_runtime_problem cannot see).
+    "-e", "NPM_CONFIG_ENGINE_STRICT=true",
+]
+
+
+# Evaluated inside the sandbox image, against the runtime that will run the
+# target: npm's own semver for engines.node, pip's vendored packaging for
+# requires-python. Each prints true, false, or error (unreadable range).
+_SATISFIES = {
+    "node": ["node", "-e",
+             "const s=require('/usr/local/lib/node_modules/npm/node_modules/semver');"
+             "const r=s.validRange(process.argv[1]);"
+             "console.log(r===null?'error':String(s.satisfies(process.version,r)))"],
+    "python": ["python", "-c",
+               "import sys,platform\n"
+               "from pip._vendor.packaging.specifiers import SpecifierSet,InvalidSpecifier\n"
+               "try: print(str(SpecifierSet(sys.argv[1]).contains(platform.python_version())).lower())\n"
+               "except InvalidSpecifier: print('error')"],
+}
+
+
+def image_satisfies(image: str, runtime: str, spec: str) -> bool | None:
+    """Does the image's runtime satisfy `spec`? None if it cannot be told."""
+    r = subprocess.run(["docker", "run", "--rm", "--network", "none", "--user", "1000:1000",
+                        *SANDBOX_ENV, image, *_SATISFIES[runtime], spec],
+                       capture_output=True, text=True, timeout=120)
+    answer = r.stdout.strip().splitlines()[-1:] if r.returncode == 0 else []
+    return {"true": True, "false": False}.get(answer[0] if answer else "")
+
+
+def _required_runtime(launcher: str, package: str) -> tuple[str, str] | None:
+    """(runtime, range) the package declares for its exact version, or None when
+    it declares none or the version is not exact (npm/uv still enforce it then)."""
+    if launcher == "npx":
+        if package.startswith("@"):
+            scope_name, _, version = package[1:].partition("@")
+            name = "@" + scope_name
+        else:
+            name, _, version = package.partition("@")
+        doc = http_json(f"https://registry.npmjs.org/{name}")
+        version = version or doc.get("dist-tags", {}).get("latest")
+        version = doc.get("dist-tags", {}).get(version, version)
+        spec = ((doc.get("versions", {}).get(version) or {}).get("engines") or {}).get("node")
+        return ("node", spec) if spec else None
+    match = re.fullmatch(r"([A-Za-z0-9._-]+)(?:\[[^\]]*\])?(?:(?:==|@)([A-Za-z0-9._+!-]+))?", package)
+    if not match:
+        return None
+    name, version = match.groups()
+    url = f"https://pypi.org/pypi/{name}/{version}/json" if version else f"https://pypi.org/pypi/{name}/json"
+    spec = (http_json(url).get("info") or {}).get("requires_python")
+    return ("python", spec) if spec else None
+
+
+def launch_runtime_problem(command: list, image: str) -> str | None:
+    """Why the sandbox image cannot run the package `command` launches, or None.
+
+    A scan on a runtime the package does not support would judge a server that
+    behaves differently or not at all, so a mismatch means no verdict. Commands
+    other than npx/uvx with a readable package are left to npm (engine-strict)
+    and uv (requires-python), which refuse on their own."""
+    from audit_installed import launcher_name, parse_launch_args
+
+    launcher = launcher_name(command[0]) if command else ""
+    if launcher not in ("npx", "uvx"):
+        return None
+    package = parse_launch_args(launcher, [str(a) for a in command[1:]])
+    if not package or package.startswith("git+"):
+        return None
+    try:
+        required = _required_runtime(launcher, package)
+    except (OSError, ValueError, KeyError) as exc:
+        return f"could not read the runtime {package} needs from the registry ({exc})"
+    if required is None:
+        return None
+    runtime, spec = required
+    have = {"node": SANDBOX_NODE, "python": SANDBOX_PYTHON}[runtime]
+    ok = image_satisfies(image, runtime, spec)
+    if ok is None:
+        return f"could not check {package}'s {runtime} range {spec!r} against {runtime} {have}"
+    if not ok:
+        return f"{package} needs {runtime} {spec}, the sandbox runs {runtime} {have}"
+    return None
 
 
 def sandbox_image() -> str:
