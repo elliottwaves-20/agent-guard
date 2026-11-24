@@ -329,8 +329,8 @@ class NeedsScan(unittest.TestCase):
         self.assertIsInstance(error, locked.Refused)
         self.assertEqual(error.code, 2)
         self.assertEqual(error.items, items)
-        self.assertIn("python scripts/scan_url.py npm:@scope/srv@1.2.3", str(error).splitlines())
-        self.assertIn("python scripts/scan_url.py pypi:server==4.5.6", str(error).splitlines())
+        self.assertIn("python scripts/scan_url.py https://www.npmjs.com/package/@scope/srv/v/1.2.3", str(error).splitlines())
+        self.assertIn("python scripts/scan_url.py https://pypi.org/project/server/4.5.6", str(error).splitlines())
 
 
 class FakeRegister:

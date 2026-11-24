@@ -1067,7 +1067,7 @@ class PypiFastLane(PypiFastLaneBase):
         exc = self.refused(2, uv=uv, check=check)
         self.assertIsInstance(exc, locked.NeedsScan)
         self.assertEqual(exc.items, [{"kind": "pypi", "package": "dep", "version": "1.0.3"}])
-        self.assertIn("python scripts/scan_url.py pypi:dep==1.0.3", str(exc))
+        self.assertIn("python scripts/scan_url.py https://pypi.org/project/dep/1.0.3", str(exc))
         self.assertEqual(len(self.locks_of(uv)), 1)
         self.assert_old_untouched()
 
@@ -1420,7 +1420,7 @@ class PypiOverrideCli(unittest.TestCase):
         self.assertEqual(status["needs_scan"],
                          [{"kind": "pypi", "package": PKG, "version": "1.2.3"}])
         self.assertEqual((status["code"], status["fast_lane"], status["tier"]), (2, [], ""))
-        self.assertIn(f"python scripts/scan_url.py pypi:{PKG}==1.2.3", status["message"])
+        self.assertIn(f"python scripts/scan_url.py https://pypi.org/project/{PKG}/1.2.3", status["message"])
 
     def test_help_describes_the_override_and_fast_lane_options(self):
         result = self.invoke_cli("mcp-pypi", "--help")

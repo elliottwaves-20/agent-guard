@@ -875,8 +875,8 @@ are CLI options. The `[mcp]` table accepts `install_dir`, `register` and
    once they return SAFE.
 
    ```bash
-   python scripts/scan_url.py npm:example-dependency@1.2.4
-   python scripts/scan_url.py pypi:example-dependency==1.2.4
+   python scripts/scan_url.py https://www.npmjs.com/package/example-dependency/v/1.2.4
+   python scripts/scan_url.py https://pypi.org/project/example-dependency/1.2.4
    ```
 
 5. The installer pins dependency fixes with npm `overrides` or uv

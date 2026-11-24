@@ -667,7 +667,7 @@ class NpmCli(unittest.TestCase):
             "fast_lane": [], "tier": "",
         })
         self.assertIn("scan first", status["message"])
-        self.assertIn(f"python scripts/scan_url.py npm:{PKG}@1.2.3", status["message"])
+        self.assertIn(f"python scripts/scan_url.py https://www.npmjs.com/package/{PKG}/v/1.2.3", status["message"])
         self.assertIn("scan first", result.stderr)
 
     def test_json_reports_a_block_receipt(self):
@@ -866,7 +866,7 @@ class FastLaneInstall(FastLaneBase):
         exc = self.refused(2, npm=npm, check=check)
         self.assertIsInstance(exc, locked.NeedsScan)
         self.assertEqual(exc.items, [{"kind": "npm", "package": "dep", "version": "1.0.3"}])
-        self.assertIn("python scripts/scan_url.py npm:dep@1.0.3", str(exc))
+        self.assertIn("python scripts/scan_url.py https://www.npmjs.com/package/dep/v/1.0.3", str(exc))
         self.assertEqual(len([c for c in npm.commands if c[1] == "install"]), 1)
         self.assertEqual(len(set(npm.install_dirs)), 1)
         self.assert_old_untouched()

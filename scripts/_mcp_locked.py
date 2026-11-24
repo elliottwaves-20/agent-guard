@@ -60,8 +60,11 @@ class Refused(Exception):
 
 
 def registry_scan_command(kind: str, package: str, version: str) -> str:
-    separator = {"npm": "@", "pypi": "=="}[kind]
-    return f"python scripts/scan_url.py {kind}:{package}{separator}{version}"
+    """The scan_url.py command for exactly this registry version: the
+    registry's version page, the address form scan_url.py resolves."""
+    url = {"npm": f"https://www.npmjs.com/package/{package}/v/{version}",
+           "pypi": f"https://pypi.org/project/{package}/{version}"}[kind]
+    return f"python scripts/scan_url.py {url}"
 
 
 class NeedsScan(Refused):
