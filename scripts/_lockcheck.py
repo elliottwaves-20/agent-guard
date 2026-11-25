@@ -359,19 +359,17 @@ class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
 
 def http_fetch(url: str, payload: dict | None = None) -> tuple[object, str | None]:
     """GET (or POST JSON) and return (parsed body, next-page URL)."""
+    import _url_resolver
     headers = {"User-Agent": "agent-guard", "Accept": "application/json"}
     if url.startswith(GITHUB_ADVISORIES_URL):
         headers["Accept"] = "application/vnd.github+json"
-        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
     data = None
     if payload is not None:
         data = json.dumps(payload).encode()
         headers["Content-Type"] = "application/json"
     host = ""
     try:
-        req = urllib.request.Request(url, data=data, headers=headers)
+        req = _url_resolver.attach_github_auth(urllib.request.Request(url, data=data, headers=headers))
         opener = urllib.request.build_opener(_SameOriginRedirect())
         with opener.open(req, timeout=60) as response:
             host = urllib.parse.urlsplit(response.geturl()).hostname or ""
@@ -441,37 +439,44 @@ def _withdrawn(value):
 def _osv_range(entry, events):
     intervals = []
     lower = None
+    lower_key = None
     opened = False
     for event in _array(events, "OSV events"):
         if not isinstance(event, dict) or len(event) != 1:
             raise LookupFailed("invalid OSV range event")
         action, version = next(iter(event.items()))
         _text(version, "OSV event version")
+        if version != version.strip():
+            raise LookupFailed("invalid OSV event version")
         if action == "introduced" and not opened:
             lower = None if version == "0" else version
             lower_key = _versions.key(entry.ecosystem, lower) if lower is not None else None
-            if intervals:
-                previous = intervals[-1]
-                previous_end = _versions.key(entry.ecosystem, previous["upper"])
-                if (lower_key is None or lower_key < previous_end
-                        or (lower_key == previous_end and previous["upper_inclusive"])):
-                    raise LookupFailed("OSV range events are out of order")
             opened = True
         elif action in ("fixed", "last_affected") and opened:
             upper_inclusive = action == "last_affected"
-            if lower is not None and not upper_inclusive and (
-                    _versions.key(entry.ecosystem, lower) == _versions.key(entry.ecosystem, version)):
-                raise LookupFailed("empty OSV affected interval")
-            intervals.append(_interval(lower, version, upper_inclusive=upper_inclusive,
-                                       fixed=None if upper_inclusive else version))
+            upper_key = _versions.key(entry.ecosystem, version)
+            if lower_key is not None and (
+                    lower_key > upper_key or (not upper_inclusive and lower_key == upper_key)):
+                raise LookupFailed("invalid or empty OSV affected interval")
+            intervals.append((lower_key, upper_key,
+                              _interval(lower, version, upper_inclusive=upper_inclusive,
+                                        fixed=None if upper_inclusive else version)))
             opened = False
         else:
             raise LookupFailed(f"unsupported or out-of-order OSV event: {action}")
     if opened:
-        intervals.append(_interval(lower))
+        intervals.append((lower_key, None, _interval(lower)))
     if not intervals:
         raise LookupFailed("OSV range has no affected intervals")
-    return intervals
+    # OSV databases (e.g. PYSEC) can list disjoint branches in descending order;
+    # sort by lower bound and fail closed if any two intervals overlap.
+    intervals.sort(key=lambda item: (0, ()) if item[0] is None else (1, item[0]))
+    for (_, prev_upper_key, prev), (curr_lower_key, _, _) in zip(intervals, intervals[1:]):
+        if (prev_upper_key is None or curr_lower_key is None
+                or curr_lower_key < prev_upper_key
+                or (curr_lower_key == prev_upper_key and prev["upper_inclusive"])):
+            raise LookupFailed("OSV range intervals overlap")
+    return [interval for _, _, interval in intervals]
 
 
 def _osv_advisory(advisory, details):
@@ -513,9 +518,12 @@ def _osv_advisory(advisory, details):
             matches.append(_versions.in_interval(entry.ecosystem, entry.version, interval))
     if not any(matches):
         raise LookupFailed("OSV details do not cover the batch hit")
+    db_specific = details.get("database_specific")
+    if db_specific is None:
+        db_specific = {}
     return replace(advisory, affected=tuple(intervals + explicit),
                    aliases=_aliases(_array(details.get("aliases", []), "OSV aliases")),
-                   severity=_severity(details.get("database_specific", {}).get("severity")),
+                   severity=_severity(db_specific.get("severity")),
                    withdrawn=_withdrawn(details.get("withdrawn")))
 
 

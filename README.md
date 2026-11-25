@@ -1159,9 +1159,12 @@ python scripts/run_all_tests.py --live   # adds the real LLM tests (spends provi
 contract) and reports `ALL GREEN, NOTHING SKIPPED` only when no test was
 skipped; without `--live` it reports `INCOMPLETE` and `NOT GREEN` on purpose,
 because the live tests did not run. They use the active `skills` profile of
-the personal config (or `AGENT_GUARD_LLM_INTEGRATION_PROFILE`). A plain
-`python -m unittest discover -s tests` runs the unit tests only; unit tests
-never start Docker or a scanner.
+the personal config (or `AGENT_GUARD_LLM_INTEGRATION_PROFILE`). The integration
+group makes live GitHub API calls (advisory and release checks); without
+`GITHUB_TOKEN` or `GH_TOKEN`, GitHub's 60/hour unauthenticated IP quota fits
+about one full run per hour, so set a public-read token when running the suite
+repeatedly. A plain `python -m unittest discover -s tests` runs the unit tests
+only; unit tests never start Docker or a scanner.
 
 ## MCP isolation rules
 

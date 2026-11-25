@@ -129,11 +129,14 @@ def _next_after_cursor(link_header: str) -> str | None:
 
 
 def _fetch_activity_page(url: str) -> tuple:
+    import http.client
     import urllib.error
     import urllib.request
     import _url_resolver
-    req = urllib.request.Request(url, headers={**_url_resolver.DEFAULT_HEADERS, "Accept": "application/json"})
     try:
+        req = _url_resolver.attach_github_auth(
+            urllib.request.Request(url, headers={**_url_resolver.DEFAULT_HEADERS, "Accept": "application/json"})
+        )
         with urllib.request.urlopen(req, timeout=30) as resp:
             link = resp.headers.get("Link") or ""
             return json.load(resp), _next_after_cursor(link)
@@ -142,16 +145,19 @@ def _fetch_activity_page(url: str) -> tuple:
         raise _url_resolver.FetchError(_url_resolver.format_fetch_error(url, exc.code, body)) from exc
     except urllib.error.URLError as exc:
         raise _url_resolver.FetchError(f"could not fetch {url}: {exc.reason}") from exc
-    except (ValueError, TimeoutError) as exc:   # invalid JSON, or a timeout while reading
+    except (ValueError, TimeoutError, http.client.HTTPException) as exc:   # invalid JSON/token, or a timeout while reading
         raise _url_resolver.FetchError(f"could not fetch {url}: {exc}") from exc
 
 
 def _fetch_repo(url: str) -> dict:
+    import http.client
     import urllib.error
     import urllib.request
     import _url_resolver
-    req = urllib.request.Request(url, headers={**_url_resolver.DEFAULT_HEADERS, "Accept": "application/json"})
     try:
+        req = _url_resolver.attach_github_auth(
+            urllib.request.Request(url, headers={**_url_resolver.DEFAULT_HEADERS, "Accept": "application/json"})
+        )
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as exc:
@@ -159,7 +165,7 @@ def _fetch_repo(url: str) -> dict:
         raise _url_resolver.FetchError(_url_resolver.format_fetch_error(url, exc.code, body)) from exc
     except urllib.error.URLError as exc:
         raise _url_resolver.FetchError(f"could not fetch {url}: {exc.reason}") from exc
-    except (ValueError, TimeoutError) as exc:   # invalid JSON, or a timeout while reading
+    except (ValueError, TimeoutError, http.client.HTTPException) as exc:   # invalid JSON/token, or a timeout while reading
         raise _url_resolver.FetchError(f"could not fetch {url}: {exc}") from exc
 
 

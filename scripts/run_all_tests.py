@@ -7,8 +7,9 @@ variables and show up as "skipped". A release needs all of them. This runner
 opens every gate and uses the interpreter each group needs:
 
   suite            this Python, AGENT_GUARD_INTEGRATION=1 (installed Cisco and
-                   SkillSpector, no network); with --live also
-                   AGENT_GUARD_LLM_INTEGRATION=1 (real LLM calls)
+                   SkillSpector, Docker sandbox/dynamic checks, live registry,
+                   advisory and locked MCP installer E2E checks); with --live
+                   also AGENT_GUARD_LLM_INTEGRATION=1 (real LLM calls)
   budget-contract  SkillSpector's own tool Python, AGENT_GUARD_BUDGET_CONTRACT=1
                    (simulated answers, network blocked)
 

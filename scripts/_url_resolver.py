@@ -9,6 +9,7 @@ install anything from the page itself.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import io
 import json
 import html
@@ -101,9 +102,31 @@ class CompactHTMLText(HTMLParser):
         return "\n".join(self.parts)
 
 
-def http_json(url: str) -> dict:
-    req = urllib.request.Request(url, headers={**DEFAULT_HEADERS, "Accept": "application/json"})
+_HEADER_TOKEN_RE = re.compile(r"[\x21-\x7e]+")
+
+
+def attach_github_auth(req: urllib.request.Request) -> urllib.request.Request:
+    """Attach GITHUB_TOKEN or GH_TOKEN only to https://api.github.com (never redirected)."""
     try:
+        parts = urllib.parse.urlsplit(req.full_url)
+        port = parts.port
+    except ValueError:
+        return req
+    if (parts.scheme == "https" and parts.hostname == "api.github.com"
+            and port in (None, 443)
+            and parts.username is None and parts.password is None):
+        token = (os.environ.get("GITHUB_TOKEN") or "").strip() or (os.environ.get("GH_TOKEN") or "").strip()
+        if token:
+            if not _HEADER_TOKEN_RE.fullmatch(token):
+                raise ValueError("GITHUB_TOKEN / GH_TOKEN contains invalid header characters")
+            req.remove_header("Authorization")
+            req.add_unredirected_header("Authorization", f"Bearer {token}")
+    return req
+
+
+def http_json(url: str) -> dict:
+    try:
+        req = attach_github_auth(urllib.request.Request(url, headers={**DEFAULT_HEADERS, "Accept": "application/json"}))
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
@@ -111,6 +134,8 @@ def http_json(url: str) -> dict:
         raise FetchError(format_fetch_error(url, e.code, body)) from e
     except urllib.error.URLError as e:
         raise FetchError(f"could not fetch {url}: {e.reason}") from e
+    except (ValueError, TimeoutError, http.client.HTTPException) as e:
+        raise FetchError(f"could not fetch {url}: {e}") from e
 
 
 def http_bytes(url: str) -> bytes:

@@ -497,6 +497,131 @@ class StructuredCheck(unittest.TestCase):
         self.assertIsNone(second["upper"])
         self.assertIsNone(second["fixed"])
 
+    def test_osv_disjoint_intervals_out_of_ascending_order(self):
+        entry = lockcheck.Entry("PyPI", "urllib3", "1.26.5", files=(("urllib3-1.26.5.whl", "aa"),))
+        advisory = {
+            "id": "PYSEC-2023-192",
+            "aliases": ["CVE-2023-43804"],
+            "affected": [{"package": {"ecosystem": "PyPI", "name": "urllib3"},
+                          "ranges": [{"type": "ECOSYSTEM", "events": [
+                              {"introduced": "2.0.0"}, {"fixed": "2.0.6"},
+                              {"introduced": "0"}, {"fixed": "1.26.17"},
+                          ]}]}],
+        }
+        net = FakeNet(
+            osv={("urllib3", "1.26.5"): ["PYSEC-2023-192"]},
+            osv_details={"PYSEC-2023-192": advisory},
+            pypi_files={("urllib3", "1.26.5"): [
+                {"filename": "urllib3-1.26.5.whl", "upload_time_iso_8601": OLD,
+                 "digests": {"sha256": "aa"}}]},
+        )
+        result = lockcheck.check([entry], now=NOW, fetch=net)
+        self.assertEqual(result.code, 1)
+        self.assertEqual(result.failures, [])
+        first, second = self.advisory(result).affected
+        self.assertIsNone(first["lower"])
+        self.assertIs(first["lower_inclusive"], True)
+        self.assertEqual(first["upper"], "1.26.17")
+        self.assertIs(first["upper_inclusive"], False)
+        self.assertEqual(first["fixed"], "1.26.17")
+        self.assertEqual(second["lower"], "2.0.0")
+        self.assertIs(second["lower_inclusive"], True)
+        self.assertEqual(second["upper"], "2.0.6")
+        self.assertIs(second["upper_inclusive"], False)
+        self.assertEqual(second["fixed"], "2.0.6")
+
+    def test_osv_overlapping_intervals_fail(self):
+        overlap_cases = (
+            [{"introduced": "0"}, {"fixed": "1.2.0"}, {"introduced": "1.1.0"}, {"fixed": "2.0.0"}],
+            [{"introduced": "2.0.0"}, {"fixed": "2.5.0"}, {"introduced": "1.0.0"}, {"fixed": "2.1.0"}],
+            [{"introduced": "0"}, {"fixed": "1.0.3"}, {"introduced": "0"}, {"fixed": "2.0.0"}],
+            [{"introduced": "1.0.0"}, {"last_affected": "2.0.0"}, {"introduced": "2.0.0"}, {"fixed": "2.1.0"}],
+            [{"introduced": "1.0.0"}, {"fixed": "2.0.0"}, {"introduced": "0"}],
+        )
+        for events in overlap_cases:
+            with self.subTest(events=events):
+                result = self.osv(osv_advisory(events=events))
+                self.assertEqual(result.code, 1)
+                self.assertTrue(
+                    any("OSV range intervals overlap" in msg for msg in result.failures),
+                    f"expected explicit overlap LookupFailed for {events}, got {result.failures}",
+                )
+        dup_open = [{"introduced": "0"}, {"fixed": "1.0.3"}, {"introduced": "1.0.3"}, {"introduced": "2.0.0"}]
+        result = self.osv(osv_advisory(events=dup_open))
+        self.assertEqual(result.code, 1)
+        self.assertTrue(
+            any("out-of-order OSV event" in msg for msg in result.failures),
+            result.failures,
+        )
+
+    def test_osv_inverted_or_empty_interval_fails(self):
+        cases = (
+            [{"introduced": "0"}, {"fixed": "1.0.3"}, {"introduced": "2.0.0"}, {"fixed": "1.5.0"}],
+            [{"introduced": "0"}, {"fixed": "1.0.3"}, {"introduced": "2.0.0"}, {"fixed": "2.0.0"}],
+            [{"introduced": "0"}, {"fixed": "1.0.3"}, {"introduced": "2.0.0"}, {"last_affected": "1.9.0"}],
+        )
+        for events in cases:
+            with self.subTest(events=events):
+                result = self.osv(osv_advisory(events=events))
+                self.assertEqual(result.code, 1)
+                self.assertTrue(
+                    any("invalid or empty OSV affected interval" in msg for msg in result.failures),
+                    f"expected explicit interval LookupFailed for {events}, got {result.failures}",
+                )
+
+    def test_osv_last_affected_single_version_is_valid(self):
+        result = self.osv(osv_advisory(events=[{"introduced": "1.0.0"}, {"last_affected": "1.0.0"}]))
+        self.assertEqual(result.failures, [])
+        interval, = self.advisory(result).affected
+        self.assertEqual(interval["lower"], "1.0.0")
+        self.assertEqual(interval["upper"], "1.0.0")
+        self.assertTrue(interval["upper_inclusive"])
+        self.assertIsNone(interval["fixed"])
+
+    def test_osv_adjacent_fixed_and_introduced_is_valid(self):
+        result = self.osv(osv_advisory(events=[
+            {"introduced": "1.0.0"}, {"fixed": "2.0.0"},
+            {"introduced": "2.0.0"}, {"fixed": "2.1.0"},
+        ]))
+        self.assertEqual(result.failures, [])
+        first, second = self.advisory(result).affected
+        self.assertEqual((first["lower"], first["upper"], first["fixed"]), ("1.0.0", "2.0.0", "2.0.0"))
+        self.assertEqual((second["lower"], second["upper"], second["fixed"]), ("2.0.0", "2.1.0", "2.1.0"))
+
+    def test_osv_whitespace_padded_event_version_fails(self):
+        entry = lockcheck.Entry("PyPI", "urllib3", "1.26.5", files=(("urllib3-1.26.5.whl", "aa"),))
+        for events in (
+            [{"introduced": " 0 "}, {"fixed": "1.26.17"}],
+            [{"introduced": "0"}, {"fixed": " 1.26.17 "}],
+        ):
+            with self.subTest(events=events):
+                advisory = {
+                    "id": "PYSEC-WS",
+                    "aliases": [],
+                    "affected": [{"package": {"ecosystem": "PyPI", "name": "urllib3"},
+                                  "ranges": [{"type": "ECOSYSTEM", "events": events}]}],
+                }
+                net = FakeNet(
+                    osv={("urllib3", "1.26.5"): ["PYSEC-WS"]},
+                    osv_details={"PYSEC-WS": advisory},
+                    pypi_files={("urllib3", "1.26.5"): [
+                        {"filename": "urllib3-1.26.5.whl", "upload_time_iso_8601": OLD,
+                         "digests": {"sha256": "aa"}}]},
+                )
+                result = lockcheck.check([entry], now=NOW, fetch=net)
+                self.assertEqual(result.code, 1)
+                self.assertTrue(
+                    any("invalid OSV event version" in msg for msg in result.failures),
+                    result.failures,
+                )
+
+    def test_osv_null_database_specific_has_no_severity(self):
+        advisory = osv_advisory()
+        advisory["database_specific"] = None
+        result = self.osv(advisory)
+        self.assertEqual(result.failures, [])
+        self.assertIsNone(self.advisory(result).severity)
+
     def test_failures_kept_next_to_findings(self):
         net = clean_npm_net(osv={("srv", "1.0.0"): ["OSV-review"]}, fail="api.github.com")
         result = lockcheck.check(npm_entries(), now=NOW, fetch=net)

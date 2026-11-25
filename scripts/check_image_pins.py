@@ -33,6 +33,7 @@ import urllib.error
 import urllib.request
 
 import _pins
+import _url_resolver
 
 MIN_AGE = timedelta(days=7)
 USER_AGENT = "agent-guard-check-image-pins"
@@ -89,7 +90,9 @@ def newer_releases(pinned: str, releases: list, now: datetime) -> list:
 
 
 def _get_json(url: str, headers=None, timeout=30):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
+    req = _url_resolver.attach_github_auth(
+        urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
+    )
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
 

@@ -133,6 +133,35 @@ class PinTests(unittest.TestCase):
         tag = _pins.GUARDDOG_IMAGE.split("@", 1)[0].rsplit(":", 1)[1]
         self.assertEqual(tag, _pins.GUARDDOG_VERSION)
 
+    def test_upstream_pin_api_uses_unredirected_github_auth_header(self):
+        import urllib.request
+        from unittest.mock import patch
+
+        seen = []
+
+        class _Resp:
+            def read(self):
+                return b"{}"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_open(req, timeout=30):
+            seen.append(req)
+            return _Resp()
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": " tok-pins\n", "GH_TOKEN": ""}, clear=False):
+            with patch.object(urllib.request, "urlopen", side_effect=fake_open):
+                UpstreamPinTests().api("repos/o/r/compare/a...b")
+
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].get_header("Authorization"), "Bearer tok-pins")
+        self.assertNotIn("Authorization", seen[0].headers)
+        self.assertIn("Authorization", seen[0].unredirected_hdrs)
+
 
 @unittest.skipUnless(os.environ.get("AGENT_GUARD_INTEGRATION") == "1",
                      "set AGENT_GUARD_INTEGRATION=1 to verify the pin on GitHub")
@@ -141,9 +170,12 @@ class UpstreamPinTests(unittest.TestCase):
 
     def api(self, path: str):
         import urllib.request
-        req = urllib.request.Request(f"https://api.github.com/{path}",
-                                     headers={"Accept": "application/vnd.github+json",
-                                              "User-Agent": "agent-guard-tests"})
+        import _url_resolver
+        req = _url_resolver.attach_github_auth(
+            urllib.request.Request(f"https://api.github.com/{path}",
+                                   headers={"Accept": "application/vnd.github+json",
+                                            "User-Agent": "agent-guard-tests"})
+        )
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r)
 

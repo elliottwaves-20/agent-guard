@@ -299,5 +299,155 @@ class MalcontentBuildsTests(unittest.TestCase):
             list(cip.malcontent_builds(reg))
 
 
+class GitHubAuthHeaderTests(unittest.TestCase):
+    """GITHUB_TOKEN / GH_TOKEN goes only to https://api.github.com and never redirects."""
+
+    def _capture_urlopen(self, body, headers=None):
+        import json
+        seen = []
+
+        class _Resp:
+            def __init__(self):
+                self.headers = headers or {}
+
+            def read(self):
+                return json.dumps(body).encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(req, timeout=30):
+            seen.append(req)
+            return _Resp()
+
+        return seen, fake_urlopen
+
+    def test_github_api_callers_attach_unredirected_bearer_token(self):
+        import importlib
+        import urllib.request
+        from unittest.mock import patch
+
+        _url_resolver = importlib.import_module("_url_resolver")
+        _staging = importlib.import_module("_staging")
+
+        env = {"GITHUB_TOKEN": "  tok-primary\n", "GH_TOKEN": "tok-fallback"}
+        with patch.dict(os.environ, env, clear=False):
+            seen, fake_open = self._capture_urlopen([])
+            with patch.object(urllib.request, "urlopen", side_effect=fake_open):
+                cip.fetch_releases("astral-sh/uv")
+                _url_resolver.http_json("https://api.github.com/repos/o/r")
+                _staging._fetch_activity_page("https://api.github.com/repos/o/r/activity")
+                _staging._fetch_repo("https://api.github.com/repos/o/r")
+
+        self.assertEqual(len(seen), 4)
+        for req in seen:
+            with self.subTest(url=req.full_url):
+                self.assertEqual(req.get_header("Authorization"), "Bearer tok-primary")
+                self.assertNotIn("Authorization", req.headers)
+                self.assertIn("Authorization", req.unredirected_hdrs)
+
+    def test_gh_token_fallback_and_non_github_hosts_never_receive_token(self):
+        import importlib
+        import urllib.request
+        from unittest.mock import patch
+
+        _url_resolver = importlib.import_module("_url_resolver")
+        env = {"GITHUB_TOKEN": "   ", "GH_TOKEN": " tok-gh "}
+        with patch.dict(os.environ, env, clear=False):
+            seen, fake_open = self._capture_urlopen({"result": {}})
+            with patch.object(urllib.request, "urlopen", side_effect=fake_open):
+                cip.fetch_line("nodejs", "26")
+                _url_resolver.http_json("https://registry.npmjs.org/semver")
+                _url_resolver.http_json("http://api.github.com/repos/o/r")
+                _url_resolver.http_json("https://api.github.com:8443/repos/o/r")
+                _url_resolver.http_json("https://user@api.github.com/repos/o/r")
+                _url_resolver.http_json("https://api.github.com/repos/o/r")
+
+        self.assertEqual(len(seen), 6)
+        for req in seen[:5]:
+            with self.subTest(url=req.full_url):
+                self.assertIsNone(req.get_header("Authorization"))
+        self.assertEqual(seen[5].get_header("Authorization"), "Bearer tok-gh")
+
+        bad_req = urllib.request.Request("https://api.github.com:abc/repos/o/r")
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "tok-valid"}, clear=False):
+            self.assertIsNone(_url_resolver.attach_github_auth(bad_req).get_header("Authorization"))
+
+    def test_malformed_github_token_is_rejected_without_leaking_value(self):
+        import importlib
+        import urllib.request
+        from unittest.mock import patch
+
+        _url_resolver = importlib.import_module("_url_resolver")
+        _staging = importlib.import_module("_staging")
+        _lockcheck = importlib.import_module("_lockcheck")
+        secret_part = "SECRET-MARKER-9988"
+        for bad_token in (f"{secret_part}\r\nX-Injected: 1", f"{secret_part} tail", f"{secret_part}\u00e4"):
+            with self.subTest(bad_token=repr(bad_token)):
+                with patch.dict(os.environ, {"GITHUB_TOKEN": bad_token, "GH_TOKEN": ""}, clear=False):
+                    with patch.object(urllib.request, "urlopen", side_effect=AssertionError("must fail before network")):
+                        with patch.object(urllib.request, "build_opener", side_effect=AssertionError("must fail before network")):
+                            with self.assertRaises(_url_resolver.FetchError) as url_err:
+                                _url_resolver.http_json("https://api.github.com/repos/o/r")
+                            self.assertNotIn(secret_part, str(url_err.exception))
+                            with self.assertRaises(_url_resolver.FetchError) as stg_err:
+                                _staging._fetch_repo("https://api.github.com/repos/o/r")
+                            self.assertNotIn(secret_part, str(stg_err.exception))
+                            with self.assertRaises(_lockcheck.LookupFailed) as lock_err:
+                                _lockcheck.http_fetch("https://api.github.com/advisories?ecosystem=npm&affects=x")
+                            self.assertNotIn(secret_part, str(lock_err.exception))
+                            with self.assertRaises(ValueError) as cip_err:
+                                cip.fetch_releases("astral-sh/uv")
+                            self.assertNotIn(secret_part, str(cip_err.exception))
+
+    def test_lockcheck_strips_github_token_whitespace_and_uses_unredirected_header(self):
+        import importlib
+        import urllib.request
+        from unittest.mock import patch
+
+        _lockcheck = importlib.import_module("_lockcheck")
+        seen = []
+
+        class _Resp:
+            headers = {}
+
+            def geturl(self):
+                return "https://api.github.com/advisories"
+
+            def getcode(self):
+                return 200
+
+            def read(self):
+                return b"[]"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class _Opener:
+            def open(self, req, timeout=60):
+                seen.append(req)
+                return _Resp()
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": " tok-lock\r\n", "GH_TOKEN": ""}, clear=False):
+            with patch.object(urllib.request, "build_opener", return_value=_Opener()):
+                _lockcheck.http_fetch("https://api.github.com/advisories?ecosystem=npm&affects=x")
+        self.assertEqual(seen[0].get_header("Authorization"), "Bearer tok-lock")
+        self.assertNotIn("Authorization", seen[0].headers)
+        self.assertIn("Authorization", seen[0].unredirected_hdrs)
+
+        seen.clear()
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "   ", "GH_TOKEN": ""}, clear=False):
+            with patch.object(urllib.request, "build_opener", return_value=_Opener()):
+                _lockcheck.http_fetch("https://api.github.com/advisories?ecosystem=npm&affects=x")
+        self.assertIsNone(seen[0].get_header("Authorization"))
+
+
+
 if __name__ == "__main__":
     unittest.main()
