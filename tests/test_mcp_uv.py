@@ -546,6 +546,18 @@ class GitInstall(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
         self.assertEqual(uv.commands, [])
 
+    def test_unlistable_scanned_copy_refuses_the_install(self):
+        """The submodule check fails closed when the scanned copy cannot be listed."""
+        scanned = Path(self.tmp.name) / "scanned"
+        scanned.write_text("not a directory", encoding="utf-8")
+        uv = FakeGitUv()
+        with self.assertRaises(locked.Refused) as ctx:
+            self.install(uv=uv, scanned_dir=scanned,
+                         root_names=lambda *a: self.fail("the scanned copy is checked locally"))
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("cannot list the scanned source", str(ctx.exception))
+        self.assertEqual(uv.commands, [])
+
     def test_root_listing_fails_closed(self):
         for data in ({"message": "Not Found"}, [{"name": 1}], [{"name": "x"}] * 1000):
             with self.subTest(data=str(data)[:40]), \

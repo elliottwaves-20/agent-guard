@@ -663,7 +663,8 @@ class RuntimeParityTests(unittest.TestCase):
         def run(cmd, *args, **kwargs):
             if cmd[0] == "uv":
                 return subprocess.CompletedProcess(cmd, 0, sys.executable + "\n", "")
-            probes.append(cmd)
+            cwd = kwargs.get("cwd")
+            probes.append((cmd, cwd, sorted(os.listdir(cwd)) if cwd else None))
             return real_run(cmd, *args, **kwargs)
 
         with tempfile.TemporaryDirectory() as work:
@@ -681,7 +682,12 @@ class RuntimeParityTests(unittest.TestCase):
             self.assertFalse((Path(work) / "platform.ran").exists())
         self.assertEqual(version, platform.python_version())
         # -I also drops PYTHONPATH and the user site, which the cwd alone does not.
-        self.assertEqual([cmd[1] for cmd in probes], ["-I"])
+        self.assertEqual([cmd[1] for cmd, _, _ in probes], ["-I"])
+        # And the probe starts in an empty directory, not in the caller's one.
+        [(_, cwd, listing)] = probes
+        self.assertIsNotNone(cwd)
+        self.assertNotEqual(os.path.normcase(os.path.abspath(cwd)), os.path.normcase(work))
+        self.assertEqual(listing, [])
 
 
 class CommandLineTests(unittest.TestCase):

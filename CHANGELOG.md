@@ -46,6 +46,8 @@
   always cover the whole repository at the commit, since uv builds from the
   whole checkout; a repository with Git submodules (`.gitmodules`) gets no
   verdict, because the GitHub archive lacks them while uv checks them out.
+  Without a receipt, `mcp-git` prints the scan command for the repository
+  root with `--kind mcp-source`, so the scan writes the receipt it asks for.
 - The host Python version probe of the sandbox runtime check runs isolated
   (`-I`) in an empty directory, so a `platform.py` in the working directory
   is not imported.

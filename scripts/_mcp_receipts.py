@@ -76,9 +76,9 @@ def write_receipt(root: Path, receipt: Receipt) -> Path:
 def _scan_hint(kind: str, package: str, version: str) -> str:
     if kind in ("npm", "pypi"):
         return registry_scan_command(kind, package, version)
-    repo, _, subdir = package.partition("#")
-    return f"python scripts/scan_url.py https://github.com/{repo}/tree/{version}" + \
-        (f"/{subdir}" if subdir else "")
+    # A Git receipt covers the whole repository (F1). Its root alone may be
+    # detected as a skill collection, which writes no receipt, so name the kind.
+    return f"python scripts/scan_url.py https://github.com/{package}/tree/{version} --kind mcp-source"
 
 
 def _load(path: Path) -> Receipt:

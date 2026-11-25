@@ -546,7 +546,8 @@ class LiveLockedRefusalAndAuditFindingTests(unittest.TestCase):
             data = json.loads(missing.stdout)
             self.assertEqual(data["code"], 2)
             self.assertIn("scan first:", data["message"])
-            self.assertIn(f"https://github.com/{GIT_REPO}/tree/{GIT_SHA}/{GIT_SUBDIR}", data["message"])
+            self.assertIn(f"https://github.com/{GIT_REPO}/tree/{GIT_SHA} --kind mcp-source",
+                          data["message"])
             self.assertFalse(record_file.exists())
 
     def test_mcp_audit_and_check_lock_report_live_finding_and_tampered_lockfile(self):

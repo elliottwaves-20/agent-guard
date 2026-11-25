@@ -37,7 +37,7 @@ locked = importlib.import_module("_mcp_locked")
 skillspector = importlib.import_module("_skillspector")
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
-HINT = re.compile(r"python scripts/scan_url\.py (\S+)")
+HINT = re.compile(r"python scripts/scan_url\.py (\S+(?: --kind \S+)?)")
 
 
 def npm_tarball() -> bytes:
@@ -168,8 +168,10 @@ class InstallerHintRoundTrip(unittest.TestCase):
     def test_pypi_package_with_unnormalized_name(self):
         self.assert_roundtrip("pypi", "My_Server", "2026.8.18", self.net.wheel)
 
-    def test_git_subdirectory(self):
-        self.assert_roundtrip("git", "example/mcp#server", SHA, self.net.zip)
+    def test_git_repository_with_the_server_in_a_subdirectory(self):
+        # The receipt covers the whole repository (F1), and the repository root
+        # alone is not detected as an MCP source, so the hint must name the kind.
+        self.assert_roundtrip("git", "example/mcp", SHA, self.net.zip)
 
     def test_fast_lane_needs_scan_lists_accepted_commands(self):
         items = [{"kind": "npm", "package": "@scope/srv", "version": "1.2.3"},
