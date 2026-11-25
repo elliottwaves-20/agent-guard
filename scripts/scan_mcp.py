@@ -51,6 +51,7 @@ After a SAFE verdict, install with:
 
 import argparse
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -620,7 +621,9 @@ def run_sandbox(command: list, *, allow_hosts=(), network: bool = True) -> int:
         die(f"sandbox scan needs a Cisco runtime LLM: {problem}")
     allow = sandbox_allow_list(allow_hosts) if network else set()
     image = build_sandbox_image()
-    mismatch = launch_runtime_problem(command, image)
+    # --no-network must not contact the registries; NPM_CONFIG_ENGINE_STRICT=true
+    # and uv still enforce runtime ranges inside the container.
+    mismatch = launch_runtime_problem(command, image) if network else None
     if mismatch:
         print("\n" + "=" * 60)
         print(f"[BLOCK] NO VERDICT -- {mismatch}. A scan on another runtime would "
@@ -676,9 +679,21 @@ def run_sandbox(command: list, *, allow_hosts=(), network: bool = True) -> int:
             print(f"[WARN] could not remove sandbox container {container}: {exc}. "
                   "Remove it manually (docker rm --force).", file=sys.stderr)
         if capture is not None and not finished:
-            capture.remove()
+            try:
+                capture.remove()
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                print(f"[WARN] could not remove capture container {capture.name}: {exc}. "
+                      "Remove it manually (docker rm --force).", file=sys.stderr)
     if capture is not None:
-        rc = combine_verdicts(rc, _egress.verdict(capture.finish(allow)))
+        try:
+            report = capture.finish(allow)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print("\n" + "=" * 60)
+            print(f"[BLOCK] NO VERDICT -- could not read network capture ({exc}). "
+                  "Do NOT install.")
+            rc = combine_verdicts(rc, 2)
+        else:
+            rc = combine_verdicts(rc, _egress.verdict(report))
     return rc
 
 
@@ -695,27 +710,42 @@ SANDBOX_ENV = [
 ]
 
 
-# Evaluated inside the sandbox image, against the runtime that will run the
-# target: npm's own semver for engines.node, pip's vendored packaging for
-# requires-python. Each prints true, false, or error (unreadable range).
+# Evaluated inside the digest-pinned sandbox image against the runtime that will
+# run the target: npm bundled semver for engines.node (copied in
+# SANDBOX_DOCKERFILE) and pip vendored packaging for requires-python. The range
+# is passed on stdin (never as a CLI argument, so untrusted registry text cannot
+# be parsed as a Node/Python flag). Both paths are fixed by the image digests
+# and verified by tests/test_sandbox_image.py on every pin bump; any failure
+# returns None (fail closed: NO VERDICT).
 _SATISFIES = {
     "node": ["node", "-e",
-             "const s=require('/usr/local/lib/node_modules/npm/node_modules/semver');"
-             "const r=s.validRange(process.argv[1]);"
+             "const fs=require('fs'),"
+             "s=require('/usr/local/lib/node_modules/npm/node_modules/semver');"
+             "const r=s.validRange(fs.readFileSync(0,'utf8'));"
              "console.log(r===null?'error':String(s.satisfies(process.version,r)))"],
     "python": ["python", "-c",
                "import sys,platform\n"
                "from pip._vendor.packaging.specifiers import SpecifierSet,InvalidSpecifier\n"
-               "try: print(str(SpecifierSet(sys.argv[1]).contains(platform.python_version())).lower())\n"
+               "try: print(str(SpecifierSet(sys.stdin.read()).contains(platform.python_version())).lower())\n"
                "except InvalidSpecifier: print('error')"],
 }
 
 
 def image_satisfies(image: str, runtime: str, spec: str) -> bool | None:
     """Does the image's runtime satisfy `spec`? None if it cannot be told."""
-    r = subprocess.run(["docker", "run", "--rm", "--network", "none", "--user", "1000:1000",
-                        *SANDBOX_ENV, image, *_SATISFIES[runtime], spec],
-                       capture_output=True, text=True, timeout=120)
+    cmd = _SATISFIES.get(runtime)
+    if cmd is None or not isinstance(spec, str) or not spec.strip():
+        return None
+    try:
+        r = subprocess.run(
+            ["docker", "run", "--rm", "-i", "--network", "none",
+             "--read-only", "--security-opt", "no-new-privileges",
+             _egress.NO_CAPABILITIES, "--pids-limit", "256",
+             "--user", "1000:1000", *SANDBOX_ENV, image, *cmd],
+            input=spec, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
     answer = r.stdout.strip().splitlines()[-1:] if r.returncode == 0 else []
     return {"true": True, "false": False}.get(answer[0] if answer else "")
 
@@ -730,17 +760,55 @@ def _required_runtime(launcher: str, package: str) -> tuple[str, str] | None:
         else:
             name, _, version = package.partition("@")
         doc = http_json(f"https://registry.npmjs.org/{name}")
-        version = version or doc.get("dist-tags", {}).get("latest")
-        version = doc.get("dist-tags", {}).get(version, version)
-        spec = ((doc.get("versions", {}).get(version) or {}).get("engines") or {}).get("node")
-        return ("node", spec) if spec else None
+        if not isinstance(doc, dict):
+            raise ValueError("unexpected npm registry metadata")
+        dist_tags = doc.get("dist-tags")
+        if dist_tags is not None and not isinstance(dist_tags, dict):
+            raise ValueError("unexpected npm dist-tags")
+        dist_tags = dist_tags or {}
+        if not version:
+            version = dist_tags.get("latest")
+            if not isinstance(version, str) or not version:
+                raise ValueError("missing npm dist-tags.latest")
+        version = dist_tags.get(version, version)
+        if not isinstance(version, str) or not version:
+            raise ValueError(f"unexpected npm version tag: {version!r}")
+        versions = doc.get("versions")
+        if not isinstance(versions, dict):
+            raise ValueError("unexpected npm versions table")
+        entry = versions.get(version)
+        if entry is not None and not isinstance(entry, dict):
+            raise ValueError("unexpected npm version metadata")
+        engines = (entry or {}).get("engines")
+        if engines is not None and not isinstance(engines, dict):
+            raise ValueError("unexpected npm engines field")
+        spec = (engines or {}).get("node")
+        if spec is None:
+            return None
+        if not isinstance(spec, str):
+            raise ValueError(f"unexpected engines.node value: {spec!r}")
+        if not spec.strip():
+            return None
+        return ("node", spec)
     match = re.fullmatch(r"([A-Za-z0-9._-]+)(?:\[[^\]]*\])?(?:(?:==|@)([A-Za-z0-9._+!-]+))?", package)
     if not match:
         return None
     name, version = match.groups()
     url = f"https://pypi.org/pypi/{name}/{version}/json" if version else f"https://pypi.org/pypi/{name}/json"
-    spec = (http_json(url).get("info") or {}).get("requires_python")
-    return ("python", spec) if spec else None
+    doc = http_json(url)
+    if not isinstance(doc, dict):
+        raise ValueError("unexpected PyPI registry metadata")
+    info = doc.get("info")
+    if not isinstance(info, dict):
+        raise ValueError("unexpected PyPI info metadata")
+    spec = info.get("requires_python")
+    if spec is None:
+        return None
+    if not isinstance(spec, str):
+        raise ValueError(f"unexpected requires_python value: {spec!r}")
+    if not spec.strip():
+        return None
+    return ("python", spec)
 
 
 def launch_runtime_problem(command: list, image: str) -> str | None:
@@ -760,7 +828,7 @@ def launch_runtime_problem(command: list, image: str) -> str | None:
         return None
     try:
         required = _required_runtime(launcher, package)
-    except (OSError, ValueError, KeyError) as exc:
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError, AttributeError) as exc:
         return f"could not read the runtime {package} needs from the registry ({exc})"
     if required is None:
         return None
@@ -776,24 +844,41 @@ def launch_runtime_problem(command: list, image: str) -> str | None:
 
 def host_runtime_version(runtime: str) -> str | None:
     """Version of the runtime this machine runs installed servers on: `node`
-    for npm trees, the interpreter `uv run --project` picks for PyPI trees."""
+    for npm trees, and `uv python find --no-project --no-python-downloads` in
+    an empty directory (the default interpreter `uv run --project` picks for a
+    new locked PyPI tree; a concrete project that pins another interpreter via
+    .python-version or --python is not known here)."""
     try:
         if runtime == "node":
             node = shutil.which("node")
             if not node:
                 return None
-            out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=30)
-            return out.stdout.strip().lstrip("v") or None
-        uv = shutil.which("uv")
-        if not uv:
-            return None
-        found = subprocess.run([uv, "python", "find", "--no-project"],
-                               capture_output=True, text=True, timeout=60).stdout.strip()
-        if not found:
-            return None
-        out = subprocess.run([found, "-c", "import platform; print(platform.python_version())"],
-                             capture_output=True, text=True, timeout=30)
-        return out.stdout.strip() or None
+            out = subprocess.run([node, "--version"], capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace", timeout=30)
+            if out.returncode != 0:
+                return None
+            ver = out.stdout.strip().lstrip("v")
+            return ver if re.fullmatch(r"\d+\.\d+(?:\.\d+)*", ver) else None
+        if runtime == "python":
+            uv = shutil.which("uv")
+            if not uv:
+                return None
+            with tempfile.TemporaryDirectory() as empty_dir:
+                found_proc = subprocess.run(
+                    [uv, "python", "find", "--no-project", "--no-python-downloads"],
+                    cwd=empty_dir, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=60)
+            found = found_proc.stdout.strip() if found_proc.returncode == 0 else ""
+            if not found:
+                return None
+            out = subprocess.run([found, "-c", "import platform; print(platform.python_version())"],
+                                 capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace", timeout=30)
+            if out.returncode != 0:
+                return None
+            ver = out.stdout.strip()
+            return ver if re.fullmatch(r"\d+\.\d+(?:\.\d+)*", ver) else None
+        raise ValueError(f"unknown runtime: {runtime!r}")
     except (OSError, subprocess.TimeoutExpired):
         return None
 

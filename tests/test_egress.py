@@ -4,13 +4,15 @@ The sample lines were recorded from the pinned capture image (Alpine 3.24,
 tcpdump 4.99.6) with a target that fetched from pypi.org, looked up an unknown
 name, connected to a bare IP and sent a ping. No test here touches Docker.
 """
+import http.client
 import importlib
 import io
 import os
+import shutil
 import subprocess
 import sys
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import unittest.mock
 from unittest.mock import patch
@@ -326,10 +328,6 @@ class CaptureLifecycleTests(unittest.TestCase):
         self.assertEqual(report.findings, [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SandboxIntegrationTests(unittest.TestCase):
     """run_sandbox() wires the capture around the Cisco run. Docker is faked."""
 
@@ -340,24 +338,38 @@ class SandboxIntegrationTests(unittest.TestCase):
         self.capture.name = "agent-guard-net-test"
         self.capture.finish.return_value = eg.analyse(HEADER + PYPI + FOOTER, LOCAL,
                                                       eg.parse_allow(eg.DEFAULT_ALLOW))
+        self.docker_reply = subprocess.CompletedProcess(["docker"], 0, "true\n", "")
+        self.docker_calls = []
+        real_run = subprocess.run
+        real_which = shutil.which
+
+        def run_or_fake_docker(argv, *args, **kwargs):
+            if argv and argv[0] == "docker":
+                self.docker_calls.append((list(argv), dict(kwargs)))
+                if isinstance(self.docker_reply, BaseException):
+                    raise self.docker_reply
+                return self.docker_reply
+            return real_run(argv, *args, **kwargs)
+
         self.patches = [
             patch.object(sm, "need_mcp_scanner"),
             patch.object(sm, "build_sandbox_image", return_value="sandbox:tag"),
-            patch.object(sm.shutil, "which", return_value="docker"),
+            patch.object(sm.shutil, "which", side_effect=lambda name: "docker" if name == "docker" else real_which(name)),
             patch.object(sm, "cisco_llm_problem", return_value=None),
             patch.object(sm, "cisco_env", return_value={}),
             patch.object(sm, "cisco_command", return_value=["mcp-scanner"]),
-            patch.object(sm.subprocess, "run"),
+            patch.object(sm.subprocess, "run", side_effect=run_or_fake_docker),
         ]
         for p in self.patches:
             p.start()
-        # The real runtime check needs Docker and the registries: tests/test_sandbox_image.py.
-        self.runtime = patch.object(sm, "launch_runtime_problem", return_value=None)
-        self.runtime_mock = self.runtime.start()
-        self.patches.append(self.runtime)
-        self.parity = patch.object(sm, "runtime_parity_warnings", return_value=[])
-        self.parity.start()
-        self.patches.append(self.parity)
+        # Only the network (registry JSON) is replaced; launch_runtime_problem and
+        # runtime_parity_warnings run for real. Full Docker checks live in test_sandbox_image.py.
+        self.http = patch.object(
+            sm, "http_json",
+            return_value={"info": {}, "dist-tags": {"latest": "1.0.0"}, "versions": {"1.0.0": {}}},
+        )
+        self.http_mock = self.http.start()
+        self.patches.append(self.http)
         self.start = patch.object(sm._egress.Capture, "start", return_value=self.capture)
         self.start_mock = self.start.start()
         self.cisco = patch.object(sm, "run_cisco", return_value=0)
@@ -369,10 +381,10 @@ class SandboxIntegrationTests(unittest.TestCase):
         for p in self.patches:
             p.stop()
 
-    def sandbox(self, **kw):
+    def sandbox(self, command=None, **kw):
         out = io.StringIO()
         with redirect_stdout(out):
-            code = self.scan_mcp.run_sandbox(["uvx", "some-mcp"], **kw)
+            code = self.scan_mcp.run_sandbox(command or ["uvx", "some-mcp"], **kw)
         return code, out.getvalue()
 
     def docker_args(self):
@@ -380,20 +392,103 @@ class SandboxIntegrationTests(unittest.TestCase):
         return [a.split("=", 1)[1] for a in argv if a.startswith("--stdio-arg=")]
 
     def test_runtime_mismatch_gives_no_verdict_and_no_target_run(self):
-        self.runtime_mock.return_value = "pkg needs node >=99, the sandbox runs node 26.13.1"
+        self.http_mock.return_value = {"info": {"version": "1.0", "requires_python": ">=3.8,<3.12"}}
+        self.docker_reply = subprocess.CompletedProcess(["docker"], 0, "false\n", "")
         code, out = self.sandbox()
         self.assertEqual(code, 2)
-        self.assertIn("NO VERDICT -- pkg needs node >=99", out)
-        self.runtime_mock.assert_called_once_with(["uvx", "some-mcp"], "sandbox:tag")
+        self.assertIn("NO VERDICT -- some-mcp needs python >=3.8,<3.12", out)
+        self.assertIn(self.scan_mcp.SANDBOX_PYTHON, out)
         self.cisco_mock.assert_not_called()
         self.start_mock.assert_not_called()
 
     def test_parity_warning_is_printed_and_keeps_the_verdict(self):
-        with patch.object(self.scan_mcp, "runtime_parity_warnings",
-                          return_value=["sandbox runs python 3.14.10, this machine 3.13.18"]):
-            code, out = self.sandbox()
+        with patch.object(self.scan_mcp, "SANDBOX_NODE", "1.0.0"):
+            code, out = self.sandbox(command=["npx", "-y", "some-mcp@1.0.0"])
         self.assertEqual(code, 0)
-        self.assertIn("[WARN] sandbox runs python 3.14.10, this machine 3.13.18", out)
+        self.assertIn("[WARN]", out)
+        self.assertIn("node 1.0.0", out)
+        if shutil.which("node"):
+            self.assertIn("this machine runs node ", out)
+        else:
+            self.assertIn("node not found on this machine", out)
+
+    def test_runtime_check_errors_fail_closed_with_no_verdict(self):
+        # HTTPException (not a subclass of OSError) and malformed JSON shapes for
+        # both PyPI and npm must produce exit 2 (NO VERDICT), never exit 0 or 1.
+        cases = (
+            (["uvx", "some-mcp"], http.client.RemoteDisconnected("closed")),
+            (["uvx", "some-mcp"], ["not-a-dict"]),
+            (["uvx", "some-mcp"], {}),
+            (["uvx", "some-mcp"], {"info": []}),
+            (["uvx", "some-mcp"], {"info": {"requires_python": 314}}),
+            (["npx", "-y", "some-mcp"], ["not-a-dict"]),
+            (["npx", "-y", "some-mcp"], {"versions": {}}),
+            (["npx", "-y", "some-mcp"], {"dist-tags": [], "versions": {}}),
+            (["npx", "-y", "some-mcp@1.0.0"], {"dist-tags": {"latest": "1.0.0"}}),
+            (["npx", "-y", "some-mcp@1.0.0"], {"versions": []}),
+            (["npx", "-y", "some-mcp@1.0.0"], {"versions": {"1.0.0": []}}),
+            (["npx", "-y", "some-mcp@1.0.0"], {"versions": {"1.0.0": {"engines": []}}}),
+            (["npx", "-y", "some-mcp@1.0.0"], {"versions": {"1.0.0": {"engines": {"node": 26}}}}),
+        )
+        for cmd, bad_net in cases:
+            with self.subTest(cmd=cmd, bad_net=bad_net):
+                if isinstance(bad_net, Exception):
+                    self.http_mock.side_effect = bad_net
+                else:
+                    self.http_mock.side_effect = None
+                    self.http_mock.return_value = bad_net
+                code, out = self.sandbox(command=cmd)
+                self.assertEqual(code, 2, out)
+                self.assertIn("NO VERDICT", out)
+                self.assertIn("from the registry", out)
+                self.cisco_mock.assert_not_called()
+                self.start_mock.assert_not_called()
+
+    def test_uncheckable_runtime_in_image_gives_no_verdict_and_no_target_run(self):
+        self.http_mock.return_value = {
+            "dist-tags": {"latest": "1.0.0"},
+            "versions": {"1.0.0": {"engines": {"node": ">=24"}}},
+        }
+        replies = (
+            subprocess.CompletedProcess(["docker"], 125, "true\n", "daemon error"),
+            subprocess.CompletedProcess(["docker"], 0, "error\n", ""),
+            subprocess.TimeoutExpired(["docker"], 120),
+            OSError("docker vanished"),
+        )
+        for reply in replies:
+            with self.subTest(reply=reply):
+                self.docker_reply = reply
+                code, out = self.sandbox(command=["npx", "-y", "some-mcp@1.0.0"])
+                self.assertEqual(code, 2, out)
+                self.assertIn("NO VERDICT", out)
+                self.cisco_mock.assert_not_called()
+                self.start_mock.assert_not_called()
+
+    def test_image_satisfies_passes_spec_on_stdin_with_hardened_container(self):
+        self.http_mock.return_value = {
+            "dist-tags": {"latest": "1.0.0"},
+            "versions": {"1.0.0": {"engines": {"node": "--eval=console.log(true)"}}},
+        }
+        self.docker_reply = subprocess.CompletedProcess(["docker"], 0, "error\n", "")
+        code, _out = self.sandbox(command=["npx", "-y", "some-mcp@1.0.0"])
+        self.assertEqual(code, 2)
+        run_calls = [(argv, kw) for argv, kw in self.docker_calls if argv[:2] == ["docker", "run"]]
+        self.assertEqual(len(run_calls), 1)
+        argv, kw = run_calls[0]
+        self.assertNotIn("--eval=console.log(true)", argv)
+        self.assertEqual(kw.get("input"), "--eval=console.log(true)")
+        for flag in ("-i", "--read-only", "no-new-privileges", "--cap-drop=ALL", "--pids-limit"):
+            self.assertIn(flag, argv)
+
+    def test_image_satisfies_timeout_or_oserror_returns_none(self):
+        sm = self.scan_mcp
+        for exc in (subprocess.TimeoutExpired(["docker"], 120), OSError("docker vanished")):
+            with self.subTest(exc=type(exc).__name__), \
+                    patch.object(sm.subprocess, "run", side_effect=exc):
+                self.assertIsNone(sm.image_satisfies("sandbox:tag", "node", ">=24"))
+        self.assertIsNone(sm.image_satisfies("sandbox:tag", "ruby", ">=3"))
+        self.assertIsNone(sm.image_satisfies("sandbox:tag", "node", "   "))
+        self.assertIsNone(sm.image_satisfies("sandbox:tag", "python", "   "))
 
     def test_sandbox_environment_makes_npm_strict_about_engines(self):
         self.sandbox()
@@ -441,9 +536,11 @@ class SandboxIntegrationTests(unittest.TestCase):
         self.start_mock.assert_not_called()
         self.cisco_mock.assert_not_called()
 
-    def test_no_network_skips_the_capture(self):
+    def test_no_network_skips_the_capture_and_online_runtime_lookup(self):
+        self.http_mock.side_effect = OSError("offline")
         code, out = self.sandbox(network=False)
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 0, out)
+        self.http_mock.assert_not_called()
         self.start_mock.assert_not_called()
         args = self.docker_args()
         self.assertEqual(args[args.index("--network") + 1], "none")
@@ -461,6 +558,22 @@ class SandboxIntegrationTests(unittest.TestCase):
             self.sandbox()
         self.capture.remove.assert_called_once()
         self.capture.finish.assert_not_called()
+
+    def test_capture_finish_docker_failure_gives_no_verdict_not_block(self):
+        for exc in (OSError("docker down"), subprocess.TimeoutExpired(["docker"], 60)):
+            with self.subTest(exc=type(exc).__name__):
+                self.capture.finish.side_effect = exc
+                code, out = self.sandbox()
+                self.assertEqual(code, 2, out)
+                self.assertIn("NO VERDICT", out)
+
+    def test_capture_remove_failure_still_propagates_scan_error(self):
+        self.cisco_mock.side_effect = RuntimeError("handshake")
+        self.capture.remove.side_effect = OSError("docker vanished")
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(RuntimeError):
+            self.sandbox()
+        self.assertIn("could not remove capture container", err.getvalue())
 
 
 class SandboxImageTests(unittest.TestCase):
@@ -492,13 +605,53 @@ class RuntimeParityTests(unittest.TestCase):
         self.assertIn("not found", self.sm.parity_warning("node", "26.13.1", None))
 
     def test_launcher_picks_the_runtime_it_needs(self):
-        with patch.object(self.sm, "host_runtime_version", return_value="24.1.0") as host:
+        with patch.object(self.sm, "SANDBOX_NODE", "1.0.0"):
             warnings = self.sm.runtime_parity_warnings(["npx", "-y", "pkg@1"])
-        host.assert_called_once_with("node")
         self.assertEqual(len(warnings), 1)
-        with patch.object(self.sm, "host_runtime_version") as host:
-            self.assertEqual(self.sm.runtime_parity_warnings(["docker", "run", "x"]), [])
-        host.assert_not_called()
+        self.assertIn("node 1.0.0", warnings[0])
+        if shutil.which("node"):
+            self.assertIn("this machine runs node ", warnings[0])
+        with patch.object(self.sm, "SANDBOX_PYTHON", "3.1.0"):
+            py_warnings = self.sm.runtime_parity_warnings(["uvx", "pkg"])
+        self.assertEqual(len(py_warnings), 1)
+        self.assertIn("python 3.1.0", py_warnings[0])
+        if shutil.which("uv"):
+            self.assertIn("this machine runs python ", py_warnings[0])
+        self.assertEqual(self.sm.runtime_parity_warnings(["docker", "run", "x"]), [])
+
+    def test_host_runtime_version_ignores_failing_subprocess(self):
+        failed = subprocess.CompletedProcess(["node", "--version"], 1, "not a version\n", "err")
+        with patch.object(self.sm.shutil, "which", return_value="node"), \
+                patch.object(self.sm.subprocess, "run", return_value=failed):
+            self.assertIsNone(self.sm.host_runtime_version("node"))
+        garbage = subprocess.CompletedProcess(["node", "--version"], 0, "garbage output\n", "")
+        with patch.object(self.sm.shutil, "which", return_value="node"), \
+                patch.object(self.sm.subprocess, "run", return_value=garbage):
+            self.assertIsNone(self.sm.host_runtime_version("node"))
+        with patch.object(self.sm.shutil, "which", return_value=None):
+            self.assertIsNone(self.sm.host_runtime_version("python"))
+        with patch.object(self.sm.shutil, "which", return_value="uv"), \
+                patch.object(self.sm.subprocess, "run",
+                             return_value=subprocess.CompletedProcess(["uv"], 1, "", "err")):
+            self.assertIsNone(self.sm.host_runtime_version("python"))
+        with patch.object(self.sm.shutil, "which", return_value="uv"), \
+                patch.object(self.sm.subprocess, "run", side_effect=[
+                    subprocess.CompletedProcess(["uv"], 0, "C:\\py.exe\n", ""),
+                    subprocess.CompletedProcess(["C:\\py.exe"], 1, "", "err"),
+                ]):
+            self.assertIsNone(self.sm.host_runtime_version("python"))
+        with patch.object(self.sm.shutil, "which", return_value="uv"), \
+                patch.object(self.sm.subprocess, "run", side_effect=[
+                    subprocess.CompletedProcess(["uv"], 0, "C:\\py.exe\n", ""),
+                    subprocess.CompletedProcess(["C:\\py.exe"], 0, "not-a-version\n", ""),
+                ]):
+            self.assertIsNone(self.sm.host_runtime_version("python"))
+        with patch.object(self.sm.shutil, "which", return_value="uv"), \
+                patch.object(self.sm.subprocess, "run",
+                             side_effect=subprocess.TimeoutExpired(["uv"], 60)):
+            self.assertIsNone(self.sm.host_runtime_version("python"))
+        with self.assertRaises(ValueError):
+            self.sm.host_runtime_version("ruby")
 
 
 class CommandLineTests(unittest.TestCase):
@@ -512,3 +665,7 @@ class CommandLineTests(unittest.TestCase):
             sm.main()
         run.assert_called_once_with(["uvx", "pkg"], allow_hosts=["a.example", "b.example:8443"],
                                     network=False)
+
+
+if __name__ == "__main__":
+    unittest.main()

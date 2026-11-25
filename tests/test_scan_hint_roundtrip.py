@@ -103,7 +103,13 @@ class FakeNet:
         raise AssertionError(f"unexpected download {url}")
 
 
+@unittest.skipUnless(os.environ.get("AGENT_GUARD_INTEGRATION") == "1",
+                     "set AGENT_GUARD_INTEGRATION=1 to run the roundtrip with the installed SkillSpector")
 class InstallerHintRoundTrip(unittest.TestCase):
+    """Static-only roundtrip with the installed SkillSpector: runs --no-dynamic
+    with AGENT_GUARD_STATIC_ONLY=1 so it needs neither Docker nor LLM quota.
+    The full dynamic path (real registry + real OpenSSF container) is tested by
+    LiveDynamicHintRoundTrip under the same AGENT_GUARD_INTEGRATION=1 gate."""
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "mcp"
@@ -139,16 +145,17 @@ class InstallerHintRoundTrip(unittest.TestCase):
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             with self.assertRaises(SystemExit) as ctx:
                 scan_url.main()
-        self.assertIn(ctx.exception.code, (0, 1), out.getvalue())
+        self.assertEqual(ctx.exception.code, 0, out.getvalue())
         self.assertIn("Scan receipt:", out.getvalue())
         self.assertNotIn("[LLM:", out.getvalue(), "a unit test must not spend LLM budget")
         return ctx.exception.code
 
     def assert_roundtrip(self, kind, package, version, archive: bytes):
         code = self.run_scan_url(self.installer_hint(kind, package, version))
-        receipt, accepted = receipts.require_receipt(self.root, kind, package, version, "test")
-        self.assertEqual(receipt.verdict, "SAFE" if code == 0 else "BLOCK")
-        self.assertEqual(accepted is None, code == 0)
+        self.assertEqual(code, 0)
+        receipt, accepted = receipts.require_receipt(self.root, kind, package, version, None)
+        self.assertEqual(receipt.verdict, "SAFE")
+        self.assertIsNone(accepted)
         self.assertEqual(receipt.archive_sha256, hashlib.sha256(archive).hexdigest())
 
     def test_npm_scoped_package(self):
@@ -204,6 +211,43 @@ class NetworkShapeContract(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             tops = {n.split("/", 1)[0] for n in zf.namelist()}
         self.assertEqual(len(tops), 1)
+
+
+@unittest.skipUnless(os.environ.get("AGENT_GUARD_INTEGRATION") == "1",
+                     "set AGENT_GUARD_INTEGRATION=1 to run the real dynamic hint roundtrip (Docker + network)")
+class LiveDynamicHintRoundTrip(unittest.TestCase):
+    """Runs the installer hint through real scan_url.main() WITHOUT --no-dynamic:
+    live npm registry, real SkillSpector static scan (AGENT_GUARD_STATIC_ONLY=1
+    to avoid LLM quota), real OpenSSF dynamic container, real receipt read-back."""
+
+    def test_npm_hint_runs_static_and_dynamic_and_writes_readable_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "mcp"
+            with self.assertRaises(locked.Refused) as ctx:
+                receipts.require_receipt(root, "npm", "is-number", "7.0.0", None)
+            found = HINT.findall(str(ctx.exception))
+            self.assertEqual(len(found), 1, str(ctx.exception))
+            argv = shlex.split(f"scan_url.py {found[0]}") + ["--dry-run"]
+
+            out = io.StringIO()
+            with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}):
+                llm = dict(zip(("PROVIDER", "LLM_READY", "LLM_REASON"), skillspector.resolve_llm()))
+                llm["LLM_EXPLICIT"] = skillspector._llm_explicit()
+            with patch.object(sys, "argv", argv), \
+                    patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}), \
+                    patch.multiple(skillspector, **llm), \
+                    patch.dict(skillspector.USER_CONFIG, {"mcp": {"install_dir": str(root)}}), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                with self.assertRaises(SystemExit) as res:
+                    scan_url.main()
+            text = out.getvalue()
+            self.assertEqual(res.exception.code, 0, text)
+            self.assertIn("Dynamic install analysis (OpenSSF sandbox)", text)
+            receipt, accepted = receipts.require_receipt(root, "npm", "is-number", "7.0.0", None)
+            self.assertEqual(receipt.verdict, "SAFE")
+            self.assertIsNone(accepted)
+            self.assertRegex(receipt.archive_sha256, r"^[0-9a-f]{64}$")
+            self.assertTrue(receipt.integrity.startswith("sha512-"))
 
 
 if __name__ == "__main__":

@@ -5,11 +5,15 @@ Builds the real image and asks each runtime for its version; the runtime check
 runs inside that image. Needs Docker and network (registry metadata), so it is
 gated like the other integration tests (scripts/run_all_tests.py opens the gate).
 """
+import contextlib
 import importlib
+import io
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -70,6 +74,9 @@ class SandboxImageTests(unittest.TestCase):
         self.assertIs(sm.image_satisfies(self.tag, "python", ">=3.8,<3.12"), False)
 
     def test_unreadable_range_is_no_answer(self):
+        self.assertIsNone(sm.image_satisfies(self.tag, "node", "not a range"))
+        self.assertIsNone(sm.image_satisfies(self.tag, "node", "--eval=console.log(true)"))
+        self.assertIsNone(sm.image_satisfies(self.tag, "node", "-p=true"))
         self.assertIsNone(sm.image_satisfies(self.tag, "python", "not a specifier"))
 
     def test_npm_refuses_a_package_whose_engines_exclude_the_image_node(self):
@@ -108,14 +115,75 @@ class SandboxImageTests(unittest.TestCase):
             problem = sm.launch_runtime_problem(["npx", "-y", "pkg@1.0.0"], self.tag)
         self.assertIn("offline", problem)
 
-    def test_host_runtime_versions_are_read_from_this_machine(self):
-        node = subprocess.run(["node", "--version"], capture_output=True, text=True).stdout.strip()
-        self.assertEqual(sm.host_runtime_version("node"), node.lstrip("v"))
-        found = subprocess.run(["uv", "python", "find", "--no-project"],
-                               capture_output=True, text=True).stdout.strip()
-        version = subprocess.run([found, "-c", "import platform; print(platform.python_version())"],
-                                 capture_output=True, text=True).stdout.strip()
-        self.assertEqual(sm.host_runtime_version("python"), version)
+    def test_run_sandbox_no_network_never_queries_registry(self):
+        out = io.StringIO()
+        with patch.object(sm, "need_mcp_scanner"), \
+                patch.object(sm, "cisco_llm_problem", return_value=None), \
+                patch.object(sm, "cisco_env", return_value={}), \
+                patch.object(sm, "cisco_command", return_value=["mcp-scanner"]), \
+                patch.object(sm, "run_cisco", return_value=0) as cisco, \
+                patch.object(sm._egress.Capture, "start") as capture_start, \
+                patch.object(sm, "http_json", side_effect=OSError("offline")) as http, \
+                contextlib.redirect_stdout(out):
+            rc = sm.run_sandbox(["npx", "-y", "some-mcp@1.0.0"], network=False)
+        self.assertEqual(rc, 0, out.getvalue())
+        http.assert_not_called()
+        capture_start.assert_not_called()
+        docker_args = [a.split("=", 1)[1] for a in cisco.call_args.args[0]
+                       if a.startswith("--stdio-arg=")]
+        self.assertEqual(docker_args[docker_args.index("--network") + 1], "none")
+
+    def test_run_sandbox_refuses_runtime_mismatch_with_real_image(self):
+        doc = {"dist-tags": {"latest": "1.0.0"},
+               "versions": {"1.0.0": {"engines": {"node": ">=99"}}}}
+        out = io.StringIO()
+        with patch.object(sm, "need_mcp_scanner"), \
+                patch.object(sm, "cisco_llm_problem", return_value=None), \
+                patch.object(sm, "cisco_env", return_value={}), \
+                patch.object(sm, "cisco_command", return_value=["mcp-scanner"]), \
+                patch.object(sm, "run_cisco") as cisco, \
+                patch.object(sm._egress.Capture, "start") as capture_start, \
+                patch.object(sm, "http_json", return_value=doc), \
+                contextlib.redirect_stdout(out):
+            rc = sm.run_sandbox(["npx", "-y", "pkg@1.0.0"])
+        self.assertEqual(rc, 2, out.getvalue())
+        self.assertIn("NO VERDICT", out.getvalue())
+        self.assertIn(">=99", out.getvalue())
+        self.assertIn(sm.SANDBOX_NODE, out.getvalue())
+        cisco.assert_not_called()
+        capture_start.assert_not_called()
+
+    def test_host_runtime_versions_match_actual_launchers(self):
+        # Independent reference: ask the Node runtime object and a real virtual
+        # uv project (matching the mcp-pypi pyproject.toml) rather than repeating
+        # the subprocess commands of host_runtime_version.
+        node_ver = sm.host_runtime_version("node")
+        self.assertRegex(node_ver or "", r"^\d+\.\d+\.\d+$")
+        real_node = subprocess.run(["node", "-p", "process.versions.node"],
+                                   capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(node_ver, real_node)
+
+        py_ver = sm.host_runtime_version("python")
+        self.assertRegex(py_ver or "", r"^\d+\.\d+\.\d+$")
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "pyproject.toml").write_text(
+                '[project]\nname = "probe"\nversion = "0.0.0"\nrequires-python = ">=3.10"\n'
+                '[tool.uv]\npackage = false\n', encoding="utf-8")
+            real_py = subprocess.run(
+                ["uv", "run", "--project", tmp, "--no-sync", "python", "-V"],
+                capture_output=True, text=True, check=True).stdout.strip()
+        self.assertTrue(real_py.startswith("Python "), real_py)
+        self.assertEqual(py_ver, real_py.removeprefix("Python "))
+
+        # A .python-version file in the caller CWD must not override the default.
+        with tempfile.TemporaryDirectory() as pin_dir:
+            (Path(pin_dir) / ".python-version").write_text("3.10\n", encoding="utf-8")
+            prev_cwd = os.getcwd()
+            try:
+                os.chdir(pin_dir)
+                self.assertEqual(sm.host_runtime_version("python"), py_ver)
+            finally:
+                os.chdir(prev_cwd)
 
     def test_registry_metadata_has_the_fields_the_pre_check_reads(self):
         # Contract for the http_json stand-ins above: the real registries answer

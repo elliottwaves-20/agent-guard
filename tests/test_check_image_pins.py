@@ -76,14 +76,28 @@ class CheckTests(unittest.TestCase):
             rc = cip.check(fetch=fetch, fetch_line=fetch_line, now=NOW)
         return rc, out.getvalue()
 
-    def test_sandbox_uv_is_checked_like_a_scanner(self):
-        self.assertEqual(cip.SCANNERS["astral-sh/uv"][1], cip._pins.SANDBOX_UV)
-
-    def test_runtime_lines_follow_the_sandbox_pins(self):
+    def test_runtime_line_extracts_node_major_and_python_major_minor(self):
         self.assertEqual(cip.runtime_line("nodejs", "26.13.1"), "26")
+        self.assertEqual(cip.runtime_line("nodejs", "22.0.0"), "22")
         self.assertEqual(cip.runtime_line("python", "3.14.10"), "3.14")
-        self.assertEqual(cip.RUNTIMES["nodejs"][1], cip._pins.SANDBOX_NODE)
-        self.assertEqual(cip.RUNTIMES["python"][1], cip._pins.SANDBOX_PYTHON)
+        self.assertEqual(cip.runtime_line("python", "3.9.18"), "3.9")
+
+    def test_sandbox_uv_reports_unprefixed_update_and_wait(self):
+        def fetch_update(repo):
+            if repo == "astral-sh/uv":
+                return [rel("99.0.0", 10)]
+            return [rel(cip.SCANNERS[repo][1], 30)]
+        rc, out = self.run_check(fetch_update)
+        self.assertEqual(rc, 1)
+        self.assertIn("[UPDATE] uv (MCP sandbox) 99.0.0 can be pinned", out)
+
+        def fetch_wait(repo):
+            if repo == "astral-sh/uv":
+                return [rel("99.0.1", 1)]
+            return [rel(cip.SCANNERS[repo][1], 30)]
+        rc, out = self.run_check(fetch_wait)
+        self.assertEqual(rc, 1)
+        self.assertIn("[WAIT] uv (MCP sandbox) 99.0.1 released", out)
 
 
     def test_up_to_date_exits_zero(self):
@@ -181,9 +195,9 @@ class RuntimeCheckTests(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get("AGENT_GUARD_INTEGRATION") == "1",
-                     "set AGENT_GUARD_INTEGRATION=1 to check the endoflife.date contract")
-class EndOfLifeContractTests(unittest.TestCase):
-    def test_real_answer_has_the_fields_the_check_reads(self):
+                     "set AGENT_GUARD_INTEGRATION=1 to check live API contracts")
+class LivePinContractTests(unittest.TestCase):
+    def test_endoflife_answer_has_the_fields_the_check_reads(self):
         for product, (_name, pinned) in cip.RUNTIMES.items():
             info = cip.fetch_line(product, cip.runtime_line(product, pinned))
             self.assertEqual(info["name"], cip.runtime_line(product, pinned))
@@ -191,6 +205,35 @@ class EndOfLifeContractTests(unittest.TestCase):
             self.assertRegex(info["eolFrom"], r"^\d{4}-\d{2}-\d{2}$")
             self.assertIsNotNone(cip.parse_version(info["latest"]["name"]))
             self.assertRegex(info["latest"]["date"], r"^\d{4}-\d{2}-\d{2}$")
+
+    def test_github_releases_match_contract_including_uv(self):
+        now = datetime.now(timezone.utc)
+        for repo, (_name, pinned) in cip.SCANNERS.items():
+            with self.subTest(repo=repo):
+                releases = cip.fetch_releases(repo)
+                self.assertIsInstance(releases, list)
+                self.assertGreater(len(releases), 0)
+                stable = [r for r in releases if not r.get("draft") and not r.get("prerelease")]
+                self.assertGreater(len(stable), 0)
+                self.assertIsNotNone(cip.parse_version(stable[0].get("tag_name", "")))
+                self.assertIsNotNone(cip._parse_time(stable[0].get("published_at")))
+                newer = cip.newer_releases(pinned, releases, now)
+                self.assertIsInstance(newer, list)
+
+    def test_live_check_reports_every_pinned_target_without_error(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = cip.check()
+        text = out.getvalue()
+        self.assertIn(rc, (0, 1), text)
+        expected = ("Node.js (MCP sandbox)", "Python (MCP sandbox)",
+                    "GuardDog", "malcontent", "uv (MCP sandbox)")
+        lines = [line for line in text.splitlines() if line.strip()]
+        self.assertGreaterEqual(len(lines), len(expected))
+        for entry in lines:
+            self.assertRegex(entry, r"^\[(OK|UPDATE|WAIT|EOL)\] ")
+        for name in expected:
+            self.assertIn(name, text)
 
 class MalcontentCandidateTests(unittest.TestCase):
     def build(self, created_days_ago, digest, packages):
