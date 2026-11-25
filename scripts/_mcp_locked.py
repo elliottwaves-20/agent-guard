@@ -553,6 +553,10 @@ def audit_trees(root: Path, *, policy, fetch, now=None) -> dict:
                 tree["status"] = "no_verdict"
     try:
         _audit_verify(root_snapshot)
+        # A directory timestamp can stay the same for an entry added in the
+        # same clock tick (Windows), so the listing itself is compared too.
+        if sorted(child.name for child in root.iterdir()) != [child.name for child in children]:
+            raise Refused(2, f"{root} changed during the audit")
     except (OSError, Refused) as exc:
         audit["error"] = str(exc)
 
