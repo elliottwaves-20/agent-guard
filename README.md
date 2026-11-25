@@ -128,10 +128,12 @@ Optional, depending on what you scan or install:
 
 Platform notes:
 
-- **macOS / Linux** are fully supported: run `bash setup.sh`; symlinks work
-  natively, and Claude Desktop configs are detected at their platform paths
-  (see the table above).
-- **Windows on ARM64**: `yara-python` (a SkillSpector dependency) publishes no
+- **Tested only on Windows (x64).** The test suite has not been run on macOS,
+  Linux or Windows on ARM64 yet, and there is no CI for them. The code is
+  written to run there, but treat those platforms as untested.
+- **macOS / Linux**: run `bash setup.sh`; symlinks work natively, and Claude
+  Desktop configs are detected at their platform paths (see the table above).
+- **Windows on ARM64** (untested): `yara-python` (a SkillSpector dependency) publishes no
   `win_arm64` wheels, so the setup scripts detect ARM64 and install
   SkillSpector with an x86-64 Python that Windows 11 runs under transparent
   x64 emulation — prebuilt wheels then work without a C compiler. Everything

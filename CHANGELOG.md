@@ -81,6 +81,9 @@
 
 - `mcp-pypi` and `mcp-git` need Python 3.11 or newer; `mcp-npm` needs npm
   11.10 or newer.
+- The README no longer calls macOS and Linux fully supported: the test suite
+  has only been run on Windows x64, so macOS, Linux and Windows on ARM64 are
+  marked untested until a CI covers them.
 
 - SkillSpector is pinned to main `c816150` (14 Nov 2026, package version
   2.12.0), the newest main push at least 7 days old. It adds #1077, #1092,
