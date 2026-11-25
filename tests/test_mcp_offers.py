@@ -308,7 +308,7 @@ class RealScanReceipts(unittest.TestCase):
 
     def test_git_subdirectory_offer_matches_receipt_and_reads_scanned_project(self):
         from tests.test_mcp_uv import FakeGitUv, SHA, git_lock, git_which, stub_check
-        from _mcp_uv import git_scan_ids, parse_git_url
+        from _mcp_uv import parse_git_url
 
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w") as zf:
@@ -330,8 +330,10 @@ class RealScanReceipts(unittest.TestCase):
             git_url = output.getvalue().partition("--git-url ")[2].split()[0]
             owner, repo, sha, subdir = parse_git_url(git_url)
             self.assertEqual(subdir, "server")
-            identity = git_scan_ids(f"{owner}/{repo}", subdir)[0]
-            receipts.require_receipt(self.root, "git", identity, sha, None)
+            # F1: uv builds from the whole checkout, so the receipt is for the whole repository.
+            receipts.require_receipt(self.root, "git", f"{owner}/{repo}", sha, None)
+            self.assertFalse(receipts.receipt_path(self.root, "git", f"{owner}/{repo}#server",
+                                                   sha).exists())
 
             uv = FakeGitUv(lock_text=lambda name: git_lock(name, query_extra="subdirectory=server&"))
             install_git = scan_url.install_mcp_git
@@ -352,6 +354,50 @@ class RealScanReceipts(unittest.TestCase):
                 scan_url.offer_git_mcp_install(source, dry_run=False)
             self.assertEqual(uv.requires.strip(), "setuptools>=70")
             self.assertTrue((self.root / "example-mcp" / "uv.lock").is_file())
+
+    def _scan_git_subdirectory(self, files: dict):
+        from tests.test_mcp_uv import SHA
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("repo/server/pyproject.toml",
+                        '[project]\nname = "example-mcp"\n'
+                        '[project.scripts]\nexample-server = "ex:main"\n')
+            zf.writestr("repo/server/ex.py", "def main():\n    return 0\n")
+            for name, content in files.items():
+                zf.writestr(f"repo/{name}", content)
+        with tempfile.TemporaryDirectory() as src:
+            url = f"https://github.com/example/mcp/tree/{SHA}/server"
+            with patch.object(resolver, "http_bytes", return_value=archive.getvalue()):
+                source = resolver.resolve_github(url, Path(src))
+            out = io.StringIO()
+            with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}), \
+                    patch.multiple(self.skillspector, **self._static_only_llm()), \
+                    patch.dict(self.skillspector.USER_CONFIG, {"mcp": {"install_dir": str(self.root)}}), \
+                    patch.object(scan_url, "interactive", lambda: False), \
+                    contextlib.redirect_stdout(out):
+                rc = scan_url.scan_resolved(source, "mcp-source", dry_run=True)
+        return rc, out.getvalue(), SHA
+
+    def test_git_subdirectory_scan_covers_code_outside_the_subdirectory(self):
+        """F1: a build backend may pull files from anywhere in the checkout."""
+        rc, out, sha = self._scan_git_subdirectory({"shared/helper.py": MALICIOUS_PY})
+        self.assertEqual(rc, 1, out)
+        receipt, _ = receipts.require_receipt(self.root, "git", "example/mcp", sha,
+                                              "reviewed in test")
+        self.assertEqual(receipt.verdict, "BLOCK")
+        self.assertNotIn("--git-url", out)
+
+    def test_git_source_with_submodules_has_no_verdict(self):
+        """F1: the GitHub ZIP lacks submodules, but uv checks them out."""
+        for name in (".gitmodules", ".GitModules"):
+            with self.subTest(name=name):
+                rc, out, sha = self._scan_git_subdirectory(
+                    {name: '[submodule "lib"]\n\tpath = lib\n\turl = https://example.org/lib\n'})
+                self.assertEqual(rc, 2, out)
+                self.assertIn("submodule", out)
+                self.assertFalse(receipts.receipt_path(self.root, "git", "example/mcp",
+                                                       sha).exists())
+                self.assertNotIn("--git-url", out)
 
 
 class Fetch(unittest.TestCase):

@@ -868,12 +868,15 @@ def host_runtime_version(runtime: str) -> str | None:
                     [uv, "python", "find", "--no-project", "--no-python-downloads"],
                     cwd=empty_dir, capture_output=True, text=True,
                     encoding="utf-8", errors="replace", timeout=60)
-            found = found_proc.stdout.strip() if found_proc.returncode == 0 else ""
-            if not found:
-                return None
-            out = subprocess.run([found, "-c", "import platform; print(platform.python_version())"],
-                                 capture_output=True, text=True,
-                                 encoding="utf-8", errors="replace", timeout=30)
+                found = found_proc.stdout.strip() if found_proc.returncode == 0 else ""
+                if not found:
+                    return None
+                # Isolated (-I) in an empty directory: no module from the
+                # current directory or the user site shadows platform.
+                out = subprocess.run(
+                    [found, "-I", "-c", "import platform; print(platform.python_version())"],
+                    cwd=empty_dir, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=30)
             if out.returncode != 0:
                 return None
             ver = out.stdout.strip()

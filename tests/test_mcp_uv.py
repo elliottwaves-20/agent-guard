@@ -510,9 +510,54 @@ class GitInstall(unittest.TestCase):
                 "which": git_which, "fetch_text": self.fetch_text,
                 "settled": lambda source, branch, head: ("c" * 40, None),
                 "branch_head": lambda source: ("main", "d" * 40),
-                "compare": self.compare(status)}
+                "compare": self.compare(status),
+                "root_names": lambda source, sha: ["pyproject.toml", "src"]}
         opts.update(kwargs)
         return uv_mod.git_install(**opts)
+
+    def test_submodules_refuse_the_install_without_a_scanned_copy(self):
+        """F1: an older receipt or a manual mcp-git call must not build a
+        commit whose submodules uv would check out unscanned."""
+        for name in (".gitmodules", ".GitModules"):
+            with self.subTest(name=name):
+                asked = []
+                uv = FakeGitUv()
+
+                def names(source, sha):
+                    asked.append((source, sha))
+                    return ["pyproject.toml", name]
+
+                with self.assertRaises(locked.Refused) as ctx:
+                    self.install(uv=uv, root_names=names)
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertIn("submodule", str(ctx.exception))
+                self.assertEqual(asked, [("example/mcp", SHA)])
+                self.assertEqual(uv.commands, [])
+
+    def test_submodules_in_the_scanned_copy_refuse_the_install(self):
+        scanned = Path(self.tmp.name) / "scanned"
+        scanned.mkdir()
+        (scanned / "pyproject.toml").write_text('[project]\nname = "example-mcp"\n', encoding="utf-8")
+        (scanned / ".gitmodules").write_text("", encoding="utf-8")
+        uv = FakeGitUv()
+        with self.assertRaises(locked.Refused) as ctx:
+            self.install(uv=uv, scanned_dir=scanned,
+                         root_names=lambda *a: self.fail("the scanned copy is checked locally"))
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(uv.commands, [])
+
+    def test_root_listing_fails_closed(self):
+        for data in ({"message": "Not Found"}, [{"name": 1}], [{"name": "x"}] * 1000):
+            with self.subTest(data=str(data)[:40]), \
+                    mock.patch.object(uv_mod, "_github_json", return_value=data):
+                with self.assertRaises(locked.Refused) as ctx:
+                    uv_mod.github_root_names("example/mcp", SHA)
+                self.assertEqual(ctx.exception.code, 2)
+        with mock.patch.object(uv_mod, "_github_json",
+                          return_value=[{"name": "a", "type": "file"}]) as get:
+            self.assertEqual(uv_mod.github_root_names("example/mcp", SHA), ["a"])
+        self.assertEqual(get.call_args.args[0],
+                         f"https://api.github.com/repos/example/mcp/contents?ref={SHA}")
 
     def old_install(self):
         target = self.root / "ex"
@@ -731,7 +776,7 @@ class GitInstall(unittest.TestCase):
     def test_download_uses_the_scanned_commit_and_subdirectory(self):
         url = f"https://github.com/example/mcp@{SHA}#subdirectory=servers/ex"
         uv = FakeGitUv(lock_text=lambda root: git_lock(root, query_extra="subdirectory=servers/ex&"))
-        self.install(uv=uv, git_url=url, receipt=git_receipt(package="example/mcp#servers/ex"))
+        self.install(uv=uv, git_url=url, receipt=git_receipt(package="example/mcp"))
         self.assertEqual(self.fetched, [f"https://raw.githubusercontent.com/example/mcp/{SHA}/"
                                         "servers/ex/pyproject.toml"])
 
@@ -744,14 +789,19 @@ class GitInstall(unittest.TestCase):
     def test_whole_repository_scan_covers_a_subdirectory(self):
         url = f"https://github.com/example/mcp@{SHA}#subdirectory=servers/ex"
         uv = FakeGitUv(lock_text=lambda root: git_lock(root, query_extra="subdirectory=servers/ex&"))
-        for scanned in ("example/mcp", "example/mcp#servers", "Example/MCP#servers/ex"):
+        for scanned in ("example/mcp", "Example/MCP"):
             with self.subTest(scanned=scanned):
                 self.install(uv=uv, git_url=url, receipt=git_receipt(package=scanned))
 
     def test_narrower_or_other_scan_does_not_cover_the_install(self):
+        # F1: uv builds from the whole checkout, so even a scan of the exact
+        # subdirectory or a parent does not cover the build.
+        sub = f"https://github.com/example/mcp@{SHA}#subdirectory=servers/ex"
         cases = [(GIT_URL, "example/mcp#servers"),
-                 (f"https://github.com/example/mcp@{SHA}#subdirectory=servers/ex",
-                  "example/mcp#servers/other"),
+                 (sub, "example/mcp#servers/other"),
+                 (sub, "example/mcp#servers/ex"),
+                 (sub, "Example/MCP#servers"),
+                 (sub, "example/other"),
                  (f"https://github.com/example/mcp@{SHA}#subdirectory=servers",
                   "example/mcp#servers/ex")]
         for url, scanned in cases:

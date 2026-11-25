@@ -42,7 +42,13 @@
 - `mcp-git` additionally requires the commit to meet the age policy on the
   default branch and pins and checks the build tools from `[build-system]`.
   Offers after GitHub subdirectory scans retain the subdirectory in the
-  install URL, match its scan receipt and read metadata from that directory.
+  install URL and read metadata from that directory. The scan and its receipt
+  always cover the whole repository at the commit, since uv builds from the
+  whole checkout; a repository with Git submodules (`.gitmodules`) gets no
+  verdict, because the GitHub archive lacks them while uv checks them out.
+- The host Python version probe of the sandbox runtime check runs isolated
+  (`-I`) in an empty directory, so a `platform.py` in the working directory
+  is not imported.
 - Locked MCP installers accept `--min-age-days` for the normal waiting period
   and `--trusted-days` for the top package of a same-repository npm update
   with verified provenance. The default waits are 7 and 2 days. Git applies

@@ -326,7 +326,7 @@ class LiveLockedInstallersAndAuditTests(unittest.TestCase):
         _mcp_receipts.write_receipt(
             cls.root,
             _mcp_receipts.Receipt(
-                kind="git", package=f"{GIT_REPO}#{GIT_SUBDIR}", version=GIT_SHA,
+                kind="git", package=GIT_REPO, version=GIT_SHA,
                 archive_sha256="0" * 64, integrity="", verdict="SAFE",
                 at="2026-11-25T00:00:00+00:00", agent_guard=_mcp_locked.agent_guard_version(),
             ),

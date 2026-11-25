@@ -9,8 +9,10 @@ import importlib
 import io
 import os
 import shutil
+import platform
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -652,6 +654,34 @@ class RuntimeParityTests(unittest.TestCase):
             self.assertIsNone(self.sm.host_runtime_version("python"))
         with self.assertRaises(ValueError):
             self.sm.host_runtime_version("ruby")
+
+    def test_host_python_ignores_a_planted_module_in_the_working_directory(self):
+        """F2: the version probe must not import platform.py from the current directory."""
+        real_run = subprocess.run
+        probes = []
+
+        def run(cmd, *args, **kwargs):
+            if cmd[0] == "uv":
+                return subprocess.CompletedProcess(cmd, 0, sys.executable + "\n", "")
+            probes.append(cmd)
+            return real_run(cmd, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as work:
+            planted = Path(work) / "platform.py"
+            planted.write_text('import pathlib\npathlib.Path(__file__).with_suffix(".ran").touch()\n',
+                               encoding="utf-8")
+            old = os.getcwd()
+            os.chdir(work)
+            try:
+                with patch.object(self.sm.shutil, "which", return_value="uv"), \
+                        patch.object(self.sm.subprocess, "run", side_effect=run):
+                    version = self.sm.host_runtime_version("python")
+            finally:
+                os.chdir(old)
+            self.assertFalse((Path(work) / "platform.ran").exists())
+        self.assertEqual(version, platform.python_version())
+        # -I also drops PYTHONPATH and the user site, which the cwd alone does not.
+        self.assertEqual([cmd[1] for cmd in probes], ["-I"])
 
 
 class CommandLineTests(unittest.TestCase):

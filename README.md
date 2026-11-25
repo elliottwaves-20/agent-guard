@@ -402,8 +402,13 @@ version: `install_skill.py mcp-npm`, `mcp-pypi` or `mcp-git` (see
 [Install after a SAFE verdict](#install-after-a-safe-verdict)). Every package
 scan writes a receipt for its SAFE or BLOCK verdict, and the locked installers
 only run for a version with a receipt. No prompt offers `npx` or `uvx`.
-For a GitHub subdirectory scan, the `mcp-git` offer includes
-`#subdirectory=<path>` so the installer uses the receipt for that directory.
+For a GitHub subdirectory URL, the `mcp-git` offer includes
+`#subdirectory=<path>`, but the scan and its receipt always cover the whole
+repository at that commit: uv builds from the whole checkout, and a build
+backend can include files from outside the subdirectory. A repository with
+Git submodules (`.gitmodules`) gets no verdict and no install offer, because
+the GitHub archive does not contain them while uv checks them out. Large
+monorepos therefore end in NO VERDICT more often (fail-closed).
 
 By default URL scans use a temporary directory. Use `--keep-source <dir>` when
 you want to install the exact source that was scanned after a SAFE verdict.

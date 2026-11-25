@@ -413,12 +413,11 @@ def parse_git_url(url: str) -> tuple:
     return owner, repo, sha.lower(), subdir
 
 
-def git_scan_ids(source: str, subdir: str) -> list:
-    """Scanned parts that cover an install from `subdir`, narrowest first: the
-    subdirectory itself, each parent, the whole repository."""
-    parts = [p for p in subdir.split("/") if p]
-    ids = [f"{source}#{'/'.join(parts[:n])}" for n in range(len(parts), 0, -1)]
-    return ids + [source]
+def git_scan_id(owner: str, repo: str) -> str:
+    """Receipt identity that covers a Git install: always the whole repository
+    at the commit. uv builds from the whole checkout, and a build backend can
+    pull files from outside the subdirectory (security review F1, #48)."""
+    return f"{owner}/{repo}"
 
 
 def build_requires(pyproject_text: str) -> list:
@@ -497,6 +496,22 @@ def github_compare(source: str, base: str, head: str) -> str:
     return status
 
 
+def has_gitmodules(names) -> bool:
+    """A .gitmodules entry in any letter case: Git on a case-insensitive
+    filesystem reads it, and uv checks the submodules out for the build."""
+    return any(str(n).lower() == ".gitmodules" for n in names)
+
+
+def github_root_names(source: str, sha: str) -> list:
+    """Names in the repository root at `sha` from the GitHub contents API."""
+    data = _github_json(f"https://api.github.com/repos/{source}/contents?ref={sha}")
+    # The contents API lists at most 1,000 entries; a full page may be cut off.
+    if (not isinstance(data, list) or len(data) >= 1000
+            or not all(isinstance(e, dict) and isinstance(e.get("name"), str) for e in data)):
+        raise Refused(2, f"NO VERDICT -- GitHub gave no complete root listing for {source}@{sha}")
+    return [e["name"] for e in data]
+
+
 def raw_text(url: str) -> str:
     import _url_resolver
     try:
@@ -527,6 +542,7 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
                 scanned_dir: Path | None, run: Runner, check=_lockcheck.check,
                 which=shutil.which, fetch_text=raw_text, settled=None,
                 branch_head=github_branch_head, compare=github_compare,
+                root_names=github_root_names,
                 dry: bool = False, policy: _fastlane.Policy = _fastlane.Policy()) -> Installed:
     """Build, check and swap in the locked tree of one Git-backed Python MCP server."""
     require_python_311()
@@ -542,11 +558,11 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
     source = f"{owner}/{repo}"
     repo_url = f"https://github.com/{source}"
     git_source = f"{repo_url}@{sha}" + (f"#subdirectory={subdir}" if subdir else "")
-    scanned_id = source + (f"#{subdir}" if subdir else "")
+    scanned_id = git_scan_id(owner, repo)
     import _mcp_receipts
-    covering = {_mcp_receipts.identity("git", c) for c in git_scan_ids(source, subdir)}
     if (receipt.kind != "git" or receipt.version != sha
-            or _mcp_receipts.identity("git", receipt.package) not in covering):
+            or _mcp_receipts.identity("git", receipt.package)
+            != _mcp_receipts.identity("git", scanned_id)):
         raise Refused(2, f"the scan receipt is for {receipt.package}@{receipt.version}, "
                          f"not {scanned_id}@{sha}")
     if not which("git"):
@@ -572,6 +588,16 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
         import _staging
         settled = _staging.settled_ref
     _settled_commit(source, sha, settled, branch_head, compare, min_age_days)
+    # Also checked here, not only by the scan: a receipt from an older scan or
+    # a manual call must not build a commit with unscanned submodules (F1).
+    try:
+        names = ([p.name for p in Path(scanned_dir).iterdir()] if scanned_dir is not None
+                 else root_names(source, sha))
+    except OSError as exc:
+        raise Refused(2, f"cannot list the scanned source: {exc}")
+    if has_gitmodules(names):
+        raise Refused(2, f"NO VERDICT -- {source}@{sha} has Git submodules (.gitmodules); uv "
+                         "would check them out unscanned, so it is not installed")
     if scanned_dir is not None:
         try:
             pyproject = (Path(scanned_dir) / subdir / "pyproject.toml").read_text(encoding="utf-8")

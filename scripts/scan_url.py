@@ -783,13 +783,28 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
         return worst
 
     if kind == "mcp-source":
-        rc = run_mcp_static(path)
-        match = re.fullmatch(r"https://github\.com/([^/@]+/[^/@]+)@([0-9a-f]{40})",
-                             source.install_hint.partition("#")[0])
-        if source.kind == "github" and match:
-            scanned = match.group(1).lower() + (f"#{source.subpath}" if source.subpath else "")
-            record_receipt("git", scanned, match.group(2),
-                           {"archive_sha256": source.archive_sha256}, rc)
+        if source.kind != "github":
+            rc = run_mcp_static(path)
+        else:
+            # uv builds a Git source from the whole checkout of the commit, and
+            # a build backend can include files from outside the subdirectory,
+            # so the scan and its receipt always cover the whole repository (F1).
+            from _mcp_uv import git_scan_id, has_gitmodules
+            repo_root = source.repo_root or path
+            if has_gitmodules(p.name for p in repo_root.iterdir()):
+                print("[BLOCK] NO VERDICT -- the repository has Git submodules (.gitmodules). "
+                      "The GitHub archive does not contain them, but uv checks them out "
+                      "for the build, so their code would run unscanned.")
+                return 2
+            if source.subpath:
+                print(f"Scanning the whole repository, not only {source.subpath}: "
+                      "uv builds from the whole checkout.")
+            rc = run_mcp_static(repo_root)
+            match = re.fullmatch(r"https://github\.com/([^/@]+)/([^/@]+)@([0-9a-f]{40})",
+                                 (source.install_hint or "").partition("#")[0])
+            if match:
+                record_receipt("git", git_scan_id(match.group(1).lower(), match.group(2).lower()),
+                               match.group(3), {"archive_sha256": source.archive_sha256}, rc)
         if rc == 0:
             offer_git_mcp_install(source, dry_run)
         return rc

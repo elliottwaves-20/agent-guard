@@ -464,13 +464,10 @@ def install_mcp_git(name: str, git_url: str, package: str, dry: bool,
     settings = _mcp_locked.settings(_skillspector.USER_CONFIG if config is None else config,
                                     os.environ if env is None else env,
                                     sys.platform if platform is None else platform)
-    owner, repo, sha, subdir = _mcp_uv.parse_git_url(git_url)
+    owner, repo, sha, _subdir = _mcp_uv.parse_git_url(git_url)
     print(f"\n-- Git MCP '{name}' --")
-    candidates = _mcp_uv.git_scan_ids(f"{owner}/{repo}", subdir)
-    scanned_id = next((c for c in candidates if _mcp_receipts.receipt_path(
-        settings.install_dir, "git", c, sha).is_file()), candidates[0])
-    receipt, accepted = _mcp_receipts.require_receipt(settings.install_dir, "git", scanned_id,
-                                                      sha, accept)
+    receipt, accepted = _mcp_receipts.require_receipt(
+        settings.install_dir, "git", _mcp_uv.git_scan_id(owner, repo), sha, accept)
     installed = _mcp_uv.git_install(
         name=_mcp_locked.check_name(name), git_url=git_url, package=package,
         executable=executable, module=module, secrets=tuple(secrets),
