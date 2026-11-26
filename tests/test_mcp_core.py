@@ -493,9 +493,13 @@ class Register(unittest.TestCase):
         settings = self.settings(register=(sys.executable, "-I", str(script)), timeout=60)
         foreign = base / "foreign"
         nested = self.tree / "inner"
+        # An old tree an aborted swap left behind lies directly under install_dir
+        # too, but its name is not an installable one.
+        leftover = settings.install_dir / ".srv.old-deadbeef"
         foreign.mkdir()
         nested.mkdir()
-        candidates = {"outside": foreign, "nested": nested,
+        leftover.mkdir()
+        candidates = {"outside": foreign, "nested": nested, "leftover": leftover,
                       "install_dir itself": settings.install_dir}
         if os.name == "nt":
             import _winapi
