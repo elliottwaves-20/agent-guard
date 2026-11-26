@@ -180,7 +180,7 @@ def which(name):
 def receipt(version="1.2.3", integrity=INTEGRITY, package=PKG):
     return receipts.Receipt(kind="npm", package=package, version=version,
                             archive_sha256="ab" * 32, integrity=integrity, verdict="SAFE",
-                            at="2026-11-22T00:00:00+00:00", agent_guard="0.5.2")
+                            at="2026-11-22T00:00:00+00:00", agent_guard="0.5.2", mode="full")
 
 
 class NpmInstall(unittest.TestCase):
@@ -771,7 +771,7 @@ class FastLaneBase(unittest.TestCase):
         receipts.write_receipt(package_root or self.root, receipts.Receipt(
             kind="npm", package=name, version=version, archive_sha256="cd" * 32,
             integrity=integrity, verdict="SAFE", at="2026-11-22T00:00:00+00:00",
-            agent_guard="0.5.2"))
+            agent_guard="0.5.2", mode="full"))
 
     def install(self, npm=None, check=None, **kwargs):
         opts = {"name": "files", "package": PKG, "version": "1.2.3", "overrides": {},
@@ -1259,7 +1259,7 @@ class JudgeTree(FastLaneBase):
         receipts.write_receipt(self.root, receipts.Receipt(
             kind="npm", package="dep", version="1.0.3", archive_sha256="cd" * 32,
             integrity="sha512-o", verdict="BLOCK", at="2026-11-22T00:00:00+00:00",
-            agent_guard="0.5.2"))
+            agent_guard="0.5.2", mode="full"))
         verdict = self.judge([advisory.entry], [advisory])
         self.assertEqual(verdict.code, 1)
         self.assertEqual(verdict.fixes, {})

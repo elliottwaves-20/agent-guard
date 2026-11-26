@@ -751,7 +751,12 @@ lockfile:
    verdict (`<install_dir>/.receipts/`): the exact archive it scanned (npm
    tarball and its integrity, the pure PyPI wheel, the GitHub ZIP). The
    installer runs only for a version with a receipt; a BLOCK needs
-   `--accept "<reason>"`, which holds for that version only.
+   `--accept "<reason>"`, which holds for that version only. The receipt
+   records the scan mode: one from a static-only scan
+   (`AGENT_GUARD_STATIC_ONLY=1`, no LLM and no dynamic analysis) counts only
+   when the install runs with `AGENT_GUARD_STATIC_ONLY=1` too; otherwise the
+   installer exits 2 and names the scan to run again. A receipt without the
+   mode (written before 0.6.0) has no verdict either: scan again.
 2. **Lockfile without scripts or builds.** npm resolves with
    `--package-lock-only --ignore-scripts --min-release-age=7`, uv with
    `uv lock --no-build` and `exclude-newer = "7 days"`, both from the public

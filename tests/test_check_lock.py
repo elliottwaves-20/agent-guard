@@ -129,7 +129,7 @@ class CheckLockTests(unittest.TestCase):
     def receipt(self, kind="npm", package="srv", version=FIX, *, sha=HASH,
                 integrity=INTEGRITY, verdict="SAFE"):
         _mcp_receipts.write_receipt(self.receipts, _mcp_receipts.Receipt(
-            kind, package, version, sha, integrity, verdict, "2026-11-22", "0.0.0",
+            kind, package, version, sha, integrity, verdict, "2026-11-22", "0.0.0", "full",
         ))
 
     def run_main(self, fetch, *args, with_receipts=True, as_json=True):

@@ -113,7 +113,7 @@ def _npm_receipt(root: Path, package: str, version: str) -> dict:
         _mcp_receipts.Receipt(
             kind="npm", package=package, version=version,
             archive_sha256="0" * 64, integrity=integrity, verdict="SAFE",
-            at="2026-11-25T00:00:00+00:00", agent_guard=_mcp_locked.agent_guard_version(),
+            at="2026-11-25T00:00:00+00:00", agent_guard=_mcp_locked.agent_guard_version(), mode="full",
         ),
     )
     return doc
@@ -132,7 +132,7 @@ def _pypi_receipt(root: Path, package: str, version: str) -> tuple[str, str]:
         _mcp_receipts.Receipt(
             kind="pypi", package=package, version=version,
             archive_sha256=sha256, integrity="", verdict="SAFE",
-            at="2026-11-25T00:00:00+00:00", agent_guard=_mcp_locked.agent_guard_version(),
+            at="2026-11-25T00:00:00+00:00", agent_guard=_mcp_locked.agent_guard_version(), mode="full",
         ),
     )
     return filename, sha256
@@ -328,7 +328,7 @@ class LiveLockedInstallersAndAuditTests(unittest.TestCase):
             _mcp_receipts.Receipt(
                 kind="git", package=GIT_REPO, version=GIT_SHA,
                 archive_sha256="0" * 64, integrity="", verdict="SAFE",
-                at="2026-11-25T00:00:00+00:00", agent_guard=_mcp_locked.agent_guard_version(),
+                at="2026-11-25T00:00:00+00:00", agent_guard=_mcp_locked.agent_guard_version(), mode="full",
             ),
         )
         p_git = _run_python(

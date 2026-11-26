@@ -4,7 +4,9 @@ scan_url.py writes one receipt per judged package version into
 `<install_dir>/.receipts/`. The locked installers refuse to run without a
 matching SAFE receipt; a BLOCK receipt counts only with an explicit reason
 (`--accept`), which holds for exactly that version. A scan without a verdict
-writes no receipt, so it can never be accepted.
+writes no receipt, so it can never be accepted. A receipt records the scan
+mode: one from a static-only scan (AGENT_GUARD_STATIC_ONLY=1, no LLM and no
+dynamic analysis) counts only while the install runs under that policy too.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from _mcp_locked import NeedsScan, Refused, normalize_pypi, registry_scan_comman
 
 KINDS = {"npm", "pypi", "git"}
 VERDICTS = {"SAFE", "BLOCK"}
+MODES = {"full", "static-only"}
 _KEY_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
@@ -33,6 +36,18 @@ class Receipt:
     verdict: str
     at: str
     agent_guard: str
+    mode: str
+
+
+def static_only() -> bool:
+    """AGENT_GUARD_STATIC_ONLY as _skillspector reads it (a test keeps both in
+    step); repeated here because check_lock.py must not load _skillspector."""
+    return os.environ.get("AGENT_GUARD_STATIC_ONLY", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def current_mode() -> str:
+    return "static-only" if static_only() else "full"
 
 
 def identity(kind: str, package: str) -> str:
@@ -105,9 +120,14 @@ def require_receipt(root: Path, kind: str, package: str, version: str,
         raise Refused(2, prefix + _scan_hint(kind, package, version))
     receipt = _load(path)
     if (receipt.kind != kind or identity(kind, receipt.package) != identity(kind, package)
-            or receipt.version != version or receipt.verdict not in VERDICTS):
+            or receipt.version != version or receipt.verdict not in VERDICTS
+            or receipt.mode not in MODES):
         raise Refused(2, f"receipt {path} does not match {package} {version}; scan again: "
                          f"{_scan_hint(kind, package, version)}")
+    if receipt.mode == "static-only" and not static_only():
+        raise Refused(2, f"the scan verdict for {package} {version} is from a static-only scan "
+                         "(AGENT_GUARD_STATIC_ONLY=1: no LLM, no dynamic analysis); scan again "
+                         f"without it: {_scan_hint(kind, package, version)}")
     if receipt.verdict == "SAFE":
         if accept is not None:
             print("  note: --accept is ignored, the scan verdict is SAFE")

@@ -2142,7 +2142,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             receipts.write_receipt(Path(root), receipts.Receipt(
                 kind="git", package="example/mcp", version=sha, archive_sha256="ab" * 32,
                 integrity="", verdict="SAFE", at="2026-11-22T00:00:00+00:00",
-                agent_guard="0.5.2"))
+                agent_guard="0.5.2", mode="full"))
             with contextlib.redirect_stdout(io.StringIO()):
                 installer.install_mcp_git(
                     "example-mcp", f"git+https://github.com/example/mcp@{sha}", "example-mcp",

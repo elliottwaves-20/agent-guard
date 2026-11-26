@@ -53,7 +53,10 @@
   each SAFE or BLOCK verdict with the archive hash (npm tarball and its
   integrity, the pure PyPI wheel, the GitHub ZIP), and the locked installers
   run only for a version with a receipt; a BLOCK needs `--accept "<reason>"`
-  for exactly that version. PyPI scans now check the pure wheel that
+  for exactly that version. A receipt records the scan mode; one from a
+  static-only scan (`AGENT_GUARD_STATIC_ONLY=1`) counts only for an install
+  under the same setting (else exit 2), so a later normal install cannot
+  inherit a verdict reached without LLM and dynamic analysis. PyPI scans now check the pure wheel that
   `uv sync` installs instead of the sdist when the release has exactly one;
   npm tarballs are verified against their registry integrity.
 - `mcp-git` additionally requires the commit to meet the age policy on the

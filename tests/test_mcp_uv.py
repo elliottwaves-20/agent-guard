@@ -167,7 +167,7 @@ def change_lock_after_sync(uv):
 def receipt(package=PKG, version="1.2.3", sha=WHEEL_SHA):
     return receipts.Receipt(kind="pypi", package=package, version=version, archive_sha256=sha,
                             integrity="", verdict="SAFE", at="2026-11-22T00:00:00+00:00",
-                            agent_guard="0.5.2")
+                            agent_guard="0.5.2", mode="full")
 
 
 class PypiInstall(unittest.TestCase):
@@ -479,7 +479,7 @@ def git_which(name):
 def git_receipt(package="example/mcp", version=SHA):
     return receipts.Receipt(kind="git", package=package, version=version,
                             archive_sha256="ab" * 32, integrity="", verdict="SAFE",
-                            at="2026-11-22T00:00:00+00:00", agent_guard="0.5.2")
+                            at="2026-11-22T00:00:00+00:00", agent_guard="0.5.2", mode="full")
 
 
 class GitInstall(unittest.TestCase):
@@ -987,7 +987,8 @@ class PypiFastLaneBase(unittest.TestCase):
     def scan(self, name, version, sha, verdict="SAFE"):
         receipts.write_receipt(self.root, receipts.Receipt(
             kind="pypi", package=name, version=version, archive_sha256=sha, integrity="",
-            verdict=verdict, at="2026-11-22T00:00:00+00:00", agent_guard="0.5.2"))
+            verdict=verdict, at="2026-11-22T00:00:00+00:00", agent_guard="0.5.2",
+            mode="full"))
 
     def install(self, uv=None, check=None, **kwargs):
         opts = {"name": "time", "package": PKG, "version": "1.2.3", "executable": None,

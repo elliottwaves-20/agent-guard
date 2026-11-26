@@ -218,6 +218,8 @@ scanned version (`mcp-npm`, `mcp-pypi`, `mcp-git`; remote HTTP/SSE MCPs as
 URL-only config) and never `npx` or `uvx`. Every package scan writes a receipt
 for its SAFE or BLOCK verdict. The locked installers require a receipt for the
 requested version and a separate SAFE receipt for each fast-lane fix.
+A receipt from a static-only scan (`AGENT_GUARD_STATIC_ONLY=1`) counts only for
+an install under the same setting; otherwise exit 2, scan again without it.
 A GitHub subdirectory URL keeps `#subdirectory=<path>` in the `mcp-git`
 offer, but the scan and the receipt cover the whole repository at the commit
 (uv builds from the whole checkout). A repository with Git submodules

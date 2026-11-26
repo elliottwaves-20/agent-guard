@@ -149,6 +149,21 @@ class ReceiptVerdictTests(unittest.TestCase):
             self.assertFalse((root / ".receipts").exists())
 
 
+def require_static_receipt(*args):
+    """Read a receipt the way a later install under the same static-only policy
+    does; without the policy it must be refused."""
+    env = {k: v for k, v in os.environ.items() if k != "AGENT_GUARD_STATIC_ONLY"}
+    with patch.dict(os.environ, env, clear=True):
+        try:
+            receipts.require_receipt(*args)
+        except locked.Refused as exc:
+            assert exc.code == 2 and "static-only" in str(exc), exc
+        else:
+            raise AssertionError("static-only receipt accepted without AGENT_GUARD_STATIC_ONLY")
+    with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}):
+        return receipts.require_receipt(*args)
+
+
 @unittest.skipUnless(os.environ.get("AGENT_GUARD_INTEGRATION") == "1",
                      "set AGENT_GUARD_INTEGRATION=1 to run receipt tests with the installed SkillSpector")
 class RealScanReceipts(unittest.TestCase):
@@ -301,7 +316,7 @@ class RealScanReceipts(unittest.TestCase):
                     patch.object(scan_url, "interactive", lambda: False), \
                     contextlib.redirect_stdout(out):
                 self.assertEqual(scan_url.scan_resolved(source, "mcp-source", dry_run=True), 0, out.getvalue())
-        receipt, _ = receipts.require_receipt(self.root, "git", "o/r", sha, None)
+        receipt, _ = require_static_receipt(self.root, "git", "o/r", sha, None)
         self.assertEqual(receipt.archive_sha256, "cd" * 32)
         self.assertIn("Scan receipt:", out.getvalue())
         self.assertIn("No Python package metadata found", out.getvalue())
@@ -331,7 +346,7 @@ class RealScanReceipts(unittest.TestCase):
             owner, repo, sha, subdir = parse_git_url(git_url)
             self.assertEqual(subdir, "server")
             # F1: uv builds from the whole checkout, so the receipt is for the whole repository.
-            receipts.require_receipt(self.root, "git", f"{owner}/{repo}", sha, None)
+            require_static_receipt(self.root, "git", f"{owner}/{repo}", sha, None)
             self.assertFalse(receipts.receipt_path(self.root, "git", f"{owner}/{repo}#server",
                                                    sha).exists())
 
@@ -345,7 +360,9 @@ class RealScanReceipts(unittest.TestCase):
                     settled=lambda *a: ("c" * 40, None), branch_head=lambda *a: ("main", "d" * 40),
                     compare=lambda *a: "behind")
 
-            with patch.object(scan_url, "interactive", return_value=True), \
+            # Install under the same static-only policy as the scan (S4).
+            with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}), \
+                    patch.object(scan_url, "interactive", return_value=True), \
                     patch.object(scan_url, "confirm_install", return_value=True), \
                     patch.object(scan_url, "choose_install_tools", return_value=["codex"]), \
                     patch.object(scan_url, "install_mcp_git", side_effect=install), \
@@ -382,7 +399,7 @@ class RealScanReceipts(unittest.TestCase):
         """F1: a build backend may pull files from anywhere in the checkout."""
         rc, out, sha = self._scan_git_subdirectory({"shared/helper.py": MALICIOUS_PY})
         self.assertEqual(rc, 1, out)
-        receipt, _ = receipts.require_receipt(self.root, "git", "example/mcp", sha,
+        receipt, _ = require_static_receipt(self.root, "git", "example/mcp", sha,
                                               "reviewed in test")
         self.assertEqual(receipt.verdict, "BLOCK")
         self.assertNotIn("--git-url", out)

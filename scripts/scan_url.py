@@ -360,7 +360,8 @@ def record_receipt(kind: str, package: str, version: str, meta: dict, rc: int) -
             kind=kind, package=package, version=version,
             archive_sha256=meta["archive_sha256"], integrity=meta.get("integrity", ""),
             verdict="SAFE" if rc == 0 else "BLOCK", at=_mcp_locked.now_iso(),
-            agent_guard=_mcp_locked.agent_guard_version()))
+            agent_guard=_mcp_locked.agent_guard_version(),
+            mode=_mcp_receipts.current_mode()))
     except (_mcp_locked.Refused, OSError) as exc:
         print(f"[WARN] no scan receipt written: {exc}")
         return

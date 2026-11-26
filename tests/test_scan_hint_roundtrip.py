@@ -40,6 +40,21 @@ SHA = "0123456789abcdef0123456789abcdef01234567"
 HINT = re.compile(r"python scripts/scan_url\.py (\S+(?: --kind \S+)?)")
 
 
+def require_static_receipt(*args):
+    """Read a receipt the way a later install under the same static-only policy
+    does; without the policy it must be refused."""
+    env = {k: v for k, v in os.environ.items() if k != "AGENT_GUARD_STATIC_ONLY"}
+    with patch.dict(os.environ, env, clear=True):
+        try:
+            receipts.require_receipt(*args)
+        except locked.Refused as exc:
+            assert exc.code == 2 and "static-only" in str(exc), exc
+        else:
+            raise AssertionError("static-only receipt accepted without AGENT_GUARD_STATIC_ONLY")
+    with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}):
+        return receipts.require_receipt(*args)
+
+
 def npm_tarball() -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -153,7 +168,7 @@ class InstallerHintRoundTrip(unittest.TestCase):
     def assert_roundtrip(self, kind, package, version, archive: bytes):
         code = self.run_scan_url(self.installer_hint(kind, package, version))
         self.assertEqual(code, 0)
-        receipt, accepted = receipts.require_receipt(self.root, kind, package, version, None)
+        receipt, accepted = require_static_receipt(self.root, kind, package, version, None)
         self.assertEqual(receipt.verdict, "SAFE")
         self.assertIsNone(accepted)
         self.assertEqual(receipt.archive_sha256, hashlib.sha256(archive).hexdigest())
@@ -181,7 +196,7 @@ class InstallerHintRoundTrip(unittest.TestCase):
         for (item, line), archive in zip(zip(items, lines), (self.net.npm, self.net.wheel)):
             with self.subTest(kind=item["kind"]):
                 self.run_scan_url(shlex.split(f"scan_url.py {line}"))
-                receipt, _ = receipts.require_receipt(self.root, item["kind"], item["package"],
+                receipt, _ = require_static_receipt(self.root, item["kind"], item["package"],
                                                       item["version"], "test")
                 self.assertEqual(receipt.archive_sha256, hashlib.sha256(archive).hexdigest())
 
@@ -245,7 +260,7 @@ class LiveDynamicHintRoundTrip(unittest.TestCase):
             text = out.getvalue()
             self.assertEqual(res.exception.code, 0, text)
             self.assertIn("Dynamic install analysis (OpenSSF sandbox)", text)
-            receipt, accepted = receipts.require_receipt(root, "npm", "is-number", "7.0.0", None)
+            receipt, accepted = require_static_receipt(root, "npm", "is-number", "7.0.0", None)
             self.assertEqual(receipt.verdict, "SAFE")
             self.assertIsNone(accepted)
             self.assertRegex(receipt.archive_sha256, r"^[0-9a-f]{64}$")

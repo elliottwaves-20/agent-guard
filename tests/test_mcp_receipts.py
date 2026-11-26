@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -19,10 +20,16 @@ receipts = importlib.import_module("_mcp_receipts")
 locked = importlib.import_module("_mcp_locked")
 
 
-def receipt(kind="npm", package="@scope/pkg", version="1.0.0", verdict="SAFE"):
+def receipt(kind="npm", package="@scope/pkg", version="1.0.0", verdict="SAFE", mode="full"):
     return receipts.Receipt(kind=kind, package=package, version=version,
                             archive_sha256="ab" * 32, integrity="sha512-x", verdict=verdict,
-                            at="2026-11-22T00:00:00+00:00", agent_guard="0.5.2")
+                            at="2026-11-22T00:00:00+00:00", agent_guard="0.5.2", mode=mode)
+
+
+def without_static_only():
+    env = dict(os.environ)
+    env.pop("AGENT_GUARD_STATIC_ONLY", None)
+    return patch.dict(os.environ, env, clear=True)
 
 
 class Receipts(unittest.TestCase):
@@ -126,6 +133,84 @@ class Receipts(unittest.TestCase):
         receipts.write_receipt(self.root, dataclasses.replace(receipt(), verdict="BLOCK"))
         names = [p.name for p in (self.root / ".receipts").iterdir()]
         self.assertEqual(names, ["npm-scope__pkg-1.0.0.json"])
+
+
+
+class ScanMode(unittest.TestCase):
+    """A receipt from a static-only scan (no LLM, no dynamic analysis) counts
+    only while AGENT_GUARD_STATIC_ONLY=1 is set for the install as well;
+    a full scan counts in both modes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def require(self, accept=None):
+        return receipts.require_receipt(self.root, "npm", "@scope/pkg", "1.0.0", accept)
+
+    def test_static_only_receipt_is_refused_without_static_only(self):
+        for verdict, accept in (("SAFE", None), ("BLOCK", "reviewed")):
+            with self.subTest(verdict=verdict):
+                receipts.write_receipt(self.root, receipt(verdict=verdict, mode="static-only"))
+                with without_static_only(), self.assertRaises(locked.Refused) as ctx:
+                    self.require(accept)
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertIn("static-only", str(ctx.exception))
+                self.assertIn("scan_url.py", str(ctx.exception))
+
+    def test_static_only_receipt_counts_under_static_only(self):
+        receipts.write_receipt(self.root, receipt(mode="static-only"))
+        with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}):
+            found, accepted = self.require()
+        self.assertEqual(found.mode, "static-only")
+        self.assertIsNone(accepted)
+
+    def test_full_receipt_counts_in_both_modes(self):
+        receipts.write_receipt(self.root, receipt(mode="full"))
+        with without_static_only():
+            self.assertEqual(self.require()[0].mode, "full")
+        with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}):
+            self.assertEqual(self.require()[0].mode, "full")
+
+    def test_receipt_without_or_with_unknown_mode_has_no_verdict(self):
+        path = receipts.write_receipt(self.root, receipt())
+        data = json.loads(path.read_text(encoding="utf-8"))
+        old = {k: v for k, v in data.items() if k != "mode"}
+        for label, content in (("no mode", old), ("unknown mode", {**data, "mode": "partial"})):
+            with self.subTest(label):
+                path.write_text(json.dumps(content), encoding="utf-8")
+                for env in ({"AGENT_GUARD_STATIC_ONLY": "1"}, None):
+                    ctx_env = patch.dict(os.environ, env) if env else without_static_only()
+                    with ctx_env, self.assertRaises(locked.Refused) as ctx:
+                        self.require()
+                    self.assertEqual(ctx.exception.code, 2)
+
+    def test_mode_check_agrees_with_the_scanner_policy(self):
+        skillspector = importlib.import_module("_skillspector")
+        for value in ("1", "true", "YES", " on ", "0", "", "false", "no", "2", "static"):
+            with self.subTest(value=value), patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": value}):
+                self.assertEqual(receipts.static_only(), skillspector._static_only_forced())
+        with without_static_only():
+            self.assertEqual(receipts.static_only(), skillspector._static_only_forced())
+
+
+class ScanUrlWritesTheMode(unittest.TestCase):
+    """scan_url.record_receipt, the only writer, records the mode of the scan."""
+
+    def test_mode_follows_static_only(self):
+        scan_url = importlib.import_module("scan_url")
+        skillspector = importlib.import_module("_skillspector")
+        meta = {"archive_sha256": "cd" * 32, "integrity": "sha512-y"}
+        for env, mode in (({"AGENT_GUARD_STATIC_ONLY": "1"}, "static-only"), (None, "full")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                ctx_env = patch.dict(os.environ, env) if env else without_static_only()
+                with ctx_env, patch.dict(skillspector.USER_CONFIG, {"mcp": {"install_dir": tmp}}),                         patch("sys.stdout"):
+                    scan_url.record_receipt("npm", "@scope/pkg", "1.0.0", meta, 0)
+                path = receipts.receipt_path(Path(tmp), "npm", "@scope/pkg", "1.0.0")
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["mode"], mode)
 
 
 if __name__ == "__main__":
