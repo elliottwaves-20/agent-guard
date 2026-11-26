@@ -1073,6 +1073,7 @@ No scanner — not agent-guard, not the professional tools it wraps — can guar
 | `script` scan | **Static.** A second-stage payload the installer downloads at runtime is invisible; scan those URLs separately. |
 | SkillSpector static scans | Cannot see behavior that only appears at runtime (MCP: use `--sandbox`). Static-only mode (`AGENT_GUARD_STATIC_ONLY=1`) misses semantic attacks that pattern rules don't encode. |
 | Live MCP sandbox scan | Contains host-filesystem access and **records** every network destination, but does not stop the traffic while it happens: the registries stay reachable, and payloads inside an allowed TLS connection are not inspected. The LLM-based analysis is itself probabilistic. |
+| Locked `mcp-git` install | Pins and checks the build tools from `[build-system]` only. Requirements the build backend adds while building (`get_requires_for_build_wheel`, e.g. `setup_requires`) are resolved by uv during `uv sync` under the age limit alone, without advisory or hash check. |
 | Dynamic install analysis (`npm`/`pypi`) | Sees only what the package does during install, import and a short execution in the sandbox; code that waits for a date, a specific host or a user action stays silent. File accesses carry no process, so a file the package manager itself reads is excused in the install phase for every process. |
 
 Where a stage in a scan output has such a limit, the wrapper prints it inline (`LIMIT:` / `NOTE:` lines) — so the verdict and its caveat always travel together.

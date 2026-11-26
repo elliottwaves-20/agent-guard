@@ -61,6 +61,9 @@
   npm tarballs are verified against their registry integrity.
 - `mcp-git` additionally requires the commit to meet the age policy on the
   default branch and pins and checks the build tools from `[build-system]`.
+  Known limit: requirements the build backend adds while building
+  (`get_requires_for_build_wheel`, e.g. `setup_requires`) are resolved by uv
+  under the age limit alone, without advisory or hash check.
   Offers after GitHub subdirectory scans retain the subdirectory in the
   install URL and read metadata from that directory. The scan and its receipt
   always cover the whole repository at the commit, since uv builds from the
@@ -92,7 +95,9 @@
 - `install_skill.py mcp` refuses ad-hoc launchers (`npx`, `uvx`, `bunx`,
   `pipx run`, `uv tool run`, `uv run --with*`, `pnpm dlx`, `yarn dlx`, …) with
   exit 2, including launches through common shells or `env` and leading
-  launcher options. `scan_url.py` offers only the locked installers.
+  launcher options. `scan_url.py` offers only the locked installers; when
+  the installer refuses a confirmed install, the scan ends with the
+  installer's exit code instead of the scan's 0.
 
 ### Added
 
