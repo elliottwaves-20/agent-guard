@@ -14,9 +14,14 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import sys
 import time
+
+import _exe
+
+if __name__ == "__main__":
+    # Before any import below can start a program (CWE-427).
+    _exe.harden_environ()
 
 import _llm_profile
 from _llm_budget import policy_from_profile
@@ -65,7 +70,7 @@ def _campaign_row(config, env):
                 ready, "" if ready else f"profile {name}: {policy['key_env']} is not set")
 
 
-def describe(config: dict, env, which=shutil.which, legacy_skills=None,
+def describe(config: dict, env, which=_exe.which, legacy_skills=None,
              skillspector_python=None) -> list[dict]:
     """One row per scanner. Configuration problems become row problems."""
     legacy = legacy_skills or ("", False, "legacy env resolution; see the scan banner")
@@ -137,7 +142,9 @@ def probe(scanner: str) -> int:
         ss.die(f"{scanner}: scanner Python environment not found; run setup first")
     started = time.monotonic()
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
-    result = ss.run_bounded([python, "-c", script, scripts_dir], env=env, timeout=180)
+    # Isolated (-I): no module from the working directory shadows the
+    # scanner's packages; the probe puts the scripts folder on sys.path itself.
+    result = ss.run_bounded([python, "-I", "-c", script, scripts_dir], env=env, timeout=180)
     elapsed = time.monotonic() - started
     if result.returncode != 0:
         tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
@@ -154,7 +161,7 @@ def main() -> int:
                         help="send exactly one request through that scanner's own client")
     args = parser.parse_args()
     import _skillspector as ss
-    rows = describe(ss.USER_CONFIG, os.environ, which=shutil.which,
+    rows = describe(ss.USER_CONFIG, os.environ, which=_exe.which,
                     skillspector_python=ss.skillspector_python,
                     legacy_skills=(ss.PROVIDER, ss.LLM_READY, ss.LLM_REASON))
     for row in rows:

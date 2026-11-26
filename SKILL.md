@@ -108,6 +108,11 @@ Professional scanners do the work, each where it is strongest:
    reserved for repos that already passed the scan. SkillSpector can also take
    a Git URL directly, but agent-guard deliberately pins + ZIP-downloads first
    and scans the local copy, so the scanned bytes are exactly what installs.
+5. **Nothing runs from the working directory.** The wrappers find programs
+   only in absolute PATH entries and hand that PATH to everything they start,
+   so a tool reachable only through a relative or empty PATH entry counts as
+   missing (put its folder on PATH as an absolute path). Never work around a
+   "not found on PATH" by starting agent-guard from the tool's folder.
 
 ## Setup
 

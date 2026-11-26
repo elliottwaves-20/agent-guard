@@ -55,13 +55,18 @@ Usage:
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+import _exe
+
+if __name__ == "__main__":
+    # Before any import below can start a program (CWE-427).
+    _exe.harden_environ()
 
 import _dynamic
 import _pins
@@ -157,10 +162,10 @@ def guarddog_command(ecosystem: str, package: str, version: str = None) -> list:
     args = [ecosystem, "scan", package, "--output-format", "json"]
     if version:
         args += ["--version", version]
-    native = shutil.which("guarddog")
+    native = _exe.which("guarddog")
     if native:
         return [native] + args
-    if shutil.which("docker") is None:
+    if _exe.which("docker") is None:
         die("GuardDog is not on PATH and Docker was not found. On Windows, "
             "GuardDog only runs via Docker -- start Docker Desktop, or install "
             "GuardDog natively (Linux/macOS: pipx install guarddog).")
@@ -336,7 +341,7 @@ def malcontent_verdict(report: dict) -> int:
 def run_malcontent(path: Path) -> int:
     """--deep stage: malcontent capability analysis via Docker (never executes
     the binary; malcontent reads it statically)."""
-    if shutil.which("docker") is None:
+    if _exe.which("docker") is None:
         print("\n" + "=" * 60)
         print("[BLOCK] NO VERDICT -- --deep needs Docker for malcontent, and "
               "Docker was not found on PATH.")

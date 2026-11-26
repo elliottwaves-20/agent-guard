@@ -26,6 +26,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import _exe
+
+if __name__ == "__main__":
+    # Before any import below can start a program (CWE-427).
+    _exe.harden_environ()
+
 import _pins
 import _skills_cli as cli
 

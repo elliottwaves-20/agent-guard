@@ -81,8 +81,11 @@ class EntryPointTests(unittest.TestCase):
         for name in ENTRY_POINTS:
             with self.subTest(script=name):
                 tree = ast.parse((SCRIPTS / f"{name}.py").read_text(encoding="utf-8"))
+                # The guard that only hardens the environment before the
+                # imports (CWE-427) is not the main block.
                 main_blocks = [n for n in tree.body if isinstance(n, ast.If)
-                               and ast.unparse(n.test).replace("'", '"') == '__name__ == "__main__"']
+                               and ast.unparse(n.test).replace("'", '"') == '__name__ == "__main__"'
+                               and [ast.unparse(s) for s in n.body] != ["_exe.harden_environ()"]]
                 self.assertEqual(len(main_blocks), 1)
                 first = next(n for n in main_blocks[0].body if not isinstance(n, ast.Import))
                 self.assertIsInstance(first, ast.Expr)

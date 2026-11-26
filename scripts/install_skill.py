@@ -57,6 +57,12 @@ import tempfile
 import traceback
 from pathlib import Path
 
+import _exe
+
+if __name__ == "__main__":
+    # Before any import below can start a program (CWE-427).
+    _exe.harden_environ()
+
 import _fastlane
 import _mcp_locked
 import _user_config
@@ -170,7 +176,7 @@ def tool_present(tid: str) -> bool:
     spec = TOOLS[tid]
     if any(path.exists() for path in spec["detect"]):
         return True
-    return any(shutil.which(binary) is not None for binary in spec.get("binaries", ()))
+    return any(_exe.which(binary) is not None for binary in spec.get("binaries", ()))
 
 
 def detect_tools(selected: list = None) -> dict:
@@ -390,7 +396,7 @@ def add_to_claude_code(name: str, entry: dict, dry: bool):
         # configuration instead so credentials never enter process arguments.
         add_to_json_config(HOME / ".claude.json", name, entry, dry)
         return
-    claude = shutil.which("claude")
+    claude = _exe.which("claude")
     if entry.get("url"):
         manual = f"claude mcp add -s user --transport http {name} {entry['url']}"
     else:
@@ -451,7 +457,7 @@ def install_mcp_git(name: str, git_url: str, package: str, dry: bool,
                     selected: list = None, executable: str | None = None,
                     module: str | None = None, *, secrets: tuple = (), accept: str | None = None,
                     scanned_dir: Path | None = None, config: dict | None = None, env=None,
-                    platform: str | None = None, run=None, which=shutil.which, check=None,
+                    platform: str | None = None, run=None, which=_exe.which, check=None,
                     deliver=None, register_run=None, policy: _fastlane.Policy = _fastlane.Policy(),
                     **network):
     """Install a Git-backed Python MCP from a checked uv.lock in its own directory
@@ -747,7 +753,7 @@ def _mcp_policy(args) -> _fastlane.Policy:
                             getattr(args, "no_fast_lane", False))
 
 
-def cmd_mcp_npm(args, *, config: dict, env, platform: str, run=None, which=shutil.which,
+def cmd_mcp_npm(args, *, config: dict, env, platform: str, run=None, which=_exe.which,
                 check=None, deliver=None, register_run=None, fetch=None):
     """mcp-npm: scan receipt, locked tree, then hand the start command to the agents."""
     import _lockcheck
@@ -775,7 +781,7 @@ def cmd_mcp_npm(args, *, config: dict, env, platform: str, run=None, which=shuti
     return installed
 
 
-def cmd_mcp_pypi(args, *, config: dict, env, platform: str, run=None, which=shutil.which,
+def cmd_mcp_pypi(args, *, config: dict, env, platform: str, run=None, which=_exe.which,
                  check=None, deliver=None, register_run=None, fetch=None):
     """mcp-pypi: scan receipt, locked uv project, then hand the start command to the agents."""
     import _lockcheck

@@ -47,6 +47,12 @@ import tempfile
 from collections import defaultdict
 from pathlib import Path
 
+import _exe
+
+if __name__ == "__main__":
+    # Before any import below can start a program (CWE-427).
+    _exe.harden_environ()
+
 import _distribution
 import _dossier
 import _parse_spans

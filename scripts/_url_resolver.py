@@ -16,7 +16,6 @@ import html
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -27,6 +26,8 @@ import zipfile
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
+
+import _exe
 
 
 GITHUB_HOSTS = {"github.com", "www.github.com"}
@@ -55,7 +56,7 @@ def command_args(command: str, url: str) -> list[str]:
         args = [arg.replace("{url}", url) for arg in args]
     else:
         args = args + [url]
-    resolved = shutil.which(args[0])
+    resolved = _exe.which(args[0])
     if resolved:
         args[0] = resolved
     return args

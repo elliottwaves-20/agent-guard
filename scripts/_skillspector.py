@@ -24,7 +24,6 @@ import json
 import math
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -88,6 +87,7 @@ load_agent_guard_env()
 # after the env files. A config that exists but is unsafe or unreadable stops
 # every wrapper before anything is scanned -- ignoring it silently would run
 # the scan with settings the user did not choose.
+import _exe
 import _llm_profile
 import _providers
 from _parse_spans import PARSE_SPAN_ANALYZERS
@@ -100,7 +100,7 @@ except (_user_config.ConfigError, _llm_profile.ProfileError) as exc:
     print(f"ERROR: agent-guard config: {exc}", file=sys.stderr)
     sys.exit(2)
 
-SKILLSPECTOR = shutil.which("skillspector")
+SKILLSPECTOR = _exe.which("skillspector")
 BOOT = Path(__file__).with_name("_skillspector_boot.py")
 SKILLSPECTOR_CMD: list | None = None   # resolved lazily by skillspector_command()
 
@@ -252,7 +252,7 @@ def need_skillspector():
 
 def skillspector_python() -> str | None:
     """Python interpreter of SkillSpector's uv tool environment, or None."""
-    uv = shutil.which("uv")
+    uv = _exe.which("uv")
     if uv is None:
         return None
     try:
@@ -365,7 +365,7 @@ def resolve_llm() -> tuple[str, bool, str]:
 
     if LLM_PROFILE:
         env, ready, reason, _registry = _llm_profile.skillspector_env(
-            *LLM_PROFILE, os.environ, which=shutil.which)
+            *LLM_PROFILE, os.environ, which=_exe.which)
         return env["SKILLSPECTOR_PROVIDER"], ready, reason
 
     explicit = os.environ.get("SKILLSPECTOR_PROVIDER", "").strip().lower()
@@ -380,7 +380,7 @@ def resolve_llm() -> tuple[str, bool, str]:
         if provider.disabled:
             return explicit, False, provider.disabled
         if provider.kind == "cli":
-            if shutil.which(provider.binary):
+            if _exe.which(provider.binary):
                 return explicit, True, f"{provider.binary} CLI (local login)"
             return explicit, False, (f"SKILLSPECTOR_PROVIDER={explicit} but "
                                      f"'{provider.binary}' is not on PATH")
@@ -395,7 +395,7 @@ def resolve_llm() -> tuple[str, bool, str]:
         if all(os.environ.get(v, "").strip() for v in KEY_PROVIDERS[provider]):
             return provider, True, f"{provider} (API key, auto-detected)"
     for provider, binary in CLI_PROVIDERS.items():
-        if shutil.which(binary):
+        if _exe.which(binary):
             return provider, True, f"{binary} CLI (local login, auto-detected)"
     return "", False, "no LLM provider configured"
 
@@ -464,7 +464,7 @@ def skillspector_env() -> dict:
     profile_active = bool(LLM_PROFILE) and LLM_READY
     if profile_active:
         e, _ready, _reason, registry = _llm_profile.skillspector_env(
-            *LLM_PROFILE, e, which=shutil.which)
+            *LLM_PROFILE, e, which=_exe.which)
         if registry:
             e["SKILLSPECTOR_MODEL_REGISTRY"] = _profile_registry_file(registry)
     e["PYTHONUTF8"] = "1"

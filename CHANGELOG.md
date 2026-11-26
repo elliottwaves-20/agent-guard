@@ -4,6 +4,21 @@
 
 ### Security
 
+- Programs and Python modules no longer load from the working directory
+  (CWE-427). On Windows `shutil.which` and
+  `CreateProcess` searched it first, and an empty or drive-relative PATH entry
+  (`;;`, `C:`) pointed there even with `NoDefaultCurrentDirectoryInExePath`
+  set, so a planted `uv.exe`, `node.bat` or `docker.exe` ran with the
+  scanner's rights. Programs are now looked up only in absolute PATH entries
+  (on Windows with a drive letter or UNC share, so `\Tools` does not count;
+  PATHEXT applied the same way on every supported Python, `scripts/_exe.py`); every wrapper starts with such a PATH and the switch
+  set, which the scanners and their child processes inherit. The
+  `mcpscanner`, VirusTotal and `llm_check.py --probe` helpers run isolated
+  (`-I`), so a `mcpscanner.py`, `json.py` or `litellm.py` in the working
+  directory is not imported. `audit_installed.py --execute` runs its own
+  scripts with the current Python instead of `python scripts/...` from the
+  working directory, and refuses any other command (exit 2).
+
 - The MCP sandbox image no longer takes Node from Debian (end-of-life Node 20)
   or an unpinned `python:3.12-slim` and `pip install uv`. It is built from
   official images pinned by digest: Node 26.13.1, Python 3.14.10, uv 0.13.9.

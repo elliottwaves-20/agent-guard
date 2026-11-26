@@ -21,6 +21,12 @@ import subprocess
 import sys
 import uuid
 
+import _exe
+
+if __name__ == "__main__":
+    # Before any import below can start a program (CWE-427).
+    _exe.harden_environ()
+
 from _llm_budget import Budget, Paused, atomic_json, digest, exclusive_lock, policy_from_profile
 
 

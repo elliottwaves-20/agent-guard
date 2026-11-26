@@ -177,7 +177,7 @@ class RealScanReceipts(unittest.TestCase):
             "integrity": sri(data),
         }}}}
         source = resolver.ResolvedSource(kind="npm", install_hint="@s/x@1.2.3", label="npm")
-        real_which = scan_url._dynamic.shutil.which
+        real_which = scan_url._dynamic._exe.which
         which_fn = real_which if docker_present else (
             lambda name: None if name == "docker" else real_which(name)
         )
@@ -195,7 +195,7 @@ class RealScanReceipts(unittest.TestCase):
                 patch.dict(self.skillspector.USER_CONFIG, {"mcp": {"install_dir": str(self.root)}}), \
                 patch.object(scan_mcp, "http_json", lambda url: meta_json), \
                 patch.object(scan_mcp, "http_bytes", lambda url: data), \
-                patch.object(scan_url._dynamic.shutil, "which", side_effect=which_fn), \
+                patch.object(scan_url._dynamic._exe, "which", side_effect=which_fn), \
                 patch.object(scan_url, "interactive", lambda: False), \
                 contextlib.redirect_stdout(out):
             rc = scan_url.scan_resolved(source, "auto", dry_run=True, dynamic=dynamic)
@@ -253,14 +253,14 @@ class RealScanReceipts(unittest.TestCase):
             "digests": {"sha256": hashlib.sha256(bad_wheel).hexdigest()},
         }]}}
         source = resolver.ResolvedSource(kind="pypi", install_hint="x==1.0", label="pypi")
-        real_which = scan_url._dynamic.shutil.which
+        real_which = scan_url._dynamic._exe.which
         out = io.StringIO()
         with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}), \
                 patch.multiple(self.skillspector, **self._static_only_llm()), \
                 patch.dict(self.skillspector.USER_CONFIG, {"mcp": {"install_dir": str(self.root)}}), \
                 patch.object(scan_mcp, "http_json", lambda url: pypi_meta), \
                 patch.object(scan_mcp, "http_bytes", lambda url: bad_wheel), \
-                patch.object(scan_url._dynamic.shutil, "which",
+                patch.object(scan_url._dynamic._exe, "which",
                              side_effect=lambda name: None if name == "docker" else real_which(name)), \
                 patch.object(scan_url, "interactive", lambda: False), \
                 contextlib.redirect_stdout(out):

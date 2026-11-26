@@ -30,6 +30,12 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+import _exe
+
+if __name__ == "__main__":
+    # Before any import below can start a program (CWE-427).
+    _exe.harden_environ()
+
 from _skillspector import combine_verdicts, die, run_skillspector
 
 GITHUB_LINK_RE = re.compile(r"https://github\.com/[^\s)\]>\"']+")

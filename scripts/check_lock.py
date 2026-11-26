@@ -11,6 +11,12 @@ from contextlib import nullcontext, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 
+import _exe
+
+if __name__ == "__main__":
+    # Before any import below can start a program (CWE-427).
+    _exe.harden_environ()
+
 import _fastlane
 import _lockcheck
 import _mcp_locked

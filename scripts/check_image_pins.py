@@ -32,6 +32,12 @@ import tarfile
 import urllib.error
 import urllib.request
 
+import _exe
+
+if __name__ == "__main__":
+    # Before any import below can start a program (CWE-427).
+    _exe.harden_environ()
+
 import _pins
 import _url_resolver
 

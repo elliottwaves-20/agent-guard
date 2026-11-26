@@ -76,7 +76,7 @@ class ScanBoundaryTests(unittest.TestCase):
                 self.assertFalse(target.exists())
 
     def test_malcontent_error_cannot_be_safe(self):
-        with patch.object(scan_cli.shutil, 'which', return_value='docker'), \
+        with patch.object(scan_cli._exe, 'which', return_value='docker'), \
              patch.object(scan_cli, 'run_bounded', return_value=subprocess.CompletedProcess(
                  [], 3, '{"Files": {"file": {"RiskLevel": "LOW"}}}', '')):
             self.assertEqual(scan_cli.run_malcontent(Path('file')), 2)
@@ -84,7 +84,7 @@ class ScanBoundaryTests(unittest.TestCase):
     def test_sandbox_keeps_scanner_credentials_out_of_target_and_cleans_up(self):
         with patch.object(scan_mcp, 'need_mcp_scanner'), \
              patch.object(scan_mcp, 'build_sandbox_image'), \
-             patch.object(scan_mcp.shutil, 'which', return_value='docker'), \
+             patch.object(scan_mcp._exe, 'which', return_value='docker'), \
              patch.object(scan_mcp, 'MCP_SCANNER', 'mcp-scanner'), \
              patch.object(scan_mcp, 'CISCO_LLM_KEY', 'runtime-test-secret'), \
              patch.object(scan_mcp, 'CISCO_LLM_MODEL', 'test-model'), \
@@ -273,10 +273,10 @@ class ScanBoundaryTests(unittest.TestCase):
         }
         for label, outcome in cases.items():
             with self.subTest(label), \
-                 patch.object(scan_cli.shutil, 'which', return_value='docker'), \
+                 patch.object(scan_cli._exe, 'which', return_value='docker'), \
                  patch.object(scan_cli, 'run_bounded', side_effect=[outcome]):
                 self.assertEqual(scan_cli.run_malcontent(Path('file')), 2)
-        with patch.object(scan_cli.shutil, 'which', return_value='docker'), \
+        with patch.object(scan_cli._exe, 'which', return_value='docker'), \
              patch.object(scan_cli, 'run_bounded',
                           return_value=subprocess.CompletedProcess([], 0, clean, '')):
             self.assertEqual(scan_cli.run_malcontent(Path('file')), 0)
@@ -325,7 +325,7 @@ class ScanBoundaryTests(unittest.TestCase):
                 with self.subTest(failure=type(failure).__name__, scan=scan_result), \
                      patch.object(scan_mcp, 'need_mcp_scanner'), \
                      patch.object(scan_mcp, 'build_sandbox_image'), \
-                     patch.object(scan_mcp.shutil, 'which', return_value='docker'), \
+                     patch.object(scan_mcp._exe, 'which', return_value='docker'), \
                      patch.object(scan_mcp, 'MCP_SCANNER', 'mcp-scanner'), \
                      patch.object(scan_mcp, 'CISCO_LLM_KEY', 'runtime-test-secret'), \
                      patch.object(scan_mcp, 'CISCO_LLM_MODEL', 'test-model'), \
@@ -338,7 +338,7 @@ class ScanBoundaryTests(unittest.TestCase):
                                      scan_result)
 
     def test_sandbox_scan_error_is_not_masked_by_a_failing_cleanup(self):
-        with patch.object(scan_mcp, 'need_mcp_scanner'),              patch.object(scan_mcp, 'build_sandbox_image'),              patch.object(scan_mcp.shutil, 'which', return_value='docker'),              patch.object(scan_mcp, 'MCP_SCANNER', 'mcp-scanner'),              patch.object(scan_mcp, 'CISCO_LLM_KEY', 'runtime-test-secret'),              patch.object(scan_mcp, 'CISCO_LLM_MODEL', 'test-model'),              patch.object(scan_mcp, 'run_cisco', side_effect=RuntimeError('failed handshake')),              patch.object(scan_mcp._egress.Capture, 'start') as capture,              patch.object(scan_mcp.subprocess, 'run', side_effect=OSError('docker gone')):
+        with patch.object(scan_mcp, 'need_mcp_scanner'),              patch.object(scan_mcp, 'build_sandbox_image'),              patch.object(scan_mcp._exe, 'which', return_value='docker'),              patch.object(scan_mcp, 'MCP_SCANNER', 'mcp-scanner'),              patch.object(scan_mcp, 'CISCO_LLM_KEY', 'runtime-test-secret'),              patch.object(scan_mcp, 'CISCO_LLM_MODEL', 'test-model'),              patch.object(scan_mcp, 'run_cisco', side_effect=RuntimeError('failed handshake')),              patch.object(scan_mcp._egress.Capture, 'start') as capture,              patch.object(scan_mcp.subprocess, 'run', side_effect=OSError('docker gone')):
             capture.return_value.name = 'agent-guard-net-test'
             with self.assertRaises(RuntimeError):
                 scan_mcp.run_sandbox(['python', '-c', 'print(1)'])

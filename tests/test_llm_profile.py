@@ -6,6 +6,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import _exe  # noqa: E402
 os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")  # never read this machine's personal config
 lp = importlib.import_module("_llm_profile")
 _providers = importlib.import_module("_providers")
@@ -201,7 +202,7 @@ class WrapperProfileTests(unittest.TestCase):
         import json as _json
         import shutil
         import tempfile
-        old_env, old_which = os.environ.copy(), shutil.which
+        old_env, old_which = os.environ.copy(), _exe.which
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
             path.write_text(config_text, encoding="utf-8")
@@ -209,7 +210,7 @@ class WrapperProfileTests(unittest.TestCase):
                 os.environ.clear()
                 os.environ.update({"AGENT_GUARD_NO_DOTENV": "1",
                                    "AGENT_GUARD_CONFIG": str(path), **(env or {})})
-                shutil.which = lambda name, *a, **k: (f"/fake/bin/{name}"
+                _exe.which = lambda name, *a, **k: (f"/fake/bin/{name}"
                                                       if name in on_path else None)
                 module = importlib.reload(importlib.import_module("_skillspector"))
                 run_env = module.skillspector_env()
@@ -217,7 +218,7 @@ class WrapperProfileTests(unittest.TestCase):
                 data = _json.loads(Path(registry).read_text()) if registry else None
                 return module.PROVIDER, module.LLM_READY, module.LLM_REASON, run_env, data
             finally:
-                shutil.which = old_which
+                _exe.which = old_which
                 os.environ.clear()
                 os.environ.update(old_env)
                 importlib.reload(importlib.import_module("_skillspector"))

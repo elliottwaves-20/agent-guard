@@ -13,6 +13,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+import _exe  # noqa: E402
 os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")  # never read this machine's personal config
 
 # The wrapper resolves its provider at import time. Hide the caller's provider
@@ -58,17 +59,17 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         the module is reloaded with the real environment afterwards."""
         import shutil
         old_env = os.environ.copy()
-        old_which = shutil.which
+        old_which = _exe.which
         try:
             os.environ.clear()
             os.environ.update({"AGENT_GUARD_NO_DOTENV": "1", **env})
-            shutil.which = lambda name, *a, **k: (f"/fake/bin/{name}"
+            _exe.which = lambda name, *a, **k: (f"/fake/bin/{name}"
                                                   if name in on_path else None)
             module = importlib.reload(importlib.import_module("_skillspector"))
             return (module.PROVIDER, module.LLM_READY, module.LLM_REASON,
                     module.skillspector_env())
         finally:
-            shutil.which = old_which
+            _exe.which = old_which
             os.environ.clear()
             os.environ.update(old_env)
             importlib.reload(importlib.import_module("_skillspector"))
@@ -442,11 +443,11 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                               'kind = "cli"\ncli = "claude"\n', encoding="utf-8")
             report = Path(d) / "report.json"
             self._write_report(report)
-            old_env, old_which = os.environ.copy(), shutil.which
+            old_env, old_which = os.environ.copy(), _exe.which
             try:
                 os.environ.clear()
                 os.environ.update({"AGENT_GUARD_NO_DOTENV": "1", "AGENT_GUARD_CONFIG": str(config)})
-                shutil.which = lambda name, *a, **k: None
+                _exe.which = lambda name, *a, **k: None
                 module = importlib.reload(importlib.import_module("_skillspector"))
                 self.assertEqual(module.LLM_PROFILE[0], "p")
                 out = io.StringIO()
@@ -454,7 +455,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                     self.assertEqual(module.verdict_skillspector(report, 0), 2)
                 self.assertIn("NO VERDICT -- the chosen LLM provider cannot run", out.getvalue())
             finally:
-                shutil.which = old_which
+                _exe.which = old_which
                 os.environ.clear()
                 os.environ.update(old_env)
                 importlib.reload(importlib.import_module("_skillspector"))
@@ -754,7 +755,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
             os.environ.update(old_env)
 
         self.assertEqual(calls[0][0], "python-with-mcpscanner")
-        self.assertEqual(calls[0][1], "-c")
+        self.assertEqual(calls[0][1:3], ["-I", "-c"])   # isolated: CWE-427
         self.assertNotIn("mcp-scanner", calls[0])
         self.assertNotIn("virustotal", calls[0])
 
@@ -1125,13 +1126,13 @@ class SkillSpectorWrapperTests(unittest.TestCase):
         provider resolution run under a controlled environment."""
         import shutil
         old_env = os.environ.copy()
-        old_which = shutil.which
+        old_which = _exe.which
         out = io.StringIO()
         try:
             os.environ.clear()
             os.environ.update({"AGENT_GUARD_NO_DOTENV": "1",
                                "AGENT_GUARD_NO_USER_CONFIG": "1", **env})
-            shutil.which = lambda name, *a, **k: (f"/fake/bin/{name}"
+            _exe.which = lambda name, *a, **k: (f"/fake/bin/{name}"
                                                   if name in on_path else None)
             module = importlib.reload(importlib.import_module("_skillspector"))
             with tempfile.TemporaryDirectory() as d:
@@ -1141,7 +1142,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                     code = module.verdict_skillspector(report, 0, **kwargs)
             return code, out.getvalue()
         finally:
-            shutil.which = old_which
+            _exe.which = old_which
             os.environ.clear()
             os.environ.update(old_env)
             importlib.reload(importlib.import_module("_skillspector"))
@@ -1864,7 +1865,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 self.stdout = stdout
                 self.stderr = stderr
 
-        original_which = resolver.shutil.which
+        original_which = resolver._exe.which
         original_run = resolver.subprocess.run
         try:
             def fake_which(name):
@@ -1876,7 +1877,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                     return Result(1, stderr="Cannot find module 'playwright'")
                 return Result(0, stdout="Rendered via npx")
 
-            resolver.shutil.which = fake_which
+            resolver._exe.which = fake_which
             resolver.subprocess.run = fake_run
 
             self.assertEqual(
@@ -1884,7 +1885,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 None,
             )
         finally:
-            resolver.shutil.which = original_which
+            resolver._exe.which = original_which
             resolver.subprocess.run = original_run
 
         self.assertEqual(calls, [])
@@ -1899,7 +1900,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 self.stdout = stdout
                 self.stderr = stderr
 
-        original_which = resolver.shutil.which
+        original_which = resolver._exe.which
         original_run = resolver.subprocess.run
         try:
             def fake_which(name):
@@ -1915,7 +1916,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                     return Result(0)
                 return Result(0, stdout="Rendered via temporary npm")
 
-            resolver.shutil.which = fake_which
+            resolver._exe.which = fake_which
             resolver.subprocess.run = fake_run
 
             self.assertEqual(
@@ -1923,7 +1924,7 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 None,
             )
         finally:
-            resolver.shutil.which = original_which
+            resolver._exe.which = original_which
             resolver.subprocess.run = original_run
 
         self.assertEqual(calls, [])
@@ -3191,25 +3192,25 @@ class ScanCliRouterTests(unittest.TestCase):
     # -- GuardDog invocation ---------------------------------------------------
 
     def test_guarddog_command_prefers_native_binary(self):
-        original = self.scan_cli.shutil.which
+        original = self.scan_cli._exe.which
         try:
-            self.scan_cli.shutil.which = lambda name: (
+            self.scan_cli._exe.which = lambda name: (
                 "/usr/bin/guarddog" if name == "guarddog" else None)
             cmd = self.scan_cli.guarddog_command("pypi", "requests", "2.32.0")
         finally:
-            self.scan_cli.shutil.which = original
+            self.scan_cli._exe.which = original
         self.assertEqual(cmd, ["/usr/bin/guarddog", "pypi", "scan", "requests",
                                "--output-format", "json",
                                "--version", "2.32.0"])
 
     def test_guarddog_command_falls_back_to_docker(self):
-        original = self.scan_cli.shutil.which
+        original = self.scan_cli._exe.which
         try:
-            self.scan_cli.shutil.which = lambda name: (
+            self.scan_cli._exe.which = lambda name: (
                 "docker" if name == "docker" else None)
             cmd = self.scan_cli.guarddog_command("npm", "left-pad")
         finally:
-            self.scan_cli.shutil.which = original
+            self.scan_cli._exe.which = original
         # The image is pinned by digest; Docker pulls a
         # missing digest itself and an unavailable one ends in no report.
         import _pins
@@ -3229,7 +3230,7 @@ class ScanCliRouterTests(unittest.TestCase):
     def test_malcontent_runs_the_pinned_digest(self):
         import _pins
         seen = {}
-        original_which = self.scan_cli.shutil.which
+        original_which = self.scan_cli._exe.which
         original_run = self.scan_cli.run_bounded
 
         def fake_run(cmd, timeout):
@@ -3237,25 +3238,25 @@ class ScanCliRouterTests(unittest.TestCase):
             seen["cmd"] = cmd
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         try:
-            self.scan_cli.shutil.which = lambda name: "docker"
+            self.scan_cli._exe.which = lambda name: "docker"
             self.scan_cli.run_bounded = fake_run
             with contextlib.redirect_stdout(io.StringIO()):
                 rc = self.scan_cli.run_malcontent(Path("/tmp/tool.bin"))
         finally:
-            self.scan_cli.shutil.which = original_which
+            self.scan_cli._exe.which = original_which
             self.scan_cli.run_bounded = original_run
         self.assertEqual(rc, 2)  # no JSON report -> no verdict
         self.assertIn(_pins.MALCONTENT_IMAGE, seen["cmd"])
         self.assertNotIn("--pull=always", seen["cmd"])
 
     def test_guarddog_command_dies_without_guarddog_or_docker(self):
-        original = self.scan_cli.shutil.which
+        original = self.scan_cli._exe.which
         try:
-            self.scan_cli.shutil.which = lambda name: None
+            self.scan_cli._exe.which = lambda name: None
             with self.assertRaises(SystemExit) as ctx:
                 self.scan_cli.guarddog_command("pypi", "requests")
         finally:
-            self.scan_cli.shutil.which = original
+            self.scan_cli._exe.which = original
         self.assertEqual(ctx.exception.code, 2)
 
     # -- malcontent verdict ----------------------------------------------------
@@ -3507,18 +3508,18 @@ class GeminiTargetSeparationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             missing = Path(tmp) / "absent"
             original_tools = installer.TOOLS
-            original_which = installer.shutil.which
+            original_which = installer._exe.which
             try:
                 installer.TOOLS = dict(original_tools)
                 installer.TOOLS["gemini-cli"] = dict(original_tools["gemini-cli"])
                 installer.TOOLS["gemini-cli"]["detect"] = [missing]
-                installer.shutil.which = lambda name: "/usr/bin/gemini" if name == "gemini" else None
+                installer._exe.which = lambda name: "/usr/bin/gemini" if name == "gemini" else None
                 self.assertTrue(installer.tool_present("gemini-cli"))
-                installer.shutil.which = lambda name: None
+                installer._exe.which = lambda name: None
                 self.assertFalse(installer.tool_present("gemini-cli"))
             finally:
                 installer.TOOLS = original_tools
-                installer.shutil.which = original_which
+                installer._exe.which = original_which
 
     def test_gemini_cli_entry_maps_remote_url_to_http_url(self):
         entry = self.installer.gemini_cli_entry({"url": "https://api.example.com/mcp"})

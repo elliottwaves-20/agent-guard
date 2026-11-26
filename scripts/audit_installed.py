@@ -17,10 +17,17 @@ import sys
 import tomllib
 from pathlib import Path
 
+import _exe
+
+if __name__ == "__main__":
+    # Before any import below can start a program (CWE-427).
+    _exe.harden_environ()
+
 import install_skill
 from _skillspector import combine_verdicts
 from scan_skill import find_skill_dirs
 
+SCRIPTS = Path(__file__).resolve().parent
 
 class ConfigReadError(Exception):
     """An existing agent config could not be read; its servers are unknown."""
@@ -340,7 +347,15 @@ def run(cmd: list[str], execute: bool) -> int:
     if not execute:
         print("  NOT EXECUTED -- rerun with --execute for a verdict")
         return 2
-    return subprocess.run(cmd).returncode
+    # The printed command is for copying from the repository root. Run this
+    # Python on the wrapper's own script instead: a bare `python` or a relative
+    # scripts/ path would come from the working directory.
+    script = cmd[1] if len(cmd) > 1 and cmd[0] == "python" else ""
+    folder, _, name = script.partition("/")
+    if folder != "scripts" or name != Path(name).name or not (SCRIPTS / name).is_file():
+        print(f"  NOT EXECUTED -- not one of agent-guard's own scripts: {cmd[:2]}")
+        return 2
+    return subprocess.run([sys.executable, str(SCRIPTS / name), *cmd[2:]]).returncode
 
 
 def removal_hint_skill(path: Path) -> str:

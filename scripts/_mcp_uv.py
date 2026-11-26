@@ -14,11 +14,11 @@ import configparser
 import datetime as dt
 import hashlib
 import re
-import shutil
 import sys
 import urllib.parse
 from pathlib import Path
 
+import _exe
 import _fastlane
 import _lockcheck
 from _mcp_locked import (ENTRY_RE, Installed, NeedsScan, Refused, Runner, check_name,
@@ -315,7 +315,7 @@ def _rebuild_with_fixes(run, uv, root, target, verdict, *, name, package, versio
 
 def pypi_install(*, name: str, package: str, version: str, executable: str | None,
                  secrets: tuple, root: Path, receipt, accepted: dict | None, run: Runner,
-                 check=_lockcheck.check, which=shutil.which, dry: bool = False,
+                 check=_lockcheck.check, which=_exe.which, dry: bool = False,
                  policy: _fastlane.Policy = _fastlane.Policy(), overrides: dict | None = None,
                  override_reason: str | None = None, fetch=_lockcheck.http_fetch,
                  now: dt.datetime | None = None) -> Installed:
@@ -540,7 +540,7 @@ def _settled_commit(source: str, sha: str, settled, branch_head, compare,
 def git_install(*, name: str, git_url: str, package: str, executable: str | None,
                 module: str | None, secrets: tuple, root: Path, receipt, accepted: dict | None,
                 scanned_dir: Path | None, run: Runner, check=_lockcheck.check,
-                which=shutil.which, fetch_text=raw_text, settled=None,
+                which=_exe.which, fetch_text=raw_text, settled=None,
                 branch_head=github_branch_head, compare=github_compare,
                 root_names=github_root_names,
                 dry: bool = False, policy: _fastlane.Policy = _fastlane.Policy()) -> Installed:

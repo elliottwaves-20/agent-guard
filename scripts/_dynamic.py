@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import uuid
@@ -37,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import _egress
+import _exe
 from _skillspector import run_bounded
 
 # OpenSSF package-analysis, analysis image of 2026-05-20, pinned by digest.
@@ -296,7 +296,7 @@ def _no_verdict(reason: str) -> int:
 
 
 def run(ecosystem: str, spec: str, allow_hosts=()) -> int:
-    if shutil.which("docker") is None:
+    if _exe.which("docker") is None:
         return _no_verdict("Docker was not found on PATH. Install/start Docker, or re-run "
                            "with --no-dynamic to skip this stage knowingly")
     try:

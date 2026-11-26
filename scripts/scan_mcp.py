@@ -57,7 +57,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tarfile
@@ -66,6 +65,12 @@ import urllib.request
 import zipfile
 import uuid
 from pathlib import Path
+
+import _exe
+
+if __name__ == "__main__":
+    # Before any import below can start a program (CWE-427).
+    _exe.harden_environ()
 
 import _dynamic
 import _egress
@@ -81,7 +86,7 @@ from _skillspector import (
     skipped_dynamic_verdict,
 )
 
-MCP_SCANNER = shutil.which("mcp-scanner")      # Stage 2 / remote: runtime (Cisco)
+MCP_SCANNER = _exe.which("mcp-scanner")      # Stage 2 / remote: runtime (Cisco)
 
 # (name, profile) for the Cisco runtime check, or None for MCP_SCANNER_LLM_*.
 try:
@@ -386,15 +391,16 @@ def mcpscanner_python() -> str:
     not necessarily the package in the Python running this wrapper. Prefer the
     current interpreter when it works, otherwise ask uv for the tool venv.
     """
+    # Isolated (-I): a mcpscanner.py in the working directory is not imported.
     probe = subprocess.run(
-        [sys.executable, "-c", "import mcpscanner"],
+        [sys.executable, "-I", "-c", "import mcpscanner"],
         capture_output=True,
         text=True,
     )
     if probe.returncode == 0:
         return sys.executable
 
-    uv = shutil.which("uv")
+    uv = _exe.which("uv")
     if uv is None:
         die("uv not found on PATH and current Python cannot import mcpscanner.")
     tool_dir = subprocess.run([uv, "tool", "dir"], capture_output=True, text=True)
@@ -575,7 +581,9 @@ def run_virustotal(path: Path, max_files: int = VT_MAX_FILES) -> int:
     print(f"  VirusTotal hash reputation scan: {path}")
     print("  uploads: disabled unless MCP_SCANNER_VIRUSTOTAL_UPLOAD_FILES=true")
     python = mcpscanner_python()
-    r = run_bounded([python, "-c", VT_HELPER, str(path), str(max_files)],
+    # Isolated (-I): no module from the working directory shadows json or
+    # mcpscanner. The working directory stays, so a relative `path` still holds.
+    r = run_bounded([python, "-I", "-c", VT_HELPER, str(path), str(max_files)],
                     timeout=SCAN_TIMEOUT, env=dict(os.environ))
     if r.stderr:
         print(r.stderr)
@@ -614,7 +622,7 @@ def run_sandbox(command: list, *, allow_hosts=(), network: bool = True) -> int:
     need_mcp_scanner()
     if not command:
         die("sandbox scan needs a launch command")
-    if shutil.which("docker") is None:
+    if _exe.which("docker") is None:
         die("--sandbox needs Docker, which was not found on PATH.")
     problem = cisco_llm_problem()
     if problem:
@@ -850,7 +858,7 @@ def host_runtime_version(runtime: str) -> str | None:
     .python-version or --python is not known here)."""
     try:
         if runtime == "node":
-            node = shutil.which("node")
+            node = _exe.which("node")
             if not node:
                 return None
             out = subprocess.run([node, "--version"], capture_output=True, text=True,
@@ -860,7 +868,7 @@ def host_runtime_version(runtime: str) -> str | None:
             ver = out.stdout.strip().lstrip("v")
             return ver if re.fullmatch(r"\d+\.\d+(?:\.\d+)*", ver) else None
         if runtime == "python":
-            uv = shutil.which("uv")
+            uv = _exe.which("uv")
             if not uv:
                 return None
             with tempfile.TemporaryDirectory() as empty_dir:

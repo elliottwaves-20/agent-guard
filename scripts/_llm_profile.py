@@ -18,9 +18,9 @@ or write files, so a model switch is a config edit, not a code change.
 from __future__ import annotations
 
 import re
-import shutil
 from urllib.parse import urlsplit
 
+import _exe
 import _providers
 
 # "campaign" = budgeted scans via llm_scan.py (dollar ledger over HTTP).
@@ -191,7 +191,7 @@ def _key(profile, env):
     return var, (env.get(var, "").strip() if var else "")
 
 
-def skillspector_env(name: str, profile: dict, env, which=shutil.which):
+def skillspector_env(name: str, profile: dict, env, which=_exe.which):
     """Return (env, ready, reason, registry) for a SkillSpector run."""
     provider = _provider_of(profile)
     out = {k: v for k, v in env.items()

@@ -14,6 +14,12 @@ import tempfile
 import urllib.parse
 from pathlib import Path
 
+import _exe
+
+if __name__ == "__main__":
+    # Before any import below can start a program (CWE-427).
+    _exe.harden_environ()
+
 from _skillspector import combine_verdicts, die, skipped_dynamic_verdict as _skipped_dynamic_verdict
 from _url_resolver import FetchError, ResolvedSource, resolve_url
 from install_skill import (

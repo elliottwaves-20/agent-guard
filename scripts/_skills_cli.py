@@ -35,12 +35,12 @@ Opt out entirely with AGENT_GUARD_SKILLS_CLI=0.
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import urllib.request
 from pathlib import Path
 
+import _exe
 from _skillspector import run_bounded
 
 # -- pinned release -----------------------------------------------------------
@@ -355,7 +355,7 @@ def echo(text: str, stream=None):
 
 
 def npx_path():
-    return shutil.which("npx")
+    return _exe.which("npx")
 
 
 def skills_argv(source: Path, names: list, copy: bool = False) -> list:

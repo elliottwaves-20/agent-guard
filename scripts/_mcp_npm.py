@@ -19,11 +19,11 @@ import datetime as dt
 import hashlib
 import json
 import re
-import shutil
 import sys
 import urllib.parse
 from pathlib import Path
 
+import _exe
 import _fastlane
 import _lockcheck
 from _mcp_locked import (METADATA, Installed, NeedsScan, Refused, Runner, check_name,
@@ -368,7 +368,7 @@ def _rebuild_with_fixes(run, npm, node, root, target, verdict, *, name, package,
 def npm_install(*, name: str, package: str, version: str, overrides: dict,
                 override_reason: str | None, bin_name: str | None, secrets: tuple,
                 root: Path, receipt, accepted: dict | None, run: Runner,
-                check=_lockcheck.check, which=shutil.which, dry: bool = False,
+                check=_lockcheck.check, which=_exe.which, dry: bool = False,
                 policy: _fastlane.Policy = _fastlane.Policy(),
                 fetch=_lockcheck.http_fetch, now: dt.datetime | None = None) -> Installed:
     """Build, check and swap in the locked tree of one npm MCP server."""

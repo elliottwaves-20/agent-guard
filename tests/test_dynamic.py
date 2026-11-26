@@ -399,7 +399,7 @@ class RunTests(unittest.TestCase):
 
     def test_missing_docker_gives_no_verdict_with_hint(self):
         out = io.StringIO()
-        with patch.object(dyn.shutil, "which", return_value=None), redirect_stdout(out):
+        with patch.object(dyn._exe, "which", return_value=None), redirect_stdout(out):
             code = dyn.run("npm", "is-number@7.0.0")
         self.assertEqual(code, 2)
         self.assertIn("--no-dynamic", out.getvalue())
@@ -415,14 +415,14 @@ class RunTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, "log", "")
 
         out = io.StringIO()
-        with patch.object(dyn.shutil, "which", return_value="docker"), \
+        with patch.object(dyn._exe, "which", return_value="docker"), \
              patch.object(dyn, "run_bounded", side_effect=fake), redirect_stdout(out):
             code = dyn.run("npm", "is-number@7.0.0")
         self.assertEqual(code, 0, out.getvalue())
 
     def test_failed_container_gives_no_verdict(self):
         out = io.StringIO()
-        with patch.object(dyn.shutil, "which", return_value="docker"), \
+        with patch.object(dyn._exe, "which", return_value="docker"), \
              patch.object(dyn, "run_bounded",
                           return_value=subprocess.CompletedProcess([], 1, "", "boom")), \
              redirect_stdout(out):
@@ -431,7 +431,7 @@ class RunTests(unittest.TestCase):
 
     def test_timeout_gives_no_verdict(self):
         out = io.StringIO()
-        with patch.object(dyn.shutil, "which", return_value="docker"), \
+        with patch.object(dyn._exe, "which", return_value="docker"), \
              patch.object(dyn, "run_bounded", side_effect=subprocess.TimeoutExpired([], 5)), \
              patch.object(dyn, "_remove") as remove, redirect_stdout(out):
             self.assertEqual(dyn.run("npm", "is-number"), 2)

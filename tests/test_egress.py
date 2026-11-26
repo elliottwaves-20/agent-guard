@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+import _exe  # noqa: E402
 os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")  # never read this machine's personal config
 
 eg = importlib.import_module("_egress")
@@ -343,7 +344,7 @@ class SandboxIntegrationTests(unittest.TestCase):
         self.docker_reply = subprocess.CompletedProcess(["docker"], 0, "true\n", "")
         self.docker_calls = []
         real_run = subprocess.run
-        real_which = shutil.which
+        real_which = _exe.which
 
         def run_or_fake_docker(argv, *args, **kwargs):
             if argv and argv[0] == "docker":
@@ -356,7 +357,7 @@ class SandboxIntegrationTests(unittest.TestCase):
         self.patches = [
             patch.object(sm, "need_mcp_scanner"),
             patch.object(sm, "build_sandbox_image", return_value="sandbox:tag"),
-            patch.object(sm.shutil, "which", side_effect=lambda name: "docker" if name == "docker" else real_which(name)),
+            patch.object(sm._exe, "which", side_effect=lambda name: "docker" if name == "docker" else real_which(name)),
             patch.object(sm, "cisco_llm_problem", return_value=None),
             patch.object(sm, "cisco_env", return_value={}),
             patch.object(sm, "cisco_command", return_value=["mcp-scanner"]),
@@ -623,32 +624,32 @@ class RuntimeParityTests(unittest.TestCase):
 
     def test_host_runtime_version_ignores_failing_subprocess(self):
         failed = subprocess.CompletedProcess(["node", "--version"], 1, "not a version\n", "err")
-        with patch.object(self.sm.shutil, "which", return_value="node"), \
+        with patch.object(self.sm._exe, "which", return_value="node"), \
                 patch.object(self.sm.subprocess, "run", return_value=failed):
             self.assertIsNone(self.sm.host_runtime_version("node"))
         garbage = subprocess.CompletedProcess(["node", "--version"], 0, "garbage output\n", "")
-        with patch.object(self.sm.shutil, "which", return_value="node"), \
+        with patch.object(self.sm._exe, "which", return_value="node"), \
                 patch.object(self.sm.subprocess, "run", return_value=garbage):
             self.assertIsNone(self.sm.host_runtime_version("node"))
-        with patch.object(self.sm.shutil, "which", return_value=None):
+        with patch.object(self.sm._exe, "which", return_value=None):
             self.assertIsNone(self.sm.host_runtime_version("python"))
-        with patch.object(self.sm.shutil, "which", return_value="uv"), \
+        with patch.object(self.sm._exe, "which", return_value="uv"), \
                 patch.object(self.sm.subprocess, "run",
                              return_value=subprocess.CompletedProcess(["uv"], 1, "", "err")):
             self.assertIsNone(self.sm.host_runtime_version("python"))
-        with patch.object(self.sm.shutil, "which", return_value="uv"), \
+        with patch.object(self.sm._exe, "which", return_value="uv"), \
                 patch.object(self.sm.subprocess, "run", side_effect=[
                     subprocess.CompletedProcess(["uv"], 0, "C:\\py.exe\n", ""),
                     subprocess.CompletedProcess(["C:\\py.exe"], 1, "", "err"),
                 ]):
             self.assertIsNone(self.sm.host_runtime_version("python"))
-        with patch.object(self.sm.shutil, "which", return_value="uv"), \
+        with patch.object(self.sm._exe, "which", return_value="uv"), \
                 patch.object(self.sm.subprocess, "run", side_effect=[
                     subprocess.CompletedProcess(["uv"], 0, "C:\\py.exe\n", ""),
                     subprocess.CompletedProcess(["C:\\py.exe"], 0, "not-a-version\n", ""),
                 ]):
             self.assertIsNone(self.sm.host_runtime_version("python"))
-        with patch.object(self.sm.shutil, "which", return_value="uv"), \
+        with patch.object(self.sm._exe, "which", return_value="uv"), \
                 patch.object(self.sm.subprocess, "run",
                              side_effect=subprocess.TimeoutExpired(["uv"], 60)):
             self.assertIsNone(self.sm.host_runtime_version("python"))
@@ -674,7 +675,7 @@ class RuntimeParityTests(unittest.TestCase):
             old = os.getcwd()
             os.chdir(work)
             try:
-                with patch.object(self.sm.shutil, "which", return_value="uv"), \
+                with patch.object(self.sm._exe, "which", return_value="uv"), \
                         patch.object(self.sm.subprocess, "run", side_effect=run):
                     version = self.sm.host_runtime_version("python")
             finally:
