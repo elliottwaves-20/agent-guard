@@ -60,10 +60,11 @@
   `uv sync` installs instead of the sdist when the release has exactly one;
   npm tarballs are verified against their registry integrity.
 - `mcp-git` additionally requires the commit to meet the age policy on the
-  default branch and pins and checks the build tools from `[build-system]`.
-  Known limit: requirements the build backend adds while building
-  (`get_requires_for_build_wheel`, e.g. `setup_requires`) are resolved by uv
-  under the age limit alone, without advisory or hash check.
+  default branch and pins the build tools from `[build-system]` with their
+  hashes and checks them. uv builds with `require-build-hashes` and without
+  its cache, so a backend that asks for further build tools at build time
+  (`get_requires_for_build_wheel`, e.g. `setup_requires`) is refused with
+  exit 2; this needs uv 0.13.0 or newer.
   Offers after GitHub subdirectory scans retain the subdirectory in the
   install URL and read metadata from that directory. The scan and its receipt
   always cover the whole repository at the commit, since uv builds from the

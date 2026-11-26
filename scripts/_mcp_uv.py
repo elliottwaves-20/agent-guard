@@ -442,14 +442,18 @@ def build_requires(pyproject_text: str) -> list:
 
 def build_constraints(requires: list, stage: Path, run: Runner, uv: str, check,
                       min_age_days: int) -> list:
-    """Resolve the build tools exactly, check them, return `name==version` pins."""
+    """Resolve the build tools exactly with their hashes, check them, return their entries.
+
+    The check covers exactly the files whose hashes uv will accept for the build."""
     (stage / BUILD_IN).write_text("\n".join(requires) + "\n", encoding="utf-8")
-    code, out = run([uv, "pip", "compile", BUILD_IN, "--no-build", "--exclude-newer",
-                     f"{min_age_days} days", "--default-index", INDEX, "-o", BUILD_OUT], stage)
+    code, out = run([uv, "pip", "compile", BUILD_IN, "--no-build", "--generate-hashes",
+                     "--exclude-newer", f"{min_age_days} days", "--default-index", INDEX,
+                     "-o", BUILD_OUT], stage)
     if code != 0:
         raise Refused(2, f"uv could not resolve the build tools {', '.join(requires)}:\n{_tail(out)}")
     try:
-        entries = _lockcheck.pinned_entries((stage / BUILD_OUT).read_text(encoding="utf-8"))
+        entries = _lockcheck.hashed_requirements(
+            (stage / BUILD_OUT).read_text(encoding="utf-8"))
     except OSError as exc:
         raise Refused(2, f"cannot read the resolved build tools: {exc}")
     except _lockcheck.NoVerdict as exc:
@@ -462,7 +466,62 @@ def build_constraints(requires: list, stage: Path, run: Runner, uv: str, check,
                                    "the installed tree is unchanged")
     for name in (BUILD_IN, BUILD_OUT):
         (stage / name).unlink()
-    return [f"{e.name}=={e.version}" for e in entries]
+    return entries
+
+
+def git_uv_settings(build_tools: list) -> str:
+    """[tool.uv] lines for the build of the Git package.
+
+    With require-build-hashes uv installs into the build environment only
+    files with a trusted hash; what the backend asks for at build time
+    (get_requires_for_build_wheel) has none and is refused (uv 0.13.0, #21411,
+    preview). The bundled uv_build backend needs no hash."""
+    items = ", ".join(
+        f'{{ requirement = "{e.name}=={e.version}", hashes = ['
+        + ", ".join(f'"sha256:{h}"' for h in e.hashes) + "] }"
+        for e in build_tools)
+    return ("require-build-hashes = true\n"
+            'preview-features = ["build-dependency-hashes"]\n'
+            f"build-constraint-dependencies = [{items}]\n")
+
+
+def git_sync_command(uv: str, entries: list) -> list:
+    """`uv sync` of the swapped-in tree; registry packages are never built.
+
+    --no-cache: uv does not check the build of a wheel it finds in its cache,
+    and for a Git source only a fresh cache forces the checked rebuild
+    (--refresh-package, --reinstall-package and --refresh do not; real uv 0.13.10)."""
+    no_build = [arg for e in entries for arg in ("--no-build-package", e.name)]
+    return [uv, "sync", "--locked", "--no-dev", "--no-cache", *no_build]
+
+
+UNHASHED_BUILD_RE = re.compile(r"no trusted hash was provided for: (.+)")
+
+
+def git_sync_failure(package: str, out: str) -> Refused:
+    """The refusal for a failed `uv sync` of a Git tree."""
+    match = UNHASHED_BUILD_RE.search(out or "")
+    if match:
+        names = match.group(1).strip().replace("`", "")
+        return Refused(2, f"NO VERDICT -- the build backend of {package} asks for build tools "
+                          f"that were not pinned and checked ({names}); uv refused them, so "
+                          f"{package} is not installed")
+    return Refused(2, f"uv sync failed:\n{_tail(out)}")
+
+
+MIN_UV = (0, 13, 0)
+UV_VERSION_RE = re.compile(r"uv (\d+)\.(\d+)\.(\d+)\b")
+
+
+def require_build_hash_uv(run: Runner, uv: str, cwd: Path) -> None:
+    """Refuse a uv without require-build-hashes (added in 0.13.0)."""
+    code, out = run([uv, "--version"], cwd)
+    match = UV_VERSION_RE.match((out or "").strip()) if code == 0 else None
+    if match is None:
+        raise Refused(2, f"cannot read the uv version:\n{_tail(out)}")
+    if tuple(int(part) for part in match.groups()) < MIN_UV:
+        raise Refused(2, f"{match.group(0)} cannot check the hashes of build tools; a locked "
+                         "Git MCP install needs uv 0.13.0 or newer")
 
 
 def _github_json(url: str):
@@ -577,9 +636,9 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
     if dry:
         target = root.absolute() / name
         print(f"  [DRY] would check that {sha} is at least {min_age_days} days on the default "
-              f"branch, pin and check the build tools, lock and check {package} from {source}, "
-              "swap, "
-              "uv sync --locked --no-dev --no-build-package <each registry package>")
+              f"branch, pin the build tools with hashes and check them, lock and check {package} "
+              f"from {source}, swap, uv sync --locked --no-dev --no-cache "
+              "--no-build-package <each registry package> (only hashed build tools)")
         return Installed(name=name, kind="git", package=package, requested=sha, command=uv,
                          args=["run", "--project", str(target), "--locked", "--no-dev", *tail],
                          tree=target, lockfile_sha256="", overrides={}, override_reason=None,
@@ -609,17 +668,17 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
     requires = build_requires(pyproject)
     root.mkdir(parents=True, exist_ok=True)
     root = root.resolve()
+    require_build_hash_uv(run, uv, root)
     target = root / name
     for leftover in stale_leftovers(root, name):
         print(f"  note: leftover of an aborted run, not used: {leftover}")
     chosen = {}
     with staged(root, name) as stage:
-        constraints = build_constraints(requires, stage, run, uv, check, min_age_days)
+        build_tools = build_constraints(requires, stage, run, uv, check, min_age_days)
         dependency = f"{package} @ git+{git_source}"
-        extra = ("build-constraint-dependencies = ["
-                 + ", ".join(f'"{c}"' for c in constraints) + "]\n")
         (stage / "pyproject.toml").write_text(
-            _pyproject(name, dependency, min_age_days, extra), encoding="utf-8")
+            _pyproject(name, dependency, min_age_days, git_uv_settings(build_tools)),
+            encoding="utf-8")
         (stage / ".gitignore").write_text(".venv/\n", encoding="utf-8")
         code, out = run([uv, "lock", "--no-build", "--default-index", INDEX], stage)
         if code != 0:
@@ -642,12 +701,10 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
             if result.code:
                 raise Refused(result.code, f"lockfile check for {package} failed (see above); "
                                            "the installed tree is unchanged")
-        no_build = [arg for e in entries for arg in ("--no-build-package", e.name)]
-
         def sync(tree: Path) -> None:
-            code, out = run([uv, "sync", "--locked", "--no-dev", *no_build], tree)
+            code, out = run(git_sync_command(uv, entries), tree)
             if code != 0:
-                raise Refused(2, f"uv sync failed:\n{_tail(out)}")
+                raise git_sync_failure(package, out)
             if (tree / LOCKFILE).read_bytes() != lock_bytes:
                 raise Refused(2, "uv sync changed uv.lock; the checked tree is not what was built")
             if module:

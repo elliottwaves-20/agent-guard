@@ -434,10 +434,17 @@ def git_lock(root, sha=SHA, repo="https://github.com/example/mcp", query_extra="
             f'wheels = [{{ url = "{FILES}/anyio-4.0.0-py3-none-any.whl", hash = "sha256:{"f" * 64}" }}]\n')
 
 
+def hashed(*pins):
+    """`uv pip compile --generate-hashes` output for name==version pins."""
+    return "".join(f"{pin} \\\n    --hash=sha256:{str(i) * 64}\n    # via -r build-requires.in\n"
+                   for i, pin in enumerate(pins, 1))
+
+
 class FakeGitUv:
-    def __init__(self, compiled="setuptools==80.9.0\n    # via -r build-requires.in\n",
-                 lock_rc=0, lock_text=None, sync_rc=0, scripts=None):
-        self.compiled = compiled
+    def __init__(self, compiled=None, lock_rc=0, lock_text=None, sync_rc=0, scripts=None,
+                 version="uv 0.13.10 (e3e7c1eac 2026-11-24 x86_64-pc-windows-msvc)\n"):
+        self.compiled = compiled if compiled is not None else hashed("setuptools==80.9.0")
+        self.version = version
         self.lock_rc = lock_rc
         self.lock_text = lock_text
         self.sync_rc = sync_rc
@@ -447,6 +454,8 @@ class FakeGitUv:
     def __call__(self, cmd, cwd):
         self.commands.append(list(cmd))
         cwd = Path(cwd)
+        if cmd[1:] == ["--version"]:
+            return 0, self.version
         if cmd[1:3] == ["pip", "compile"]:
             self.requires = (cwd / cmd[3]).read_text(encoding="utf-8")
             out = cmd[cmd.index("-o") + 1]
@@ -654,22 +663,46 @@ class GitInstall(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
 
     def test_build_constraints_are_checked_and_written(self):
-        uv = FakeGitUv(compiled="hatchling==1.27.0\npathspec==0.12.1\n")
+        uv = FakeGitUv(compiled=hashed("hatchling==1.27.0", "pathspec==0.12.1"))
         checks = []
 
         def check(entries, **_kw):
-            checks.append([(e.label, e.all_files) for e in entries])
+            checks.append([(e.label, e.hashes, e.all_files) for e in entries])
             return lockcheck.Result(0, ["ok"])
         self.install(uv=uv, check=check)
         self.assertEqual(uv.requires.splitlines(), ["hatchling>=1.20"])
-        self.assertEqual(checks[0], [("hatchling@1.27.0", True), ("pathspec@0.12.1", True)])
+        self.assertEqual(checks[0], [("hatchling@1.27.0", ("1" * 64,), False),
+                                     ("pathspec@0.12.1", ("2" * 64,), False)])
         compile_cmd = next(c for c in uv.commands if c[1:3] == ["pip", "compile"])
-        for flag in ("--no-build", "--exclude-newer", "7 days", "--default-index"):
+        for flag in ("--no-build", "--generate-hashes", "--exclude-newer", "7 days",
+                     "--default-index"):
             self.assertIn(flag, compile_cmd)
         lib = importlib.import_module("tomllib")
         data = lib.loads((self.root / "ex" / "pyproject.toml").read_text(encoding="utf-8"))
-        self.assertEqual(data["tool"]["uv"]["build-constraint-dependencies"],
-                         ["hatchling==1.27.0", "pathspec==0.12.1"])
+        settings = data["tool"]["uv"]
+        self.assertEqual(settings["build-constraint-dependencies"],
+                         [{"requirement": "hatchling==1.27.0", "hashes": ["sha256:" + "1" * 64]},
+                          {"requirement": "pathspec==0.12.1", "hashes": ["sha256:" + "2" * 64]}])
+        self.assertIs(settings["require-build-hashes"], True)
+        self.assertEqual(settings["preview-features"], ["build-dependency-hashes"])
+
+    def test_unhashed_build_tools_have_no_verdict(self):
+        uv = FakeGitUv(compiled="setuptools==80.9.0\n")
+        with self.assertRaises(locked.Refused) as ctx:
+            self.install(uv=uv)
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("no SHA-256 hash", str(ctx.exception))
+        self.assertFalse(any(c[1] == "lock" for c in uv.commands))
+
+    def test_uv_without_build_hashes_is_refused_before_any_build(self):
+        for version in ("uv 0.12.9 (abc 2026-10-01)\n", "uv 0.9.30\n", "not uv\n"):
+            with self.subTest(version=version):
+                uv = FakeGitUv(version=version)
+                with self.assertRaises(locked.Refused) as ctx:
+                    self.install(uv=uv)
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertEqual(uv.commands, [["C:/uv/uv.exe", "--version"]])
+        self.install(uv=FakeGitUv(version="uv 0.13.0\n"))
 
     def test_git_build_constraints_follow_the_setting(self):
         uv = FakeGitUv()
@@ -756,8 +789,8 @@ class GitInstall(unittest.TestCase):
         uv = FakeGitUv()
         self.install(uv=uv)
         sync = next(c for c in uv.commands if c[1] == "sync")
-        self.assertEqual(sync[:5], ["C:/uv/uv.exe", "sync", "--locked", "--no-dev",
-                                    "--no-build-package"])
+        self.assertEqual(sync[:6], ["C:/uv/uv.exe", "sync", "--locked", "--no-dev",
+                                    "--no-cache", "--no-build-package"])
         pairs = [sync[i + 1] for i, a in enumerate(sync) if a == "--no-build-package"]
         self.assertEqual(pairs, ["anyio"])
         self.assertNotIn("--no-build", sync)
@@ -1493,6 +1526,108 @@ class PypiOverrideCli(unittest.TestCase):
         self.assertIn("--override-reason TEXT", text)
         self.assertIn("younger scanned security fix", text)
         self.assertIn("no trusted period", text)
+
+
+PROBE = "agent-guard-s3-probe"
+PROBE_BACKEND = '''from setuptools import build_meta as _meta
+
+
+def get_requires_for_build_wheel(config_settings=None):
+    return %r
+
+
+build_wheel = _meta.build_wheel
+build_sdist = _meta.build_sdist
+prepare_metadata_for_build_wheel = _meta.prepare_metadata_for_build_wheel
+'''
+
+
+@unittest.skipUnless(os.environ.get("AGENT_GUARD_INTEGRATION") == "1"
+                     and uv_mod._exe.which("uv") and uv_mod._exe.which("git"),
+                     "set AGENT_GUARD_INTEGRATION=1 with uv and git on PATH to build with real uv")
+class GitBuildHashesLive(unittest.TestCase):
+    """Unchecked backend build requirements: real uv, real PyPI, a local Git commit whose
+    in-tree backend asks for one more build tool. The settings and the sync
+    command come from _mcp_uv itself; only the Git URL is local, because
+    git_install accepts GitHub sources only."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+        self.uv = uv_mod._exe.which("uv")
+        self.run = locked.run_tool
+
+    def tearDown(self):
+        # No `uv cache clean`: it waits for the cache lock that any running
+        # `uv run` server holds. The probe wheel left in the uv cache is keyed
+        # by the temporary repository URL and never used again.
+        self.tmp.cleanup()
+
+    def probe_commit(self, extra_requires):
+        import subprocess
+        repo = self.base / "probe"
+        (repo / "_be").mkdir(parents=True)
+        (repo / "src" / "s3probe").mkdir(parents=True)
+        (repo / "pyproject.toml").write_text(
+            f'[project]\nname = "{PROBE}"\nversion = "0.1.0"\nrequires-python = ">=3.10"\n'
+            '[build-system]\nrequires = ["setuptools"]\nbuild-backend = "be"\n'
+            'backend-path = ["_be"]\n', encoding="utf-8")
+        (repo / "_be" / "be.py").write_text(PROBE_BACKEND % (extra_requires,), encoding="utf-8")
+        (repo / "src" / "s3probe" / "__init__.py").write_text("", encoding="utf-8")
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+               "-c", "core.autocrlf=false"]
+        for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "probe"]):
+            subprocess.run([*git, *cmd], cwd=repo, check=True, capture_output=True)
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                             capture_output=True, text=True).stdout.strip()
+        return f"{PROBE} @ git+{repo.as_uri()}@{sha}"
+
+    def tree(self, label, dependency, settings):
+        stage = self.base / label
+        stage.mkdir()
+        (stage / "pyproject.toml").write_text(uv_mod._pyproject("s3", dependency, 7, settings),
+                                              encoding="utf-8")
+        code, out = self.run([self.uv, "lock", "--no-build", "--default-index", uv_mod.INDEX],
+                             stage)
+        self.assertEqual(code, 0, out)
+        return stage
+
+    def build_tools(self):
+        stage = self.base / "tools"
+        stage.mkdir()
+        with redirect_stdout(io.StringIO()):
+            return uv_mod.build_constraints(["setuptools"], stage, self.run, self.uv,
+                                            lockcheck.check, 7)
+
+    def test_unchecked_backend_request_is_refused_even_after_an_earlier_build(self):
+        dependency = self.probe_commit(["six"])
+        tools = self.build_tools()
+        # An earlier build without the hash rule leaves a built wheel in the
+        # uv cache; uv does not check cached wheels again.
+        loose = self.tree("loose", dependency, 'build-constraint-dependencies = '
+                                               f'["setuptools=={tools[0].version}"]\n')
+        code, out = self.run([self.uv, "sync", "--locked", "--no-dev"], loose)
+        self.assertEqual(code, 0, out)
+        strict = self.tree("strict", dependency, uv_mod.git_uv_settings(tools))
+        code, out = self.run(uv_mod.git_sync_command(self.uv, []), strict)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("no trusted hash was provided for", out)
+        refused = uv_mod.git_sync_failure(PROBE, out)
+        self.assertEqual(refused.code, 2)
+        self.assertIn("six", str(refused))
+        self.assertIn("not installed", str(refused))
+
+    def test_pinned_and_hashed_build_tools_build_the_package(self):
+        dependency = self.probe_commit([])
+        tools = self.build_tools()
+        self.assertTrue(all(len(e.hashes) >= 1 for e in tools), tools)
+        strict = self.tree("strict", dependency, uv_mod.git_uv_settings(tools))
+        code, out = self.run(uv_mod.git_sync_command(self.uv, []), strict)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("Hash-checking", out)
+
+    def test_installed_uv_is_new_enough(self):
+        uv_mod.require_build_hash_uv(self.run, self.uv, self.base)
 
 
 if __name__ == "__main__":

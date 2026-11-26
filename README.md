@@ -781,7 +781,8 @@ python scripts/install_skill.py mcp-npm --package @scope/server --version 1.2.3
 python scripts/install_skill.py mcp-pypi --package mcp-server-time --version 2025.9.25
 
 # GitHub-only Python MCP: the commit must be at least 7 days on the default branch;
-# the build tools from [build-system] are pinned and checked as well
+# the build tools from [build-system] are pinned with hashes and checked as well
+# (needs uv 0.13.0 or newer)
 python scripts/install_skill.py mcp-git \
   --name "my-server" \
   --git-url "https://github.com/user/repo@<scanned-sha>" \
@@ -1073,7 +1074,6 @@ No scanner — not agent-guard, not the professional tools it wraps — can guar
 | `script` scan | **Static.** A second-stage payload the installer downloads at runtime is invisible; scan those URLs separately. |
 | SkillSpector static scans | Cannot see behavior that only appears at runtime (MCP: use `--sandbox`). Static-only mode (`AGENT_GUARD_STATIC_ONLY=1`) misses semantic attacks that pattern rules don't encode. |
 | Live MCP sandbox scan | Contains host-filesystem access and **records** every network destination, but does not stop the traffic while it happens: the registries stay reachable, and payloads inside an allowed TLS connection are not inspected. The LLM-based analysis is itself probabilistic. |
-| Locked `mcp-git` install | Pins and checks the build tools from `[build-system]` only. Requirements the build backend adds while building (`get_requires_for_build_wheel`, e.g. `setup_requires`) are resolved by uv during `uv sync` under the age limit alone, without advisory or hash check. |
 | Dynamic install analysis (`npm`/`pypi`) | Sees only what the package does during install, import and a short execution in the sandbox; code that waits for a date, a specific host or a user action stays silent. File accesses carry no process, so a file the package manager itself reads is excused in the install phase for every process. |
 
 Where a stage in a scan output has such a limit, the wrapper prints it inline (`LIMIT:` / `NOTE:` lines) — so the verdict and its caveat always travel together.
@@ -1202,9 +1202,12 @@ are refused.
 Limits: transitive packages and build tools generally get the lockfile check
 (advisories, age, registry hash). Each fast-lane fix also needs an individual
 SAFE scan. The dynamic install analysis of the top package installs and
-watches the whole tree. A build backend can request further build tools at
-build time (only Git sources build anything); those are limited by
-`exclude-newer`, not by the lockfile check. Git packages with dynamic metadata
+watches the whole tree. Only Git sources build anything, and their build gets
+only the pinned, hashed and checked build tools: a backend that asks for more
+at build time (`get_requires_for_build_wheel`, e.g. `setup_requires`) is
+refused with exit 2 (uv's `require-build-hashes`, a uv preview feature; every
+Git install builds without the uv cache, because uv does not check a cached
+build again). Git packages with dynamic metadata
 (`setuptools-scm`, `hatch-vcs`) cannot be locked without a build and get no
 verdict. PyPI packages that ship only platform wheels cannot be installed this
 way (the scanned file must be the installed one). `uv run --locked`
