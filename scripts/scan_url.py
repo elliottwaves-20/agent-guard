@@ -368,19 +368,20 @@ def record_receipt(kind: str, package: str, version: str, meta: dict, rc: int) -
     print(f"Scan receipt: {path}")
 
 
-def offer_locked_mcp_install(kind: str, package: str, version: str, dry_run: bool) -> None:
-    """After a SAFE package scan: the locked installer for exactly this version."""
+def offer_locked_mcp_install(kind: str, package: str, version: str, dry_run: bool) -> int:
+    """After a SAFE package scan: the locked installer for exactly this version.
+    Returns the exit code of the run: 0, or the refusal of a confirmed install."""
     sub = {"npm": "mcp-npm", "pypi": "mcp-pypi"}[kind]
     cmd = f"python scripts/install_skill.py {sub} --package {package} --version {version}"
     if dry_run:
         print(f"Install after SAFE verdict: {cmd} --dry-run")
-        return
+        return 0
     if not interactive():
         print(f"Install after SAFE verdict: {cmd}")
-        return
+        return 0
     if not confirm_install("[SAFE] MCP scan passed."):
         print("Install skipped by user.")
-        return
+        return 0
     selected = choose_install_tools()
     args = argparse.Namespace(package=package, version=version, name=None, override=[],
                               override_reason=None, bin=None, executable=None, secret=[],
@@ -391,6 +392,8 @@ def offer_locked_mcp_install(kind: str, package: str, version: str, dry_run: boo
             args, config=_skillspector.USER_CONFIG, env=os.environ, platform=sys.platform)
     except _mcp_locked.Refused as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        return exc.code
+    return 0
 
 
 def offer_remote_mcp_install(name: str, url: str, dry_run: bool) -> None:
@@ -412,23 +415,25 @@ def offer_remote_mcp_install(name: str, url: str, dry_run: bool) -> None:
     install_mcp(name, {"url": url}, dry=False, selected=selected)
 
 
-def offer_git_mcp_install(source: ResolvedSource, dry_run: bool) -> None:
+def offer_git_mcp_install(source: ResolvedSource, dry_run: bool) -> int:
+    """After a SAFE Git source scan: the locked mcp-git install of this commit.
+    Returns the exit code of the run: 0, or the refusal of a confirmed install."""
     if source.kind != "github" or not source.source_path or not source.install_hint:
         print("MCP source scan complete. Runtime sandbox and install command need "
               "an explicit launch command for this source.")
-        return
+        return 0
     package, script = infer_python_project(source.source_path)
     if not package:
         print("MCP source scan complete. No Python package metadata found for "
               "a locked mcp-git install; provide an explicit launch command.")
-        return
+        return 0
     from _mcp_uv import parse_git_url
     git_url = f"git+{source.install_hint}"
     try:
         parse_git_url(git_url)
     except _mcp_locked.Refused as exc:
         print(f"MCP source scan complete. Cannot offer a locked mcp-git install: {exc}")
-        return
+        return 0
     name = mcp_name_from_package(package)
     parts = [
         "python scripts/install_skill.py mcp-git",
@@ -441,19 +446,21 @@ def offer_git_mcp_install(source: ResolvedSource, dry_run: bool) -> None:
     cmd = " ".join(parts)
     if dry_run:
         print(f"Install after SAFE verdict: {cmd} --dry-run")
-        return
+        return 0
     if not interactive():
         print(f"Install after SAFE verdict: {cmd}")
-        return
+        return 0
     if not confirm_install("[SAFE] Git-backed MCP source scan passed."):
         print("Install skipped by user.")
-        return
+        return 0
     selected = choose_install_tools()
     try:
         install_mcp_git(name, git_url, package, dry=False, selected=selected,
                         executable=script, scanned_dir=source.repo_root or source.source_path)
     except _mcp_locked.Refused as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        return exc.code
+    return 0
 
 
 def package_page_from_command(command: str) -> tuple[str, str] | None:
@@ -730,7 +737,7 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
         package, _, version = pinned.partition("==")
         record_receipt("pypi", package, version, meta, receipt_verdict(stages))
         if rc == 0:
-            offer_locked_mcp_install("pypi", package, version, dry_run)
+            return offer_locked_mcp_install("pypi", package, version, dry_run)
         return rc
 
     if source.kind == "npm":
@@ -743,7 +750,7 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
         package, _, version = pinned.rpartition("@")
         record_receipt("npm", package, version, meta, receipt_verdict(stages))
         if rc == 0:
-            offer_locked_mcp_install("npm", package, version, dry_run)
+            return offer_locked_mcp_install("npm", package, version, dry_run)
         return rc
 
     path = source.source_path
@@ -813,7 +820,7 @@ def scan_resolved(source: ResolvedSource, kind: str, dry_run: bool,
                 record_receipt("git", git_scan_id(match.group(1).lower(), match.group(2).lower()),
                                match.group(3), {"archive_sha256": source.archive_sha256}, rc)
         if rc == 0:
-            offer_git_mcp_install(source, dry_run)
+            return offer_git_mcp_install(source, dry_run)
         return rc
 
     if kind == "unknown":

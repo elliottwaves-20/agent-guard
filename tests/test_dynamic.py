@@ -562,7 +562,7 @@ class UrlScanTests(unittest.TestCase):
         with patch.object(su, fetch, return_value=pinned), \
              patch.object(su, "run_mcp_static", return_value=0), \
              patch.object(su._dynamic, "run", return_value=dynamic_rc) as run, \
-             patch.object(su, "offer_locked_mcp_install") as offer, \
+             patch.object(su, "offer_locked_mcp_install", return_value=0) as offer, \
              redirect_stdout(io.StringIO()):
             code = su.scan_resolved(source, "auto", dry_run=True, **kw)
         return code, run, offer

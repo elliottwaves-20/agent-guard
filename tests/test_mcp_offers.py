@@ -121,6 +121,61 @@ class Offers(unittest.TestCase):
         self.assertIn("no receipt", out.getvalue())
 
 
+class ConfirmedOfferExit(unittest.TestCase):
+    """S5 (#29): a refusal of the real installer after a confirmed offer is the
+    exit code of the run. Only the terminal question and the user's answers are
+    replaced; the installer reads a real, empty install directory without a
+    scan receipt and refuses on its own."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.skillspector = importlib.import_module("_skillspector")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def confirmed(self, fn, *args, answer=True):
+        out = io.StringIO()
+        with patch.dict(self.skillspector.USER_CONFIG, {"mcp": {"install_dir": str(self.root)}}), \
+                patch.object(scan_url, "interactive", lambda: True), \
+                patch.object(scan_url, "confirm_install", lambda prompt: answer), \
+                patch.object(scan_url, "choose_install_tools", lambda: ["codex"]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = fn(*args)
+        return rc, out.getvalue()
+
+    def test_locked_offer_returns_the_installer_refusal(self):
+        for kind, package, version in (("npm", "is-number", "7.0.0"),
+                                       ("pypi", "mcp-server-time", "2025.9.25")):
+            with self.subTest(kind=kind):
+                rc, out = self.confirmed(scan_url.offer_locked_mcp_install,
+                                         kind, package, version, False)
+                self.assertEqual(rc, 2, out)
+                self.assertIn("ERROR:", out)
+                self.assertFalse((self.root / package).exists())
+
+    def test_git_offer_returns_the_installer_refusal(self):
+        with tempfile.TemporaryDirectory() as src:
+            (Path(src) / "pyproject.toml").write_text(
+                '[project]\nname = "example-mcp"\n[project.scripts]\nex = "e:main"\n',
+                encoding="utf-8")
+            source = resolver.ResolvedSource(kind="github", source_path=Path(src),
+                                             install_hint="https://github.com/o/r@" + "a" * 40)
+            rc, out = self.confirmed(scan_url.offer_git_mcp_install, source, False)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("ERROR:", out)
+        self.assertFalse((self.root / "example-mcp").exists())
+
+    def test_offers_without_install_return_zero(self):
+        rc, out = self.confirmed(scan_url.offer_locked_mcp_install, "npm", "is-number", "7.0.0", True)
+        self.assertEqual(rc, 0, out)
+        rc, out = self.confirmed(scan_url.offer_locked_mcp_install,
+                                 "npm", "is-number", "7.0.0", False, answer=False)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Install skipped by user.", out)
+
+
 class ReceiptVerdictTests(unittest.TestCase):
     def test_requires_a_verdict_from_every_stage(self):
         for stages, want in (
@@ -234,6 +289,34 @@ class RealScanReceipts(unittest.TestCase):
         self.assertEqual((data["verdict"], data["integrity"], data["archive_sha256"]),
                          ("BLOCK", sri(bad_data), hashlib.sha256(bad_data).hexdigest()))
         self.assertNotIn("install_skill.py mcp-npm", out)
+
+    def test_refused_install_after_confirmed_offer_is_the_exit_of_the_run(self):
+        """S5 (#29): real scan_resolved -> real SkillSpector SAFE -> confirmed
+        offer -> real installer. The npm name allows '~', an MCP server name
+        does not, so the installer refuses on its own; the run must end with
+        that refusal, not with the SAFE scan exit."""
+        data = tarball()
+        package, version = "@s/x~y", "1.2.3"
+        meta_json = {"versions": {version: {"dist": {
+            "tarball": "https://registry.npmjs.org/@s/x~y/-/x~y-1.2.3.tgz",
+            "integrity": sri(data),
+        }}}}
+        source = resolver.ResolvedSource(kind="npm", install_hint=f"{package}@{version}",
+                                         label="npm")
+        out = io.StringIO()
+        with patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}), \
+                patch.multiple(self.skillspector, **self._static_only_llm()), \
+                patch.dict(self.skillspector.USER_CONFIG, {"mcp": {"install_dir": str(self.root)}}), \
+                patch.object(scan_mcp, "http_json", lambda url: meta_json), \
+                patch.object(scan_mcp, "http_bytes", lambda url: data), \
+                patch.object(scan_url, "interactive", lambda: True), \
+                patch.object(scan_url, "confirm_install", lambda prompt: True), \
+                patch.object(scan_url, "choose_install_tools", lambda: ["codex"]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = scan_url.scan_resolved(source, "auto", dry_run=False, dynamic=False)
+        self.assertIn("[SAFE]", out.getvalue())
+        self.assertIn("invalid MCP server name", out.getvalue())
+        self.assertEqual(rc, 2, out.getvalue())
 
     def test_stage_without_verdict_writes_no_receipt_even_beside_block(self):
         """K1: no verdict cannot be accepted. A real static BLOCK beside a real
@@ -368,7 +451,7 @@ class RealScanReceipts(unittest.TestCase):
                     patch.object(scan_url, "install_mcp_git", side_effect=install), \
                     contextlib.redirect_stdout(io.StringIO()), \
                     contextlib.redirect_stderr(io.StringIO()):
-                scan_url.offer_git_mcp_install(source, dry_run=False)
+                self.assertEqual(scan_url.offer_git_mcp_install(source, dry_run=False), 0)
             self.assertEqual(uv.requires.strip(), "setuptools>=70")
             self.assertTrue((self.root / "example-mcp" / "uv.lock").is_file())
 
