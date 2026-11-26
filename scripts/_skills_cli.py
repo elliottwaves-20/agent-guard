@@ -123,8 +123,13 @@ def hardened_env() -> dict:
     `npm_config_ignore_scripts` stops npm from running any lifecycle script
     (the pinned package declares `"prepare": "husky"`, which npm would not run
     for a registry tarball anyway -- this makes that structural instead of
-    circumstantial)."""
+    circumstantial).
+
+    The child never resolves a program through the working directory
+    (CWE-427): only anchored PATH entries, and on Windows
+    NoDefaultCurrentDirectoryInExePath, which the allowlist would drop."""
     env = {k: v for k, v in os.environ.items() if k.upper() in ENV_ALLOWLIST}
+    _exe.harden_environ(env)
     env["npm_config_ignore_scripts"] = "true"
     env["NO_COLOR"] = "1"
     return env

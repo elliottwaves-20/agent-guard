@@ -189,6 +189,29 @@ class InvocationTests(unittest.TestCase):
             self.assertNotIn(name, env)
         self.assertIn("PATH", env)
 
+    @unittest.skipUnless(os.name == "nt", "only Windows searches the working directory")
+    def test_delegated_environment_never_runs_a_program_from_the_working_directory(self):
+        # CWE-427, real child process: a program planted in the working
+        # directory or in a relative PATH entry must not start, also when this
+        # process was never hardened (variable absent).
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "sub").mkdir()
+            (work / "agplanted.cmd").write_text("@echo PLANTED-CWD\r\n", encoding="ascii")
+            (work / "sub" / "agrelative.cmd").write_text("@echo PLANTED-REL\r\n", encoding="ascii")
+            system32 = str(Path(os.environ["SYSTEMROOT"]) / "System32")
+            path = os.pathsep.join(["", "sub", system32])
+            with patch.dict(os.environ, {"PATH": path}, clear=False):
+                os.environ.pop("NoDefaultCurrentDirectoryInExePath", None)
+                env = cli.hardened_env()
+            cmd = str(Path(system32) / "cmd.exe")
+            for probe in ("agplanted", "agrelative"):
+                result = subprocess.run([cmd, "/d", "/c", probe], cwd=work, env=env,
+                                        capture_output=True, text=True, timeout=60)
+                self.assertNotIn("PLANTED", result.stdout, probe)
+                self.assertNotEqual(result.returncode, 0, probe)
+            self.assertEqual(env["PATH"].split(os.pathsep), [system32])
+
     def test_dry_run_never_starts_the_cli(self):
         def boom(*args, **kwargs):
             raise AssertionError("dry run executed the CLI")

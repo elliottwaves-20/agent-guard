@@ -12,7 +12,9 @@
   scanner's rights. Programs are now looked up only in absolute PATH entries
   (on Windows with a drive letter or UNC share, so `\Tools` does not count;
   PATHEXT applied the same way on every supported Python, `scripts/_exe.py`); every wrapper starts with such a PATH and the switch
-  set, which the scanners and their child processes inherit. The
+  set, which the scanners and their child processes inherit; the reduced,
+  credential-free environment of npm, uv, the `skills` CLI and the
+  `[mcp] register` command sets both again instead of dropping the switch. The
   `mcpscanner`, VirusTotal and `llm_check.py --probe` helpers run isolated
   (`-I`), so a `mcpscanner.py`, `json.py` or `litellm.py` in the working
   directory is not imported. `audit_installed.py --execute` runs its own
