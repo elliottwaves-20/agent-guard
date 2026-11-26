@@ -96,7 +96,9 @@
 - `[mcp] register`: hand a finished locked install to your own command
   (argv, no shell, no credentials in its environment) instead of writing
   agent configs, and `install_skill.py mcp-register <tree>` to repeat a
-  failed handoff. `--secret NAME` names keys a server needs (names only,
+  failed handoff, only for a tree directly under `[mcp] install_dir` (a
+  foreign folder with its own `agent-guard-register.json` is refused, exit 2).
+  `--secret NAME` names keys a server needs (names only,
   never values).
 - Registration failures after a successful locked install, including invalid
   agent JSON, report "installed but not registered" and exit 2 in text and

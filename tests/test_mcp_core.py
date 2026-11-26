@@ -480,6 +480,40 @@ class Register(unittest.TestCase):
         with self.assertRaises(locked.Refused):
             locked.rerun_register(self.tree, self.settings(), run=FakeRegister())
 
+    def test_mcp_register_only_repeats_trees_of_the_install_directory(self):
+        # Real register process: it leaves a marker file when it is started.
+        # A folder outside [mcp] install_dir names its own tree in its handoff
+        # file, so only the location can tell it apart.
+        base = Path(self.tmp.name)
+        marker = base / "register-ran"
+        script = base / "register_probe.py"
+        script.write_text("import pathlib, sys\n"
+                          f"pathlib.Path({str(marker)!r}).write_text(sys.argv[-1])\n",
+                          encoding="utf-8")
+        settings = self.settings(register=(sys.executable, "-I", str(script)), timeout=60)
+        foreign = base / "foreign"
+        nested = self.tree / "inner"
+        foreign.mkdir()
+        nested.mkdir()
+        candidates = {"outside": foreign, "nested": nested,
+                      "install_dir itself": settings.install_dir}
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(foreign), str(settings.install_dir / "jsrv"))
+            candidates["junction to outside"] = settings.install_dir / "jsrv"
+        for label, tree in candidates.items():
+            with self.subTest(label):
+                (tree / locked.REGISTER_FILE).write_text(json.dumps({
+                    "version": 1, "name": "evil", "tree": str(tree), "command": "evil.exe",
+                    "args": []}), encoding="utf-8")
+                with self.assertRaises(locked.Refused) as ctx:
+                    locked.rerun_register(tree, settings)
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertFalse(marker.exists(), "register command ran")
+        self.deliver(self.settings(register=("never-started",)), run=FakeRegister())
+        self.assertEqual(locked.rerun_register(self.tree, settings), 0)
+        self.assertEqual(marker.read_text(), str(self.tree / locked.REGISTER_FILE))
+
     def test_mcp_register_without_register_setting_is_refused(self):
         self.deliver(self.settings(), run=FakeRegister())
         with self.assertRaises(locked.Refused) as ctx:

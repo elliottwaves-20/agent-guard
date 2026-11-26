@@ -831,7 +831,9 @@ environment, for a machine that registers MCP servers with its own tooling.
 If registration fails after the tree is installed, the installer reports
 "installed but not registered" and exits 2. The installed tree is kept.
 `python scripts/install_skill.py mcp-register <tree>` repeats a configured
-handoff. If writing an agent config failed, fix the config and rerun the
+handoff; it accepts only a tree directly under `[mcp] install_dir` (links
+resolved), because the handoff file inside a folder cannot vouch for itself,
+and refuses anything else with exit 2. If writing an agent config failed, fix the config and rerun the
 locked installer. Unknown keys in `[mcp]` stop the installer (exit 2).
 
 Set the age and fast-lane policy with command-line flags.

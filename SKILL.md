@@ -655,7 +655,8 @@ with `--override-reason` (npm and PyPI), `--secret NAME` (key name only),
 `--accept "<reason>"` for a reviewed BLOCK of exactly this version, `--tools`,
 `--dry-run`. With `[mcp] register = [...]` in the config the installer writes
 no agent config but hands `agent-guard-register.json` to that command. Retry
-a configured handoff with `python "$INSTALLER" mcp-register <tree>`.
+a configured handoff with `python "$INSTALLER" mcp-register <tree>`; only a
+tree directly under `[mcp] install_dir` is accepted (else exit 2).
 If registration fails after install, the tree stays in place. The installer
 reports installed but not registered and gives exit 2. If writing an agent
 config failed, fix the config and rerun the locked installer.

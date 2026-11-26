@@ -654,6 +654,13 @@ def rerun_register(tree: Path, settings: Settings, run=None) -> int:
     if settings.register is None:
         raise Refused(2, "[mcp] register is not set; nothing to repeat")
     tree = Path(tree)
+    # The handoff file names its own tree, so only the location vouches for it:
+    # agent-guard writes trees only as <install_dir>/<name> (links resolved).
+    resolved, root = tree.resolve(), Path(settings.install_dir).resolve()
+    if (os.path.normcase(str(resolved.parent)) != os.path.normcase(str(root))
+            or not NAME_RE.fullmatch(resolved.name)):
+        raise Refused(2, f"{tree} is not an installed tree directly under "
+                         f"[mcp] install_dir {settings.install_dir}")
     path = tree / REGISTER_FILE
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
