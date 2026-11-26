@@ -318,6 +318,61 @@ class RealScanReceipts(unittest.TestCase):
         self.assertIn("invalid MCP server name", out.getvalue())
         self.assertEqual(rc, 2, out.getvalue())
 
+    def confirmed_scan(self, source, kind, network=()):
+        """Real scan_resolved with real SkillSpector under the static-only policy;
+        the network (passed in) and the terminal answers are replaced."""
+        out = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {"AGENT_GUARD_STATIC_ONLY": "1"}))
+            stack.enter_context(patch.multiple(self.skillspector, **self._static_only_llm()))
+            stack.enter_context(patch.dict(self.skillspector.USER_CONFIG,
+                                           {"mcp": {"install_dir": str(self.root)}}))
+            for obj, attr, value in network:
+                stack.enter_context(patch.object(obj, attr, value))
+            stack.enter_context(patch.object(scan_url, "interactive", lambda: True))
+            stack.enter_context(patch.object(scan_url, "confirm_install", lambda prompt: True))
+            stack.enter_context(patch.object(scan_url, "choose_install_tools", lambda: ["codex"]))
+            stack.enter_context(contextlib.redirect_stdout(out))
+            stack.enter_context(contextlib.redirect_stderr(out))
+            rc = scan_url.scan_resolved(source, kind, dry_run=False, dynamic=False)
+        return rc, out.getvalue()
+
+    def test_refused_pypi_install_after_confirmed_offer_is_the_exit_of_the_run(self):
+        """S5 (#29): PyPI accepts the version string of the index, the locked
+        installer only an exact public PEP 440 version, so it refuses on its own."""
+        data = wheel()
+        version = "1.0+local"
+        pypi_meta = {"info": {"version": version}, "releases": {version: [{
+            "packagetype": "bdist_wheel",
+            "url": "https://files.example/x-1.0+local-py3-none-any.whl",
+            "filename": "x-1.0+local-py3-none-any.whl",
+            "digests": {"sha256": hashlib.sha256(data).hexdigest()},
+        }]}}
+        source = resolver.ResolvedSource(kind="pypi", install_hint=f"x=={version}", label="pypi")
+        rc, out = self.confirmed_scan(source, "auto", network=(
+            (scan_mcp, "http_json", lambda url: pypi_meta),
+            (scan_mcp, "http_bytes", lambda url: data)))
+        self.assertIn("[SAFE]", out)
+        self.assertIn("invalid version '1.0+local'", out)
+        self.assertEqual(rc, 2, out)
+
+    def test_refused_git_install_after_confirmed_offer_is_the_exit_of_the_run(self):
+        """S5 (#29): the scan takes the first [project.scripts] key as the
+        executable; the locked installer refuses a name that is no entry point."""
+        sha = "a" * 40
+        with tempfile.TemporaryDirectory() as src:
+            (Path(src) / "pyproject.toml").write_text(
+                '[project]\nname = "example-mcp"\n'
+                '[project.scripts]\n"ex server" = "ex:main"\n', encoding="utf-8")
+            (Path(src) / "ex.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+            source = resolver.ResolvedSource(kind="github", source_path=Path(src),
+                                             install_hint=f"https://github.com/o/r@{sha}",
+                                             archive_sha256="cd" * 32)
+            rc, out = self.confirmed_scan(source, "mcp-source")
+        self.assertIn("[SAFE]", out)
+        self.assertIn("invalid --executable 'ex server'", out)
+        self.assertEqual(rc, 2, out)
+
     def test_stage_without_verdict_writes_no_receipt_even_beside_block(self):
         """K1: no verdict cannot be accepted. A real static BLOCK beside a real
         dynamic NO VERDICT (Docker missing) keeps exit 1 so findings stay visible
