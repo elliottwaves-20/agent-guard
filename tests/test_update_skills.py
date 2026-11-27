@@ -553,16 +553,36 @@ class NoVerdictReviewTests(unittest.TestCase):
 
 class StagingBoundaryTests(unittest.TestCase):
     def test_unknown_lock_version_stops(self):
+        for version in (1, 3):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as tmp:
+                Path(tmp, "skills-lock.json").write_text(json.dumps({"version": version, "skills": {}}))
+                with self.assertRaises(staging.StageError):
+                    staging.read_stage_lock(Path(tmp))
+
+    def _stage_with_lock(self, work, lock):
+        (work / "skills-lock.json").write_text(json.dumps(lock))
+        done = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch.object(staging._skills_cli, "npx_path", return_value="npx"), \
+             patch.object(staging._skills_cli, "verify_pinned_package", return_value=True), \
+             patch.object(staging, "run_bounded", return_value=done):
+            return staging.stage("o/r", REF, ["alpha"], work)
+
+    def test_stage_reads_the_lock_the_pinned_cli_writes(self):
+        # Shape written by skills 1.9.0 (lock version 2), from a real staging run.
         with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, "skills-lock.json").write_text(json.dumps({"version": 2, "skills": {}}))
-            with self.assertRaises(staging.StageError):
-                staging.read_stage_lock(Path(tmp))
+            work = Path(tmp)
+            write_skill(work / ".agents" / "skills" / "alpha", "v1")
+            staged = self._stage_with_lock(work, {"version": 2, "skills": {"alpha": {
+                "source": "o/r", "ref": REF, "commit": REF, "sourceType": "github",
+                "skillPath": "alpha/SKILL.md", "computedHash": "0" * 64}}})
+            self.assertEqual(list(staged), ["alpha"])
+            self.assertEqual(staged["alpha"].path, work / ".agents" / "skills" / "alpha")
 
     def test_stage_rejects_a_ref_other_than_requested(self):
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
             write_skill(work / ".agents" / "skills" / "alpha", "v1")
-            (work / "skills-lock.json").write_text(json.dumps({"version": 1, "skills": {
+            (work / "skills-lock.json").write_text(json.dumps({"version": 2, "skills": {
                 "alpha": {"source": "o/r", "ref": REF2, "sourceType": "github"}}}))
             done = SimpleNamespace(returncode=0, stdout="", stderr="")
             with patch.object(staging._skills_cli, "npx_path", return_value="npx"), \

@@ -30,7 +30,9 @@ import _skills_cli
 from _skillspector import run_bounded
 
 LOCK_FILE = "skills-lock.json"
-LOCK_VERSION = 1
+# Project lock format the pinned skills CLI writes (2 since skills 1.9.0; the
+# global ~/.agents/.skill-lock.json stays at 3). Re-check on every pin bump.
+LOCK_VERSION = 2
 GLOBAL_LOCK_VERSION = 3
 STAGE_TIMEOUT = float(os.environ.get("AGENT_GUARD_STAGE_TIMEOUT", "600"))
 
