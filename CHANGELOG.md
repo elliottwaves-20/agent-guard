@@ -29,16 +29,26 @@
   hosts before a verdict, and keeps the CLI from reaching machine `gh`/`git`
   logins. The lock check verifies `sourceType: "local"` against the extracted
   archive directory.
+- Dynamic install analysis (`scripts/_dynamic.py`) now builds a thin local
+  overlay on top of the digest-pinned OpenSSF `rel-38` analysis image that
+  upgrades gVisor `runsc` from `20260216.0` to `release-20261116.0` from
+  gVisor's signed APT repository, closing CVE-2026-95702 (VFS use-after-free in
+  gVisor `< 20260831.0`). The inner sandbox image is now pinned to
+  `-image-tag rel-38` instead of the moving `:latest` tag.
+  `scripts/check_image_pins.py` also tracks new `google/gvisor` releases under
+  the 7-day age rule.
 
 ### Known limitations
 
-- The dynamic install analysis still runs the OpenSSF package-analysis image
-  of 2026-05-20 (rel-38, pinned by digest). govulncheck (`-mode=binary`)
-  reports reachable known vulnerabilities in the Go programs it ships:
-  `analyze` (34), `podman` (116) and gVisor `runsc` release-20260216.0 (2).
-  None of them lets the analysed package leave gVisor; the worst case is a
-  crash, which ends the scan without a verdict (exit 2). How the image will
-  be updated (gVisor, podman or the whole image) is still open; see #30.
+- The dynamic install analysis still runs on the OpenSSF package-analysis base
+  image of 2026-05-20 (`rel-38`, Ubuntu 22.04, pinned by digest). While gVisor
+  `runsc` is now upgraded to `release-20261116.0`, `govulncheck`
+  (`-mode=binary`) still reports known vulnerabilities in `analyze` (34) and
+  `podman` 3.4.4 (116) outside the gVisor boundary. Input from the analysed
+  package reaches only the packet decoders of `analyze` (gopacket); their worst
+  case is an out-of-memory abort, which gives NO VERDICT, never a false SAFE.
+  Ubuntu 22.04 standard support ends in April 2027. Replacing `podman` or moving to a slim
+  own build is tracked in #30.
 
 ## 0.6.0 - 2026-11-27
 

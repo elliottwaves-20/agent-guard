@@ -25,6 +25,7 @@ class VersionTests(unittest.TestCase):
     def test_parse_version_accepts_plain_and_v_prefixed_tags(self):
         self.assertEqual(cip.parse_version("v3.10.0"), (3, 10, 0))
         self.assertEqual(cip.parse_version("1.28.0"), (1, 28, 0))
+        self.assertEqual(cip.parse_version("release-20261116.0"), (20261116, 0))
 
     def test_parse_version_rejects_prerelease_suffixes(self):
         self.assertIsNone(cip.parse_version("v3.0.0a2"))
@@ -98,6 +99,23 @@ class CheckTests(unittest.TestCase):
         rc, out = self.run_check(fetch_wait)
         self.assertEqual(rc, 1)
         self.assertIn("[WAIT] uv (MCP sandbox) 99.0.1 released", out)
+
+    def test_gvisor_reports_release_prefixed_update_and_wait(self):
+        def fetch_update(repo):
+            if repo == "google/gvisor":
+                return [rel("release-20991231.0", 10)]
+            return [rel(cip.SCANNERS[repo][1], 30)]
+        rc, out = self.run_check(fetch_update)
+        self.assertEqual(rc, 1)
+        self.assertIn("[UPDATE] gVisor runsc (dynamic analysis) 20991231.0 can be pinned", out)
+
+        def fetch_wait(repo):
+            if repo == "google/gvisor":
+                return [rel("release-20991231.1", 1)]
+            return [rel(cip.SCANNERS[repo][1], 30)]
+        rc, out = self.run_check(fetch_wait)
+        self.assertEqual(rc, 1)
+        self.assertIn("[WAIT] gVisor runsc (dynamic analysis) 20991231.1 released", out)
 
 
     def test_up_to_date_exits_zero(self):
@@ -227,7 +245,8 @@ class LivePinContractTests(unittest.TestCase):
         text = out.getvalue()
         self.assertIn(rc, (0, 1), text)
         expected = ("Node.js (MCP sandbox)", "Python (MCP sandbox)",
-                    "GuardDog", "malcontent", "uv (MCP sandbox)")
+                    "GuardDog", "malcontent", "uv (MCP sandbox)",
+                    "gVisor runsc (dynamic analysis)")
         lines = [line for line in text.splitlines() if line.strip()]
         self.assertGreaterEqual(len(lines), len(expected))
         for entry in lines:

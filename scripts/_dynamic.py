@@ -26,6 +26,7 @@ nothing worth stealing); what it contacts is what this stage reports.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -37,11 +38,27 @@ from pathlib import Path
 
 import _egress
 import _exe
+import _pins
 from _skillspector import run_bounded
 
-# OpenSSF package-analysis, analysis image of 2026-05-20, pinned by digest.
-IMAGE = ("gcr.io/ossf-malware-analysis/analysis@sha256:"
-         "1f3104f3f0cfddeaf62f0952d663e129cb5efe38486766e676fb926fa84c4c27")
+# OpenSSF package-analysis base image (rel-38, 2026-05-20), pinned by digest,
+# overlaid locally with the pinned gVisor runsc release (scripts/_pins.py).
+BASE_IMAGE = _pins.DYNAMIC_BASE_IMAGE
+SANDBOX_TAG = _pins.DYNAMIC_SANDBOX_TAG
+GVISOR_VERSION = _pins.DYNAMIC_GVISOR_VERSION
+GVISOR_SUITE = GVISOR_VERSION.split(".", 1)[0]
+DOCKER_IMAGE = "agent-guard-dynamic-analysis"
+DYNAMIC_DOCKERFILE = (
+    f"FROM {BASE_IMAGE}\n"
+    f'RUN echo "deb [signed-by=/etc/apt/keyrings/gvisor.key] '
+    f'https://storage.googleapis.com/gvisor/releases {GVISOR_SUITE} main" '
+    f"> /etc/apt/sources.list.d/gvisor.list \\\n"
+    f' && apt-get update -o Dir::Etc::sourcelist="sources.list.d/gvisor.list" '
+    f'-o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" \\\n'
+    f" && apt-get install -y runsc={GVISOR_VERSION} \\\n"
+    f' && runsc --version | grep -Fq "release-{GVISOR_VERSION}" \\\n'
+    f" && rm -rf /var/lib/apt/lists/*\n"
+)
 # The analysis image pulls its per-ecosystem sandbox images into this volume;
 # keeping it makes every run after the first take seconds instead of minutes.
 CACHE_VOLUME = "agent-guard-dynamic-cache"
@@ -262,8 +279,38 @@ def verdict(report: Report) -> int:
 
 # -- running the analysis ---------------------------------------------------------
 
+def analysis_image() -> str:
+    digest = hashlib.sha256(DYNAMIC_DOCKERFILE.encode("utf-8")).hexdigest()[:12]
+    return f"{DOCKER_IMAGE}:{digest}"
+
+
+def build_analysis_image() -> str:
+    tag = analysis_image()
+    try:
+        have = subprocess.run(["docker", "image", "inspect", tag],
+                              capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=60)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"docker image inspect timed out after {exc.timeout}s") from exc
+    if have.returncode == 0:
+        return tag
+    print(f"  building dynamic analysis image with gVisor runsc {GVISOR_VERSION} (one-time)...")
+    with tempfile.TemporaryDirectory(prefix="agent-guard-dynamic-build-") as d:
+        (Path(d) / "Dockerfile").write_text(DYNAMIC_DOCKERFILE, encoding="utf-8")
+        try:
+            proc = subprocess.run(["docker", "build", "-t", tag, d],
+                                  capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"dynamic analysis image build timed out after {exc.timeout}s") from exc
+        if proc.returncode != 0:
+            tail = ((proc.stderr or "") + (proc.stdout or "")).strip()[-1000:]
+            raise RuntimeError(f"dynamic analysis image build failed (exit {proc.returncode}): {tail}")
+    return tag
+
+
 def docker_argv(ecosystem: str, name: str, version: str | None, out: Path,
-                container: str = "agent-guard-dynamic") -> list:
+                container: str = "agent-guard-dynamic", image: str | None = None) -> list:
     argv = ["docker", "run", "--cgroupns=host", "--privileged", "--rm", "--name", container,
             "-v", f"{CACHE_VOLUME}:/var/lib/containers", "-v", "/tmp",
             "-v", f"{out / 'results'}:/results",
@@ -271,10 +318,11 @@ def docker_argv(ecosystem: str, name: str, version: str | None, out: Path,
             "-v", f"{out / 'writes'}:/writeResults",
             "-v", f"{out / 'analyzed'}:/analyzedPackages",
             "-v", f"{out / 'strace'}:/straceLogs",
-            IMAGE, "analyze", "-ecosystem", ecosystem, "-package", name]
+            image or analysis_image(), "analyze", "-ecosystem", ecosystem, "-package", name]
     if version:
         argv += ["-version", version]
-    argv += ["-dynamic-bucket", "file:///results/", "-file-writes-bucket", "file:///writeResults/",
+    argv += ["-image-tag", SANDBOX_TAG,
+             "-dynamic-bucket", "file:///results/", "-file-writes-bucket", "file:///writeResults/",
              "-static-bucket", "file:///staticResults/",
              "-analyzed-pkg-bucket", "file:///analyzedPackages/",
              "-execution-log-bucket", "file:///results"]
@@ -303,6 +351,10 @@ def run(ecosystem: str, spec: str, allow_hosts=()) -> int:
         _egress.parse_allow(allow_hosts)
     except ValueError as exc:
         return _no_verdict(str(exc))
+    try:
+        image = build_analysis_image()
+    except (OSError, RuntimeError) as exc:
+        return _no_verdict(str(exc))
     name, version = split_spec(ecosystem, spec)
     container = "agent-guard-dynamic-" + uuid.uuid4().hex
     print(f"  dynamic install analysis in OpenSSF sandbox ({ecosystem} {name}"
@@ -312,7 +364,7 @@ def run(ecosystem: str, spec: str, allow_hosts=()) -> int:
         for sub in ("results", "static", "writes", "analyzed", "strace"):
             (out / sub).mkdir()
         try:
-            proc = run_bounded(docker_argv(ecosystem, name, version, out, container),
+            proc = run_bounded(docker_argv(ecosystem, name, version, out, container, image=image),
                                timeout=TIMEOUT)
         except subprocess.TimeoutExpired:
             _remove(container)

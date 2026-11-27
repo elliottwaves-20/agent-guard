@@ -48,6 +48,7 @@ SCANNERS = {
     "DataDog/guarddog": ("GuardDog", _pins.GUARDDOG_VERSION),
     "chainguard-dev/malcontent": ("malcontent", _pins.MALCONTENT_VERSION),
     "astral-sh/uv": ("uv (MCP sandbox)", _pins.SANDBOX_UV),
+    "google/gvisor": ("gVisor runsc (dynamic analysis)", _pins.DYNAMIC_GVISOR_VERSION),
 }
 # endoflife.date product -> (display name, pinned version) of the MCP sandbox
 # runtimes. Reported: a newer patch of the pinned line, and its end of life.
@@ -58,7 +59,7 @@ RUNTIMES = {
 EOL_WARNING = timedelta(days=90)
 # Packages that only the -dev variant (with a shell) carries.
 DEV_ONLY_PACKAGES = ("busybox", "apk-tools", "bash")
-_VERSION = re.compile(r"^v?(\d+(?:\.\d+)*)$")
+_VERSION = re.compile(r"^(?:v|release-)?(\d+(?:\.\d+)*)$")
 
 
 def parse_version(tag: str):

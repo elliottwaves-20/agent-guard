@@ -133,6 +133,12 @@ class PinTests(unittest.TestCase):
         tag = _pins.GUARDDOG_IMAGE.split("@", 1)[0].rsplit(":", 1)[1]
         self.assertEqual(tag, _pins.GUARDDOG_VERSION)
 
+    def test_dynamic_analysis_pins_are_digest_and_release_pinned(self):
+        import re
+        self.assertRegex(_pins.DYNAMIC_BASE_IMAGE, r"^[a-z0-9.\-/]+@sha256:[0-9a-f]{64}$")
+        self.assertRegex(_pins.DYNAMIC_GVISOR_VERSION, r"^\d{8}\.\d+$")
+        self.assertRegex(_pins.DYNAMIC_SANDBOX_TAG, r"^rel-\d+$")
+
     def test_upstream_pin_api_uses_unredirected_github_auth_header(self):
         import urllib.request
         from unittest.mock import patch

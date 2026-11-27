@@ -378,14 +378,17 @@ class RunTests(unittest.TestCase):
     def test_argv_is_pinned_and_writes_only_to_a_temp_dir(self):
         argv = dyn.docker_argv("npm", "is-number", "7.0.0", Path("/tmp/out"))
         joined = " ".join(argv)
-        self.assertIn("@sha256:", dyn.IMAGE)
-        self.assertIn(dyn.IMAGE, argv)
+        self.assertIn("@sha256:", dyn.BASE_IMAGE)
+        self.assertIn(f"FROM {dyn.BASE_IMAGE}\n", dyn.DYNAMIC_DOCKERFILE)
+        self.assertIn(f"runsc={dyn.GVISOR_VERSION}", dyn.DYNAMIC_DOCKERFILE)
+        self.assertIn(dyn.analysis_image(), argv)
         self.assertIn("--privileged", argv)
         self.assertIn("--rm", argv)
         self.assertIn(f"{dyn.CACHE_VOLUME}:/var/lib/containers", joined)
         self.assertEqual(argv[argv.index("-ecosystem") + 1], "npm")
         self.assertEqual(argv[argv.index("-package") + 1], "is-number")
         self.assertEqual(argv[argv.index("-version") + 1], "7.0.0")
+        self.assertEqual(argv[argv.index("-image-tag") + 1], dyn.SANDBOX_TAG)
         self.assertNotIn("-ti", argv)
         mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
         for m in mounts:
@@ -404,6 +407,15 @@ class RunTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("--no-dynamic", out.getvalue())
 
+    def test_image_build_failure_gives_no_verdict(self):
+        out = io.StringIO()
+        with patch.object(dyn._exe, "which", return_value="docker"), \
+             patch.object(dyn, "build_analysis_image", side_effect=RuntimeError("build boom")), \
+             redirect_stdout(out):
+            code = dyn.run("npm", "is-number@7.0.0")
+        self.assertEqual(code, 2)
+        self.assertIn("build boom", out.getvalue())
+
     def test_run_reads_the_result_and_judges_it(self):
         import json
 
@@ -416,6 +428,7 @@ class RunTests(unittest.TestCase):
 
         out = io.StringIO()
         with patch.object(dyn._exe, "which", return_value="docker"), \
+             patch.object(dyn, "build_analysis_image", return_value="agent-guard-dynamic-analysis:test"), \
              patch.object(dyn, "run_bounded", side_effect=fake), redirect_stdout(out):
             code = dyn.run("npm", "is-number@7.0.0")
         self.assertEqual(code, 0, out.getvalue())
@@ -423,6 +436,7 @@ class RunTests(unittest.TestCase):
     def test_failed_container_gives_no_verdict(self):
         out = io.StringIO()
         with patch.object(dyn._exe, "which", return_value="docker"), \
+             patch.object(dyn, "build_analysis_image", return_value="agent-guard-dynamic-analysis:test"), \
              patch.object(dyn, "run_bounded",
                           return_value=subprocess.CompletedProcess([], 1, "", "boom")), \
              redirect_stdout(out):
@@ -432,6 +446,7 @@ class RunTests(unittest.TestCase):
     def test_timeout_gives_no_verdict(self):
         out = io.StringIO()
         with patch.object(dyn._exe, "which", return_value="docker"), \
+             patch.object(dyn, "build_analysis_image", return_value="agent-guard-dynamic-analysis:test"), \
              patch.object(dyn, "run_bounded", side_effect=subprocess.TimeoutExpired([], 5)), \
              patch.object(dyn, "_remove") as remove, redirect_stdout(out):
             self.assertEqual(dyn.run("npm", "is-number"), 2)
@@ -443,10 +458,6 @@ class RunTests(unittest.TestCase):
         self.assertEqual(dyn.split_spec("pypi", "six==1.17.0"), ("six", "1.17.0"))
         self.assertEqual(dyn.split_spec("pypi", "six@1.17.0"), ("six", "1.17.0"))
         self.assertEqual(dyn.split_spec("pypi", "six"), ("six", None))
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class WiringTests(unittest.TestCase):
@@ -592,3 +603,7 @@ class UrlScanTests(unittest.TestCase):
         self.assertEqual(code, 0)
         run.assert_not_called()
         offer.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()

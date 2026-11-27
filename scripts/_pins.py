@@ -118,3 +118,15 @@ SANDBOX_PYTHON_IMAGE = ("python:3.14.10-slim-trixie@sha256:"
 SANDBOX_UV = "0.13.9"        # released 2026-11-17, image attested by astral-sh/uv
 SANDBOX_UV_IMAGE = ("ghcr.io/astral-sh/uv:0.13.9@sha256:"
                     "d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d")
+
+# OpenSSF package-analysis (dynamic install analysis, scripts/_dynamic.py).
+# Upstream rel-38 (2026-05-20) ships gVisor runsc 20260216.0, which is affected
+# by CVE-2026-95702 (VFS UAF with code execution in the sentry, fixed in
+# 20260831.0). We pin the base image by digest and build a thin local overlay
+# that upgrades runsc from gVisor's signed APT repository to the newest release
+# at least 7 days old. The inner sandbox image is pinned to the matching release
+# tag instead of the moving :latest tag.
+DYNAMIC_BASE_IMAGE = ("gcr.io/ossf-malware-analysis/analysis@sha256:"
+                      "1f3104f3f0cfddeaf62f0952d663e129cb5efe38486766e676fb926fa84c4c27")
+DYNAMIC_SANDBOX_TAG = "rel-38"
+DYNAMIC_GVISOR_VERSION = "20261116.0"  # release-20261116.0, published 2026-11-17
