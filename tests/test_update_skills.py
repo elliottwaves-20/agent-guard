@@ -596,7 +596,13 @@ class StagingBoundaryTests(unittest.TestCase):
         for bad_entry in (
             {"source": "o/r", "ref": REF, "sourceType": "github"},
             {"source": "C:/elsewhere", "sourceType": "local"},
+            {"source": "../other", "sourceType": "local"},
             {"source": "", "sourceType": "local"},
+            {"source": "   ", "sourceType": "local"},
+            {"source": "a\x00b", "sourceType": "local"},
+            {"source": None, "sourceType": "local"},
+            {"source": 123, "sourceType": "local"},
+            "not-a-dict",
         ):
             with self.subTest(entry=bad_entry), tempfile.TemporaryDirectory() as tmp:
                 work = Path(tmp)
@@ -606,12 +612,92 @@ class StagingBoundaryTests(unittest.TestCase):
                     self._stage_with_lock(work, {"version": 2, "skills": {"alpha": bad_entry}},
                                           repo_root=repo_root)
 
+    def test_stage_rejects_lock_entry_with_missing_skill_md(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            repo_root = work / "_archive" / "r-aaaa"
+            with self.assertRaises(staging.StageError):
+                self._stage_with_lock(work, {"version": 2, "skills": {"alpha": {
+                    "source": str(repo_root), "sourceType": "local"}}}, repo_root=repo_root)
+
+    def test_stage_stops_before_download_when_npx_or_verify_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            with patch.object(staging._skills_cli, "npx_path", return_value=None), \
+                 patch.object(staging, "fetch_archive", side_effect=AssertionError("downloaded")):
+                with self.assertRaises(staging.StageError):
+                    staging.stage("o/r", REF, ["alpha"], work)
+            with patch.object(staging._skills_cli, "npx_path", return_value="npx"), \
+                 patch.object(staging._skills_cli, "verify_pinned_package", return_value=False), \
+                 patch.object(staging, "fetch_archive", side_effect=AssertionError("downloaded")):
+                with self.assertRaises(staging.StageError):
+                    staging.stage("o/r", REF, ["alpha"], work)
+
+    def test_stage_passes_hardened_env_cwd_and_absolute_archive_path(self):
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("repo-aaa/alpha/SKILL.md", "---\nname: alpha\n---\nhi\n")
+        captured = {}
+
+        def fake_run(argv, *, env=None, timeout=None, cwd=None):
+            captured["argv"] = argv
+            captured["env"] = env
+            captured["cwd"] = cwd
+            w = Path(cwd)
+            write_skill(w / ".agents" / "skills" / "alpha", "v1")
+            (w / "skills-lock.json").write_text(json.dumps({"version": 2, "skills": {
+                "alpha": {"source": argv[4], "sourceType": "local"}}}))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.dict(os.environ, {"GITHUB_TOKEN": "secret-token"}, clear=False), \
+             patch.object(staging._skills_cli, "npx_path", return_value="npx"), \
+             patch.object(staging._skills_cli, "verify_pinned_package", return_value=True), \
+             patch.object(staging._url_resolver, "http_bytes", return_value=buf.getvalue()), \
+             patch.object(staging, "run_bounded", side_effect=fake_run):
+            work = Path(tmp)
+            staged = staging.stage("o/r", REF, ["alpha"], work)
+            self.assertEqual(list(staged), ["alpha"])
+            self.assertTrue(Path(captured["argv"][4]).is_absolute())
+            self.assertEqual(captured["cwd"], str(work.resolve()))
+            self.assertNotIn("GITHUB_TOKEN", captured["env"])
+            self.assertEqual(captured["env"]["npm_config_ignore_scripts"], "true")
+
+    def test_stage_wraps_subprocess_errors_and_bad_lock(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            repo_root = work / "_archive" / "r-aaaa"
+            repo_root.mkdir(parents=True)
+            for effect in (
+                subprocess.TimeoutExpired(["npx"], 1),
+                OSError("exec failed"),
+                SimpleNamespace(returncode=7, stdout="", stderr=""),
+            ):
+                with self.subTest(effect=type(effect).__name__), \
+                     patch.object(staging._skills_cli, "npx_path", return_value="npx"), \
+                     patch.object(staging._skills_cli, "verify_pinned_package", return_value=True), \
+                     patch.object(staging, "fetch_archive", return_value=repo_root), \
+                     patch.object(staging, "run_bounded",
+                                  side_effect=effect if isinstance(effect, BaseException) else None,
+                                  return_value=None if isinstance(effect, BaseException) else effect):
+                    with self.assertRaises(staging.StageError):
+                        staging.stage("o/r", REF, ["alpha"], work)
+            (work / "skills-lock.json").write_text("[]", encoding="utf-8")
+            with self.assertRaises(staging.StageError):
+                staging.read_stage_lock(work)
+
     def test_stage_argv_uses_local_path_and_never_installs_globally(self):
         local = Path("/tmp/archive/repo")
-        argv = staging.stage_argv(local, ["alpha"])
+        argv = staging.stage_argv(local, ["alpha", "beta"])
         self.assertIn(str(local), argv)
         self.assertNotIn("-g", argv)
         self.assertIn(f"skills@{staging._skills_cli.SKILLS_VERSION}", argv)
+        for bad in ("-g", "--all", "../x"):
+            with self.assertRaises(staging.StageError):
+                staging.stage_argv(local, [bad])
 
     def test_fetch_archive_downloads_commit_zip_and_extracts_root(self):
         import io
@@ -631,7 +717,18 @@ class StagingBoundaryTests(unittest.TestCase):
             self.assertEqual(seen, [f"https://github.com/o/r/archive/{REF}.zip"])
             self.assertTrue((root / "skills" / "alpha" / "SKILL.md").is_file())
 
-    def test_fetch_archive_wraps_bad_zip_and_fetch_error(self):
+    def test_fetch_archive_rejects_zip_slip_and_wraps_errors(self):
+        import io
+        import zipfile
+        slip = io.BytesIO()
+        with zipfile.ZipFile(slip, "w") as zf:
+            zf.writestr("../escape.txt", "bad")
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(staging._url_resolver, "http_bytes", return_value=slip.getvalue()):
+            dest = Path(tmp) / "_archive"
+            with self.assertRaises(staging.StageError):
+                staging.fetch_archive("o/r", REF, dest)
+            self.assertFalse((Path(tmp) / "escape.txt").exists())
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(staging._url_resolver, "http_bytes", return_value=b"not a zip"):
             with self.assertRaises(staging.StageError):

@@ -149,6 +149,8 @@ def http_bytes(url: str) -> bytes:
         raise FetchError(format_fetch_error(url, e.code, body)) from e
     except urllib.error.URLError as e:
         raise FetchError(f"could not fetch {url}: {e.reason}") from e
+    except (TimeoutError, http.client.HTTPException) as e:
+        raise FetchError(f"could not fetch {url}: {e}") from e
     text = data[:200000].decode("utf-8", errors="replace")
     if is_security_checkpoint(text):
         raise FetchError(

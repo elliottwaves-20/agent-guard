@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import zipfile
+import zlib
 from pathlib import Path
 from typing import NamedTuple
 
@@ -256,26 +257,27 @@ def fetch_archive(source: str, ref: str, dest: Path) -> Path:
     url = f"https://github.com/{source}/archive/{ref}.zip"
     try:
         data = _url_resolver.http_bytes(url)
-    except _url_resolver.FetchError as exc:
+    except (_url_resolver.FetchError, TimeoutError, OSError) as exc:
         raise StageError(f"{source}#{ref[:12]}: archive download failed ({exc})") from exc
-    dest = Path(dest)
-    dest.mkdir(parents=True, exist_ok=True)
+    dest = Path(dest).resolve()
     try:
+        dest.mkdir(parents=True, exist_ok=True)
         _url_resolver.safe_extract_zip(data, dest)
-    except (zipfile.BadZipFile, ValueError, OSError) as exc:
+    except (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError,
+            NotImplementedError, ValueError, OSError) as exc:
         raise StageError(f"{source}#{ref[:12]}: archive extraction failed ({exc})") from exc
-    return _url_resolver.first_child_dir(dest)
+    return _url_resolver.first_child_dir(dest).resolve()
 
 
 def _same_path(recorded, expected: Path, base: Path) -> bool:
     if not isinstance(recorded, str) or not recorded.strip():
         return False
-    candidate = Path(recorded)
+    candidate = Path(recorded.strip())
     if not candidate.is_absolute():
         candidate = base / candidate
     try:
         return os.path.normcase(str(candidate.resolve())) == os.path.normcase(str(expected.resolve()))
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 
@@ -293,10 +295,12 @@ def read_stage_lock(workdir: Path) -> dict:
     path = workdir / LOCK_FILE
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise StageError(f"skills CLI wrote no readable {LOCK_FILE} ({exc})") from exc
-    if data.get("version") != LOCK_VERSION or not isinstance(data.get("skills"), dict):
-        raise StageError(f"unknown {LOCK_FILE} format (version {data.get('version')!r}, "
+    if (not isinstance(data, dict) or data.get("version") != LOCK_VERSION
+            or not isinstance(data.get("skills"), dict)):
+        version = data.get("version") if isinstance(data, dict) else type(data).__name__
+        raise StageError(f"unknown {LOCK_FILE} format (version {version!r}, "
                          f"expected {LOCK_VERSION}) -- re-verify the skills CLI pin")
     return data["skills"]
 
@@ -312,11 +316,13 @@ def stage(source: str, ref: str, names: list, workdir: Path,
     source = check_source(source)
     if not SHA.fullmatch(ref or ""):
         raise StageError(f"ref must be a full commit SHA, got {ref!r}")
+    if not names:
+        return {}
     if _skills_cli.npx_path() is None:
         raise StageError("npx not found on PATH")
     if not _skills_cli.verify_pinned_package():
         raise StageError("the pinned skills CLI did not pass verification")
-    workdir = Path(workdir)
+    workdir = Path(workdir).resolve()
     repo_root = fetch_archive(source, ref, workdir / "_archive")
     argv = stage_argv(repo_root, names)
     try:
@@ -324,15 +330,17 @@ def stage(source: str, ref: str, names: list, workdir: Path,
                              cwd=str(workdir))
     except subprocess.TimeoutExpired as exc:
         raise StageError(f"skills CLI timed out after {timeout:.0f}s") from exc
+    except OSError as exc:
+        raise StageError(f"skills CLI could not start: {exc}") from exc
     if result.returncode != 0:
         tail = (result.stderr or result.stdout or "").strip().splitlines()[-5:]
-        raise StageError("skills CLI failed: " + " | ".join(tail))
+        detail = " | ".join(tail) or f"exit {result.returncode}"
+        raise StageError(f"skills CLI exited {result.returncode}: {detail}")
     lock = read_stage_lock(workdir)
     staged = {}
     for name in names:
         entry = lock.get(name)
-        path = workdir / ".agents" / "skills" / name
-        if entry is None or not (path / "SKILL.md").is_file():
+        if entry is None:
             continue
         if (not isinstance(entry, dict)
                 or entry.get("sourceType") != "local"
@@ -340,6 +348,9 @@ def stage(source: str, ref: str, names: list, workdir: Path,
             raise StageError(f"{name}: lock records {entry.get('sourceType') if isinstance(entry, dict) else entry!r} "
                              f"{entry.get('source') if isinstance(entry, dict) else ''!r}, "
                              f"expected local {repo_root}")
+        path = workdir / ".agents" / "skills" / name
+        if not (path / "SKILL.md").is_file():
+            raise StageError(f"{name}: lock lists this skill, but {path / 'SKILL.md'} is missing")
         staged[name] = Staged(name, path, entry)
     return staged
 

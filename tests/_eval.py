@@ -14,6 +14,7 @@ import tomllib
 from pathlib import Path
 
 import _corpus
+import _skills_cli
 import _staging
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,13 +59,20 @@ def parse_cli_list(text: str) -> list:
 
 def listing_at(source: str) -> tuple:
     """(commit sha of HEAD, [skill names the pinned skills CLI lists at that commit])."""
+    if _skills_cli.npx_path() is None or not _skills_cli.verify_pinned_package():
+        raise RuntimeError("pinned skills CLI is unavailable or failed verification")
     sha = subprocess.run(["gh", "api", f"repos/{source}/commits/HEAD", "-q", ".sha"],
                          capture_output=True, text=True, check=True).stdout.strip()
     with tempfile.TemporaryDirectory() as tmp:
         repo_root = _staging.fetch_archive(source, sha, Path(tmp) / "_archive")
-        argv = _staging.stage_argv(repo_root, [])[:5] + ["--list"]
-        done = subprocess.run(argv, cwd=tmp, capture_output=True, text=True, encoding="utf-8",
+        argv = [_skills_cli.npx_path() or "npx", "-y",
+                f"{_skills_cli.SKILLS_PACKAGE}@{_skills_cli.SKILLS_VERSION}",
+                "add", str(repo_root), "--list"]
+        done = subprocess.run(argv, cwd=tmp, env=_skills_cli.hardened_env(),
+                              capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=300)
+        if done.returncode != 0:
+            raise RuntimeError(f"skills --list failed for {source} (exit {done.returncode})")
     return sha, parse_cli_list(done.stdout)
 
 
