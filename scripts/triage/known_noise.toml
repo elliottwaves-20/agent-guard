@@ -8,7 +8,7 @@
 # applies until the calibration corpus (tests/corpus/) passes again.
 
 version = 1
-skillspector = "2.12.0"
+skillspector = "2.13.7"
 
 [[entry]]
 id = "vendor-installer"

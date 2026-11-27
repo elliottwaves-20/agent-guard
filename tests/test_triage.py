@@ -21,7 +21,7 @@ os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")
 t = importlib.import_module("_triage")
 
 ORIGIN = t.Origin("acme-ai/skills", "a" * 40)
-VERSION = "2.12.0"
+VERSION = importlib.import_module("_pins").SKILLSPECTOR_VERSION  # the catalog follows the pin
 
 
 def issue(rule, file="SKILL.md", line=1, severity="HIGH", snippet="", unconfirmed=False,

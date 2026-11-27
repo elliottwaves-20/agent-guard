@@ -5,9 +5,19 @@ the budget adapter and the installed-scanner tests compare against it. Bump
 deliberately: the adapter patches SkillSpector internals and must be
 re-verified against every new release.
 
-Until SkillSpector 2.13.0 ships, the pin is a reviewed commit on NVIDIA's main
-branch (package version 2.12.0). It carries the merged fixes agent-guard relies
-on: concurrent TP4 batches (#731), the --remove flag reading (#697) and fewer
+The SkillSpector pin is the commit of the newest NVIDIA release tag that is at
+least 7 days old; a main commit only for a fix no such release carries yet.
+Since v2.13.2 the releases are cut from main (tag v2.13.7 = c323ad4, an
+ancestor of main), so a release carries every earlier main fix.
+tests/test_pins.py checks on GitHub that the pin is the tag's commit and that
+main contains it. It is installed from Git, never from the PyPI package
+`skillspector`: OSV lists that name as malware campaign MAL-2026-6561.
+
+v2.13.7 (c323ad4) carries every fix of the earlier main pins listed below and
+adds #1148 (locked pyasn1, cryptography and pyjwt past published advisories),
+#1127, #1118, #1130, #1161 (host Git templates stay out of URL scans), #1180,
+#1183 and a large batch of parser corrections. The earlier main pins carried,
+in order: concurrent TP4 batches (#731), the --remove flag reading (#697) and fewer
 false parser limits behind AE1 (#627, #634, #661, #686). Since 532f67c it also
 carries #704, #709, #737 (codex_cli disabled) and #738, plus the gemini provider
 that signs in through Application Default Credentials. Since 2404212 it also
@@ -36,12 +46,10 @@ patched model, and a second rejection still ends the batch), #1027
 GHSA-3fx2-cqw9-xr3c), #980 (prompt token counting that never downloads a
 vocabulary) and #1123. Since
 #798 SkillSpector refuses --output on Windows, so reports are read from stdout.
-tests/test_pins.py checks on GitHub that main contains it. The 2.13.x release
-tags sit on a separate branch without #855/#856, so the pin stays on main.
 """
-SKILLSPECTOR_VERSION = "2.12.0"
+SKILLSPECTOR_VERSION = "2.13.7"
 SKILLSPECTOR_REPO = "https://github.com/NVIDIA/SkillSpector"
-SKILLSPECTOR_SHA = "c81615007d40e86051a302a3cf897f8a05264928"
+SKILLSPECTOR_SHA = "c323ad4c43e3c8f2de051572cc25b2711d11e648"
 
 # Cisco mcp-scanner (optional live MCP runtime check), pinned like SkillSpector
 # to a commit on the official main branch. The newest PyPI release (4.8.7)
@@ -52,10 +60,10 @@ SKILLSPECTOR_SHA = "c81615007d40e86051a302a3cf897f8a05264928"
 # compromised 1.107.0 upload, independent of what the resolver would pick. A
 # known vulnerability is the one case where we install ahead of an official
 # release; move back to a PyPI release once one allows litellm>=1.106.5.
-# 9ff8fc8 is main of 2026-11-06 (package version 4.8.7).
+# 8c3cae1 is main of 2026-11-19 (package version 4.8.7).
 CISCO_MCP_SCANNER_VERSION = "4.8.7"
 CISCO_MCP_SCANNER_REPO = "https://github.com/cisco-ai-defense/mcp-scanner"
-CISCO_MCP_SCANNER_SHA = "9ff8fc84b792aae315a838cf4e37b40ef46a0293"
+CISCO_MCP_SCANNER_SHA = "8c3cae130a12afb7b3abfe9c8a4e2a5e2b103735"
 CISCO_LITELLM_REQUIREMENT = "litellm>=1.106.5,!=1.107.0"
 
 # Dependency window for every `uv tool install` in the setup scripts. A pinned
@@ -66,7 +74,7 @@ CISCO_LITELLM_REQUIREMENT = "litellm>=1.106.5,!=1.107.0"
 # hence the commit pins). It is a fixed date rather than "now minus 7 days" so
 # a setup run is reproducible; raise it with every scanner pin bump, to a
 # moment at least 7 days back (a test checks the 7 days).
-UV_EXCLUDE_NEWER = "2026-11-15T00:00:00Z"
+UV_EXCLUDE_NEWER = "2026-11-20T00:00:00Z"
 
 # Scanner images, pinned by digest. Docker runs the
 # digest; the tag only keeps the line readable. GuardDog and malcontent carry

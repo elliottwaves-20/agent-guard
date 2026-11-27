@@ -184,6 +184,16 @@ class UpstreamPinTests(unittest.TestCase):
         diff = self.api(f"repos/NVIDIA/SkillSpector/compare/{_pins.SKILLSPECTOR_SHA}...main")
         self.assertIn(diff["status"], ("ahead", "identical"))
 
+    def test_pin_is_the_commit_of_its_release_tag(self):
+        # The pin is an NVIDIA release. A main commit is only for a fix no
+        # release carries yet; that exception then has to change this test.
+        ref = self.api(f"repos/NVIDIA/SkillSpector/git/ref/tags/v{_pins.SKILLSPECTOR_VERSION}")
+        target = ref["object"]
+        if target["type"] == "tag":  # annotated tag: follow it to its commit
+            target = self.api(f"repos/NVIDIA/SkillSpector/git/tags/{target['sha']}")["object"]
+        self.assertEqual(target["type"], "commit")
+        self.assertEqual(target["sha"], _pins.SKILLSPECTOR_SHA)
+
     def test_cisco_pin_is_on_official_main(self):
         self.assertEqual(_pins.CISCO_MCP_SCANNER_REPO,
                          "https://github.com/cisco-ai-defense/mcp-scanner")

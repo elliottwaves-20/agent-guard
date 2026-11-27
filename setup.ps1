@@ -8,26 +8,26 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# SkillSpector is not on PyPI. We pin an exact commit on NVIDIA's main branch
-# (not a release tag: the 2.13.x tags lack fixes agent-guard relies on), so
-# "scan = install" applies to the scanner itself. Bump deliberately; see
-# scripts/_pins.py (a test keeps both in sync).
-$SkillSpectorRepo = "https://github.com/NVIDIA/SkillSpector"   # main until 2.13.0
-$SkillSpectorSha  = "c81615007d40e86051a302a3cf897f8a05264928"   # v2.12.0 + main 2026-11-14
+# SkillSpector is installed from Git, never from the PyPI name `skillspector`
+# (OSV lists it as malware campaign MAL-2026-6561). We pin the commit of an
+# NVIDIA release tag, so "scan = install" applies to the scanner itself. Bump
+# deliberately; see scripts/_pins.py (a test keeps both in sync).
+$SkillSpectorRepo = "https://github.com/NVIDIA/SkillSpector"
+$SkillSpectorSha  = "c323ad4c43e3c8f2de051572cc25b2711d11e648"   # v2.13.7 (release tag)
 
 # Cisco mcp-scanner: pinned to a commit on the official main branch. The newest
 # PyPI release still pins a litellm with published advisories; main accepts a
 # newer one, so we require litellm past those advisories and never the
 # compromised 1.107.0. Reasons and bump rules: scripts/_pins.py.
 $CiscoRepo   = "https://github.com/cisco-ai-defense/mcp-scanner"
-$CiscoSha    = "9ff8fc84b792aae315a838cf4e37b40ef46a0293"   # main 2026-11-06, package version 4.8.7
+$CiscoSha    = "8c3cae130a12afb7b3abfe9c8a4e2a5e2b103735"   # main 2026-11-19, package version 4.8.7
 $CiscoLitellm = "litellm>=1.106.5,!=1.107.0"
 
 # A pinned commit fixes the scanner code, not its dependencies: uv resolves them
 # fresh. --exclude-newer limits registry packages to files uploaded before this
 # fixed instant (set at least 7 days back with each pin bump), so a release
 # from the days before a setup run cannot slip in (see scripts/_pins.py).
-$ExcludeNewer = "2026-11-15T00:00:00Z"
+$ExcludeNewer = "2026-11-20T00:00:00Z"
 
 Write-Host "Checking prerequisites..." -ForegroundColor Cyan
 
