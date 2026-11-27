@@ -65,7 +65,8 @@ def _campaign_row(config, env):
     name, profile = selected
     policy = policy_from_profile(name, profile, _pins.SKILLSPECTOR_VERSION)
     ready = bool(env.get(policy["key_env"], "").strip())
-    budget = f"cap ${policy['total_nusd'] / 1e9:g}, step ${policy['step_nusd'] / 1e9:g}"
+    cap, step = policy["total_nusd"] / 1e9, policy["step_nusd"] / 1e9
+    budget = f"cap ${cap:g}, step ${step:g}"
     return _row("campaign", f"profile {name}", f"openai protocol ({budget})", policy["model"],
                 ready, "" if ready else f"profile {name}: {policy['key_env']} is not set")
 

@@ -5,8 +5,8 @@
 ### Security
 
 - SkillSpector is pinned to the release v2.13.7 (`c323ad4`) instead of a main
-  commit. Since v2.13.2 NVIDIA cuts releases from main, so the release carries
-  every fix of the previous pin `c816150` and adds #1148 (locked pyasn1,
+  commit. v2.13.7 is the first release tag on main (v2.13.1 to v2.13.6 sit on
+  a diverged branch), so it carries every fix of the previous pin `c816150` and adds #1148 (locked pyasn1,
   cryptography and pyjwt past published advisories), #1161 and a batch of
   parser corrections. It is still installed from Git, never from the PyPI name
   `skillspector`, which OSV lists as malware campaign MAL-2026-6561. The

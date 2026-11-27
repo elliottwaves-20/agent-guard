@@ -7,8 +7,10 @@ re-verified against every new release.
 
 The SkillSpector pin is the commit of the newest NVIDIA release tag that is at
 least 7 days old; a main commit only for a fix no such release carries yet.
-Since v2.13.2 the releases are cut from main (tag v2.13.7 = c323ad4, an
-ancestor of main), so a release carries every earlier main fix.
+v2.13.7 (published 2026-11-24) is a deliberate exception to the 7 days: it is
+the first release tag that is an ancestor of main (tag v2.13.7 = c323ad4), so
+it carries every earlier main fix. The tags v2.13.1 to v2.13.6 sit on a branch
+that diverged from main and lack most main fixes.
 tests/test_pins.py checks on GitHub that the pin is the tag's commit and that
 main contains it. It is installed from Git, never from the PyPI package
 `skillspector`: OSV lists that name as malware campaign MAL-2026-6561.
