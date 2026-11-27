@@ -15,6 +15,16 @@
   version 4.8.7), which adds #296, #308 (private key headers in
   `credential_harvesting`), #312 and #314.
 - The dependency window `UV_EXCLUDE_NEWER` moves to 2026-11-20.
+- The `skills` CLI moves from 1.7.0 to 1.9.0, for 1.7.5 (VULN-16995: skill
+  symlinks were dereferenced outside the skill directory), 1.7.6 and 1.9.0
+  (more symlinks confined) and 1.8.0 (install and remove no longer delete
+  agent category directories or unmanaged files). GuardDog reports the same
+  four findings as for 1.7.0, reviewed in
+  `scripts/reviewed/skills-cli-1.9.0.json`. New in 1.9.0: when an
+  unauthenticated GitHub API request is rate-limited or answered 401/404, the
+  CLI retries it through `gh api`, so an existing GitHub CLI login on the
+  machine is used for that read; the reduced environment still carries no
+  token variables.
 
 ## 0.6.0 - 2026-11-27
 
