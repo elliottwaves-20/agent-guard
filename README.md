@@ -1145,15 +1145,6 @@ output must be inspected, reduced and given specific reasons before use.
 Generate it with the same scanner and LLM policy as the later scan; different
 LLM evidence can invalidate an otherwise unchanged fingerprint.
 
-The native generator fingerprints only one occurrence of a finding that
-repeats, while the scan matches every occurrence (still true in 2.12.0; see
-NVIDIA/SkillSpector#630, #633, #656). A generated draft therefore leaves
-repeated occurrences unsuppressed. Review against the saved report; never
-compensate with wildcards or treat a partially matching draft as a completed
-review. A baseline built with SkillSpector's own `build_baseline_dict` from the
-graph's raw `findings` covers every occurrence with the same exact
-fingerprints.
-
 For a release self-scan, use a clean export of the intended release tree to
 avoid scanning local credentials, caches or session notes, and run it static
 (`AGENT_GUARD_STATIC_ONLY=1`): LLM evidence differs between runs and would
