@@ -32,6 +32,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MARKER = "@@AGENT_GUARD_TEST_RESULT@@"
 GROUP_TIMEOUT = 3600
+GITHUB_TOKEN_NAMES = ("GITHUB_TOKEN", "GH_TOKEN")
+# Checked before any group: the integration tests call the GitHub API, which
+# answers 403 after 60 requests per hour without a token, and the run would
+# only fail at the end.
+NO_GITHUB_TOKEN = ("NOT STARTED -- set GITHUB_TOKEN or GH_TOKEN (read access to public repositories "
+                   "is enough): the integration tests call the GitHub API, which allows only 60 "
+                   "requests per hour without a token and then answers 403.")
 
 # Runs inside the group's interpreter: discover, drop excluded modules, run,
 # and print one machine-readable line with the counts and every skipped id.
@@ -131,6 +138,9 @@ def main() -> int:
     parser.add_argument("--live", action="store_true",
                         help="also run the live LLM tests (real calls, costs budget)")
     args = parser.parse_args()
+    if not any(os.environ.get(name, "").strip() for name in GITHUB_TOKEN_NAMES):
+        print(NO_GITHUB_TOKEN, file=sys.stderr)
+        return 2
     results = []
     for group in plan(args.live):
         print(f"== {group['name']} ({group['python'] or 'missing interpreter'})", flush=True)

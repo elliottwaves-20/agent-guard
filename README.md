@@ -1181,10 +1181,10 @@ contract) and reports `ALL GREEN, NOTHING SKIPPED` only when no test was
 skipped; without `--live` it reports `INCOMPLETE` and `NOT GREEN` on purpose,
 because the live tests did not run. They use the active `skills` profile of
 the personal config (or `AGENT_GUARD_LLM_INTEGRATION_PROFILE`). The integration
-group makes live GitHub API calls (advisory and release checks); without
-`GITHUB_TOKEN` or `GH_TOKEN`, GitHub's 60/hour unauthenticated IP quota fits
-about one full run per hour, so set a public-read token when running the suite
-repeatedly. A plain `python -m unittest discover -s tests` runs the unit tests
+group makes live GitHub API calls (advisory, release and commit-age checks),
+more than GitHub's 60/hour unauthenticated IP quota allows, so
+`run_all_tests.py` does not start without `GITHUB_TOKEN` or `GH_TOKEN` (exit 2;
+a token with read access to public repositories is enough). A plain `python -m unittest discover -s tests` runs the unit tests
 only; unit tests never start Docker or a scanner.
 
 ## MCP isolation rules

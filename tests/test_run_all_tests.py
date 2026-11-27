@@ -103,6 +103,32 @@ class PlanTests(unittest.TestCase):
         self.assertIn("SkillSpector tool environment", result["error"])
 
 
+class GitHubTokenTests(unittest.TestCase):
+    """The integration group calls the GitHub API: without a token it hits the 60/hour quota."""
+
+    def run_main(self, env, live=False):
+        argv = ["run_all_tests.py", *(["--live"] if live else [])]
+        with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv), \
+                patch.object(runner, "run_group", side_effect=AssertionError("ran a group")), \
+                patch("builtins.print") as printed:
+            code = runner.main()
+        return code, " ".join(str(c.args[0]) for c in printed.call_args_list if c.args)
+
+    def test_no_token_stops_before_any_group(self):
+        for live in (False, True):
+            for env in ({}, {"GITHUB_TOKEN": "  ", "GH_TOKEN": ""}):
+                with self.subTest(live=live, env=env):
+                    code, out = self.run_main(env, live)
+                    self.assertEqual(code, 2)
+                    self.assertIn("GITHUB_TOKEN", out)
+                    self.assertIn("60", out)
+
+    def test_either_token_name_lets_the_run_start(self):
+        for env in ({"GITHUB_TOKEN": "t"}, {"GH_TOKEN": "t"}):
+            with self.subTest(env=env), self.assertRaisesRegex(AssertionError, "ran a group"):
+                self.run_main(env)
+
+
 class VerdictTests(unittest.TestCase):
     def ok(self, **extra):
         return {"name": "g", "ran": 5, "failures": 0, "skipped": [], "error": "", **extra}

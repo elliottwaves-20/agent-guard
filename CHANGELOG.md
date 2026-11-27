@@ -120,6 +120,10 @@
   install's exit code and package names, a clean check lists every dependency.
   Before, the dry run only announced the check. It still runs no `npm ci` or
   `uv sync` and writes nothing under `[mcp] install_dir`.
+- `run_all_tests.py` stops before the first test group (exit 2) when neither
+  `GITHUB_TOKEN` nor `GH_TOKEN` is set: the integration tests need more GitHub
+  API calls than the 60 per hour without a token, so the run failed only at
+  the end with HTTP 403.
 - `mcp-pypi` and `mcp-git` need Python 3.11 or newer; `mcp-npm` needs npm
   11.10 or newer.
 - The README no longer calls macOS and Linux fully supported: the test suite
