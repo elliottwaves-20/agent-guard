@@ -33,8 +33,8 @@
   reports reachable known vulnerabilities in the Go programs it ships:
   `analyze` (34), `podman` (116) and gVisor `runsc` release-20260216.0 (2).
   None of them lets the analysed package leave gVisor; the worst case is a
-  crash, which ends the scan without a verdict (exit 2). Updating gVisor in
-  the image and pinning it by digest is tracked in #30.
+  crash, which ends the scan without a verdict (exit 2). How the image will
+  be updated (gVisor, podman or the whole image) is still open; see #30.
 
 ## 0.6.0 - 2026-11-27
 
