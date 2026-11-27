@@ -649,5 +649,68 @@ class LiveLockedRefusalAndAuditFindingTests(unittest.TestCase):
             self.assertIn("verified no provenance attestation", str(ctx.exception))
 
 
+@unittest.skipUnless(IS_INTEGRATION, INTEGRATION_REASON)
+class LiveDryRunLockfileCheckTests(unittest.TestCase):
+    """--dry-run resolves with real npm/uv and runs the real lockfile check, builds nothing."""
+
+    @classmethod
+    def setUpClass(cls):
+        for tool in ("npm", "node", "uv", "git"):
+            if not shutil.which(tool):
+                raise AssertionError(f"AGENT_GUARD_INTEGRATION=1 requires {tool} on PATH")
+
+    def dry(self, args, setup):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, config, record_file = _write_register_config(Path(tmp))
+            env = {"AGENT_GUARD_CONFIG": str(config), "AGENT_GUARD_NO_USER_CONFIG": ""}
+            setup(root)
+            before = sorted(p.name for p in root.iterdir())
+            proc = _run_python("install_skill.py", [*args, "--dry-run"], env=env)
+            self.assertEqual(sorted(p.name for p in root.iterdir()), before,
+                             "a dry run must write nothing under install_dir")
+            self.assertFalse(record_file.exists())
+            return proc
+
+    def test_npm_dry_run_reports_the_finding_of_a_dependency(self):
+        proc = self.dry(["mcp-npm", "--name", "lod", "--package", "lodash",
+                         "--version", "4.17.20", "--no-fast-lane"],
+                        lambda root: _npm_receipt(root, "lodash", "4.17.20"))
+        output = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, output)
+        self.assertIn("GHSA-35jh-r3h4-6jhm", output)
+        self.assertNotIn("[DRY] clean", output)
+
+    def test_npm_dry_run_lists_each_clean_entry(self):
+        proc = self.dry(["mcp-npm", "--name", "sem", "--package", "semver",
+                         "--version", "7.7.0"],
+                        lambda root: _npm_receipt(root, "semver", "7.7.0"))
+        output = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, output)
+        self.assertIn("Lockfile check passed", output)
+        self.assertIn("[DRY] clean: semver@7.7.0", output)
+
+    def test_pypi_dry_run_reports_the_finding(self):
+        proc = self.dry(["mcp-pypi", "--name", "u3", "--package", "urllib3",
+                         "--version", "1.26.5", "--no-fast-lane"],
+                        lambda root: _pypi_receipt(root, "urllib3", "1.26.5"))
+        output = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, output)
+        self.assertIn("PYSEC-2023-192", output)
+        self.assertNotIn("[DRY] clean", output)
+
+    def test_git_dry_run_checks_the_commit_and_lists_each_clean_entry(self):
+        def setup(root):
+            _mcp_receipts.write_receipt(root, _mcp_receipts.Receipt(
+                kind="git", package=GIT_REPO, version=GIT_SHA, archive_sha256="0" * 64,
+                integrity="", verdict="SAFE", at="2026-11-25T00:00:00+00:00",
+                agent_guard=_mcp_locked.agent_guard_version(), mode="full"))
+        proc = self.dry(["mcp-git", "--name", "time-git", "--git-url", GIT_URL,
+                         "--package", GIT_PACKAGE], setup)
+        output = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, output)
+        self.assertIn("Lockfile check passed", output)
+        self.assertRegex(output, r"\[DRY\] clean: mcp@\d")
+
+
 if __name__ == "__main__":
     unittest.main()

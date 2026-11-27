@@ -391,10 +391,36 @@ class PypiInstall(unittest.TestCase):
 
     def test_dry_run_writes_nothing(self):
         uv = FakeUv()
-        installed = self.install(uv=uv, dry=True)
-        self.assertEqual(uv.commands, [])
+        with mock.patch("sys.stdout", new=io.StringIO()):
+            installed = self.install(uv=uv, dry=True)
+        self.assertFalse(any(c[1] == "sync" for c in uv.commands))
         self.assertFalse(self.root.exists())
         self.assertEqual(installed.command, "C:/uv/uv.exe")
+
+    def test_dry_run_checks_the_resolved_lockfile_and_lists_each_entry(self):
+        uv, check = FakeUv(extra={"anyio": "4.0.0"}), stub_check(0)
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out):
+            installed = self.install(uv=uv, check=check, dry=True)
+        self.assertEqual(sorted(e.label for e in check.entries),
+                         ["anyio@4.0.0", f"{PKG}@1.2.3"])
+        self.assertIn(f"[DRY] clean: {PKG}@1.2.3", out.getvalue())
+        self.assertIn("[DRY] clean: anyio@4.0.0", out.getvalue())
+        self.assertTrue(any(c[1] == "lock" for c in uv.commands))
+        self.assertFalse(any(c[1] == "sync" for c in uv.commands))
+        self.assertFalse(self.root.exists())
+        self.assertEqual(len(installed.lockfile_sha256), 64)
+
+    def test_dry_run_with_a_finding_refuses_like_the_install(self):
+        uv = FakeUv()
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out), self.assertRaises(locked.Refused) as ctx:
+            self.install(uv=uv, check=stub_check(1), dry=True)
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("stub result 1", out.getvalue())
+        self.assertNotIn("[DRY] clean", out.getvalue())
+        self.assertFalse(any(c[1] == "sync" for c in uv.commands))
+        self.assertFalse(self.root.exists())
 
     def test_console_scripts_matches_normalised_names(self):
         venv = Path(self.tmp.name) / "venv"
@@ -866,9 +892,41 @@ class GitInstall(unittest.TestCase):
 
     def test_dry_run_writes_nothing(self):
         uv = FakeGitUv()
-        self.install(uv=uv, dry=True)
-        self.assertEqual(uv.commands, [])
-        self.assertEqual(self.compared, [])
+        with mock.patch("sys.stdout", new=io.StringIO()):
+            self.install(uv=uv, dry=True)
+        self.assertFalse(any(c[1] == "sync" for c in uv.commands))
+        self.assertFalse(self.root.exists())
+
+    def test_dry_run_checks_commit_and_lockfile_and_lists_each_entry(self):
+        uv, check = FakeGitUv(), stub_check(0)
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out):
+            installed = self.install(uv=uv, check=check, dry=True)
+        self.assertTrue(self.compared)  # the commit age is checked, as on install
+        self.assertIn("anyio@4.0.0", [e.label for e in check.entries])
+        self.assertIn("[DRY] clean: anyio@4.0.0", out.getvalue())
+        self.assertTrue(any(c[1] == "lock" for c in uv.commands))
+        self.assertFalse(any(c[1] == "sync" for c in uv.commands))
+        self.assertFalse(self.root.exists())
+        self.assertEqual(len(installed.lockfile_sha256), 64)
+
+    def test_dry_run_with_a_finding_refuses_like_the_install(self):
+        uv = FakeGitUv()
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out), self.assertRaises(locked.Refused) as ctx:
+            self.install(uv=uv, check=stub_check(1), dry=True)
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("stub result 1", out.getvalue())
+        self.assertNotIn("[DRY] clean", out.getvalue())
+        self.assertFalse(any(c[1] == "sync" for c in uv.commands))
+        self.assertFalse(self.root.exists())
+
+    def test_dry_run_refuses_submodules_like_the_install(self):
+        uv = FakeGitUv()
+        with self.assertRaises(locked.Refused) as ctx:
+            self.install(uv=uv, dry=True,
+                         root_names=lambda source, sha: ["pyproject.toml", ".gitmodules"])
+        self.assertEqual(ctx.exception.code, 2)
         self.assertFalse(self.root.exists())
 
 

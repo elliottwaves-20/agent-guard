@@ -21,6 +21,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
@@ -303,6 +304,37 @@ def staged(root: Path, name: str):
     finally:
         if stage.exists():
             shutil.rmtree(stage, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def work_stage(root: Path, name: str, dry: bool):
+    """The staging directory of a run; a dry run resolves outside the install directory."""
+    if not dry:
+        with staged(root, name) as stage:
+            yield stage
+        return
+    stage = Path(tempfile.mkdtemp(prefix=f"agent-guard-dry-{name}-"))
+    try:
+        yield stage
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def print_dry_outcome(verdict, entries) -> None:
+    """A passed lockfile check of a dry run: the fast-lane fixes, else one line per entry."""
+    if verdict.fixes:
+        for dep, (fix_version, _, record) in verdict.fixes.items():
+            print(f"  [DRY] would rebuild with the scanned fix {dep} {record['installed']} -> "
+                  f"{fix_version} ({', '.join(record['advisories'])}); the rebuilt lockfile is "
+                  "not checked in this dry run, only on install")
+        return
+    print_dry_clean(entries)
+
+
+def print_dry_clean(entries) -> None:
+    """One line per entry that passed the lockfile check of a dry run."""
+    for label in sorted({entry.label for entry in entries}):
+        print(f"  [DRY] clean: {label}")
 
 
 def _is_leftover(path: Path, name_pattern: str) -> bool:

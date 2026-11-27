@@ -635,7 +635,7 @@ only then swaps it in. Any failure leaves the installed tree as it was
 (exit 1 finding, exit 2 no verdict or wait).
 
 ```bash
-# Always dry-run first:
+# Always dry-run first (resolves and runs the lockfile check, installs nothing):
 python "$INSTALLER" mcp-npm --package @scope/server --version 1.2.3 --dry-run
 
 # npm: agents start node with the package bin from the tree

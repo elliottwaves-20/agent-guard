@@ -2143,12 +2143,21 @@ class SkillSpectorWrapperTests(unittest.TestCase):
                 kind="git", package="example/mcp", version=sha, archive_sha256="ab" * 32,
                 integrity="", verdict="SAFE", at="2026-11-22T00:00:00+00:00",
                 agent_guard="0.5.2", mode="full"))
+            # The dry run resolves and checks the tree: uv, GitHub and the check
+            # are the fakes of tests/test_mcp_uv.py (no network).
+            from test_mcp_uv import FakeGitUv, stub_check
             with contextlib.redirect_stdout(io.StringIO()):
                 installer.install_mcp_git(
                     "example-mcp", f"git+https://github.com/example/mcp@{sha}", "example-mcp",
                     dry=True, selected=["codex"], executable="example-server",
                     config={"mcp": {"install_dir": root}}, env={}, platform="win32",
                     which={"uv": "C:/uv/uv.exe", "git": "C:/git/git.exe"}.get,
+                    run=FakeGitUv(), check=stub_check(0),
+                    fetch_text=lambda url: '[project]\nname = "example-mcp"\n',
+                    settled=lambda source, branch, head: ("c" * 40, None),
+                    branch_head=lambda source: ("main", "d" * 40),
+                    compare=lambda source, base, head: "behind",
+                    root_names=lambda source, sha: ["pyproject.toml"],
                     deliver=lambda name, entry, dry, selected=None: calls.append(
                         (name, entry, dry, selected)))
             tree = str(Path(root).absolute() / "example-mcp")

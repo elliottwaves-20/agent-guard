@@ -976,8 +976,13 @@ python scripts/install_skill.py mcp-remote \
   --url "https://example.com/mcp"
 ```
 
-**Dry run first** to preview the install. A locked install dry run does not
-resolve or check a new tree:
+**Dry run first** to preview the install. A locked install dry run resolves
+the tree in a temporary folder outside `[mcp] install_dir` and runs the full
+lockfile check (for Git sources also the commit age and the submodule check).
+A finding refuses with the same exit code and package names as the install;
+a clean check lists every dependency as `[DRY] clean: <name>@<version>`.
+It never runs `npm ci` or `uv sync`, never swaps a tree in and writes no
+agent config:
 
 ```bash
 python scripts/install_skill.py mcp-npm --package foo --version 1.2.3 --dry-run

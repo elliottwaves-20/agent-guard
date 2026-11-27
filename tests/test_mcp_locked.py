@@ -473,10 +473,46 @@ class NpmInstall(unittest.TestCase):
 
     def test_dry_run_writes_nothing(self):
         npm = FakeNpm()
-        installed = self.install(npm=npm, dry=True)
-        self.assertEqual(npm.commands, [])
+        with mock.patch("sys.stdout", new=io.StringIO()):
+            installed = self.install(npm=npm, dry=True)
+        self.assertFalse(any(c[1] == "ci" for c in npm.commands))
         self.assertFalse(self.root.exists())
         self.assertEqual(installed.command, "C:/node/node.exe")
+
+    def test_dry_run_checks_the_resolved_lockfile_and_lists_each_entry(self):
+        npm, check = FakeNpm(extra={"dep": ("1.0.0", "sha512-d")}), stub_check(0)
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out):
+            installed = self.install(npm=npm, check=check, dry=True)
+        self.assertEqual(sorted(e.label for e in check.entries), [f"{PKG}@1.2.3", "dep@1.0.0"])
+        self.assertIn(f"[DRY] clean: {PKG}@1.2.3", out.getvalue())
+        self.assertIn("[DRY] clean: dep@1.0.0", out.getvalue())
+        self.assertTrue(any(c[1] == "install" and "--package-lock-only" in c
+                            for c in npm.commands))
+        self.assertFalse(any(c[1] == "ci" for c in npm.commands))
+        self.assertFalse(self.root.exists())
+        self.assertEqual(len(installed.lockfile_sha256), 64)
+
+    def test_dry_run_work_stage_is_removed_on_a_refusal(self):
+        seen = []
+        with self.assertRaises(locked.Refused):
+            with locked.work_stage(self.root, "files", True) as stage:
+                seen.append(stage)
+                (stage / "package-lock.json").write_text("{}", encoding="utf-8")
+                raise locked.Refused(1, "finding")
+        self.assertFalse(seen[0].exists())
+        self.assertFalse(self.root.exists())
+
+    def test_dry_run_with_a_finding_refuses_like_the_install(self):
+        npm = FakeNpm()
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out), self.assertRaises(locked.Refused) as ctx:
+            self.install(npm=npm, check=stub_check(1), dry=True)
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("stub result 1", out.getvalue())
+        self.assertNotIn("[DRY] clean", out.getvalue())
+        self.assertFalse(any(c[1] == "ci" for c in npm.commands))
+        self.assertFalse(self.root.exists())
 
     def test_leftovers_of_an_aborted_run_do_not_stop_the_install(self):
         self.root.mkdir(parents=True)
@@ -846,6 +882,18 @@ class FastLaneInstall(FastLaneBase):
         self.assertIn("fast lane: dep 1.0.0 -> 1.0.3 (GHSA-aaaa-bbbb-cccc, provenance "
                       f"{REPO}, receipt sha512-o)", self.stderr)
         self.assertTrue(any(c[1:3] == ["audit", "signatures"] for c in npm.commands))
+
+    def test_dry_run_names_the_fast_lane_fix_without_building(self):
+        npm, check = self.fix_setup()
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out):
+            self.install(npm=npm, check=check, dry=True)
+        self.assertIn("[DRY] would rebuild with the scanned fix dep 1.0.0 -> 1.0.3 "
+                      "(GHSA-aaaa-bbbb-cccc)", out.getvalue())
+        self.assertNotIn("[DRY] clean", out.getvalue())
+        self.assertEqual(len([c for c in npm.commands if c[1] == "install"]), 1)
+        self.assertFalse(any(c[1] == "ci" for c in npm.commands))
+        self.assertFalse((self.root / "files").exists())
 
     def test_fast_lane_excludes_only_the_fix_packages(self):
         npm, check = self.fix_setup()

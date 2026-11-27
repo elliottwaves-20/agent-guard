@@ -115,6 +115,11 @@
 
 ### Changed
 
+- `mcp-npm`, `mcp-pypi` and `mcp-git --dry-run` now resolve the tree in a
+  temporary folder and run the real lockfile check: a finding refuses with the
+  install's exit code and package names, a clean check lists every dependency.
+  Before, the dry run only announced the check. It still runs no `npm ci` or
+  `uv sync` and writes nothing under `[mcp] install_dir`.
 - `mcp-pypi` and `mcp-git` need Python 3.11 or newer; `mcp-npm` needs npm
   11.10 or newer.
 - The README no longer calls macOS and Linux fully supported: the test suite

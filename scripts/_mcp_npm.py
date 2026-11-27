@@ -27,7 +27,8 @@ import _exe
 import _fastlane
 import _lockcheck
 from _mcp_locked import (METADATA, Installed, NeedsScan, Refused, Runner, check_name,
-                         check_secrets, replace_tree, staged, stale_leftovers, write_metadata)
+                         check_secrets, print_dry_outcome, replace_tree, staged, stale_leftovers,
+                         work_stage, write_metadata)
 
 REGISTRY = "https://registry.npmjs.org/"
 MIN_NPM = (11, 10)  # first npm with --min-release-age (npm/cli#8965, v11.10.0)
@@ -365,6 +366,18 @@ def _rebuild_with_fixes(run, npm, node, root, target, verdict, *, name, package,
     return installed
 
 
+def _dry_result(verdict, entries, node, target, *, name, package, version, lock_bytes, overrides,
+                override_reason, secrets, accepted, tier) -> Installed:
+    """End of a dry run after the lockfile check: say what the install would do next."""
+    print_dry_outcome(verdict, entries)
+    print(f"  [DRY] would run npm ci --ignore-scripts and swap the tree in at {target}")
+    return Installed(name=name, kind="npm", package=package, requested=version, command=node,
+                     args=[str(target / "node_modules" / package / "<bin>")], tree=target,
+                     lockfile_sha256=hashlib.sha256(lock_bytes).hexdigest(), overrides=overrides,
+                     override_reason=override_reason.strip() if overrides else None,
+                     secrets=tuple(secrets), accepted=accepted, tier=tier)
+
+
 def npm_install(*, name: str, package: str, version: str, overrides: dict,
                 override_reason: str | None, bin_name: str | None, secrets: tuple,
                 root: Path, receipt, accepted: dict | None, run: Runner,
@@ -382,23 +395,14 @@ def npm_install(*, name: str, package: str, version: str, overrides: dict,
         raise Refused(2, "npm and node must be on PATH for a locked npm MCP install")
     root = Path(root)
     min_age_days = policy.min_age_days
-    if dry:
-        target = Path(root).absolute() / name
-        print(f"  [DRY] would build {target} from {package}@{version} "
-              f"(npm install --package-lock-only --ignore-scripts "
-              f"--min-release-age={min_age_days}, lockfile check, npm ci --ignore-scripts)")
-        return Installed(name=name, kind="npm", package=package, requested=version,
-                         command=node, args=[str(target / "node_modules" / package / "<bin>")],
-                         tree=target, lockfile_sha256="", overrides=overrides,
-                         override_reason=override_reason, secrets=tuple(secrets),
-                         accepted=accepted)
-    root.mkdir(parents=True, exist_ok=True)
+    if not dry:
+        root.mkdir(parents=True, exist_ok=True)
     root = root.resolve()
     target = root / name
     now = now or dt.datetime.now(dt.timezone.utc)
     for leftover in stale_leftovers(root, name):
         print(f"  note: leftover of an aborted run, not used: {leftover}")
-    with staged(root, name) as stage:
+    with work_stage(root, name, dry) as stage:
         can_exclude = _npm_version(run, npm, stage) >= MIN_NPM_FAST_LANE
         pending = _pending_overrides(overrides, policy, fetch, now) if overrides else {}
         applied = {dep: wanted for dep, wanted in overrides.items() if dep not in pending}
@@ -430,6 +434,11 @@ def npm_install(*, name: str, package: str, version: str, overrides: dict,
             if verdict.fixes.get(dep, (None,))[0] != wanted:
                 raise Refused(2, f"override {dep}@{wanted} is younger than {min_age_days} days "
                                  f"and fixes no advisory; wait until {ready}")
+        if dry:
+            return _dry_result(verdict, entries, node, target, name=name, package=package,
+                               version=version, lock_bytes=lock_bytes, overrides=applied,
+                               override_reason=override_reason, secrets=secrets,
+                               accepted=accepted, tier=tier)
         if verdict.fixes:
             return _rebuild_with_fixes(
                 run, npm, node, root, target, verdict, name=name, package=package,

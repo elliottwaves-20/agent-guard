@@ -22,8 +22,9 @@ import _exe
 import _fastlane
 import _lockcheck
 from _mcp_locked import (ENTRY_RE, Installed, NeedsScan, Refused, Runner, check_name,
-                         check_secrets, normalize_pypi, replace_tree, require_python_311, staged,
-                         stale_leftovers, write_metadata)
+                         check_secrets, normalize_pypi, print_dry_clean, print_dry_outcome,
+                         replace_tree,
+                         require_python_311, staged, stale_leftovers, work_stage, write_metadata)
 
 INDEX = "https://pypi.org/simple"
 PYPI_NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,198}[A-Za-z0-9])?")
@@ -336,24 +337,15 @@ def pypi_install(*, name: str, package: str, version: str, executable: str | Non
     if not uv:
         raise Refused(2, "uv must be on PATH for a locked PyPI MCP install")
     root = Path(root)
-    if dry:
-        target = root.absolute() / name
-        print(f"  [DRY] would build {target} from {package}=={version} (uv lock --no-build, "
-              "lockfile check, swap, uv sync --locked --no-dev --no-build)")
-        return Installed(name=name, kind="pypi", package=package, requested=version, command=uv,
-                         args=["run", "--project", str(target), "--locked", "--no-dev",
-                               executable or "<entry point>"],
-                         tree=target, lockfile_sha256="", overrides=overrides,
-                         override_reason=override_reason.strip() if overrides else None,
-                         secrets=tuple(secrets), accepted=accepted)
-    root.mkdir(parents=True, exist_ok=True)
+    if not dry:
+        root.mkdir(parents=True, exist_ok=True)
     root = root.resolve()
     target = root / name
     now = now or dt.datetime.now(dt.timezone.utc)
     for leftover in stale_leftovers(root, name):
         print(f"  note: leftover of an aborted run, not used: {leftover}")
     min_age_days = policy.min_age_days
-    with staged(root, name) as stage:
+    with work_stage(root, name, dry) as stage:
         pending = _pending_overrides(overrides, policy, fetch, now) if overrides else {}
         applied = {dep: wanted for dep, wanted in overrides.items() if dep not in pending}
         lock_bytes, entries = _lock(run, uv, stage, name=name, package=package, version=version,
@@ -374,6 +366,17 @@ def pypi_install(*, name: str, package: str, version: str, executable: str | Non
             if verdict.fixes.get(dep, (None,))[0] != wanted:
                 raise Refused(2, f"override {dep}=={wanted} is younger than {min_age_days} days "
                                  f"and fixes no advisory; wait until {ready}")
+        if dry:
+            print_dry_outcome(verdict, entries)
+            print(f"  [DRY] would swap the tree in at {target} and run "
+                  "uv sync --locked --no-dev --no-build")
+            return Installed(name=name, kind="pypi", package=package, requested=version,
+                             command=uv, args=["run", "--project", str(target), "--locked",
+                                               "--no-dev", executable or "<entry point>"],
+                             tree=target, lockfile_sha256=hashlib.sha256(lock_bytes).hexdigest(),
+                             overrides=applied,
+                             override_reason=override_reason.strip() if applied else None,
+                             secrets=tuple(secrets), accepted=accepted)
         if verdict.fixes:
             return _rebuild_with_fixes(
                 run, uv, root, target, verdict, name=name, package=package, version=version,
@@ -633,16 +636,6 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
     root = Path(root)
     min_age_days = policy.min_age_days
     tail = ["python", "-m", module] if module else [executable or "<entry point>"]
-    if dry:
-        target = root.absolute() / name
-        print(f"  [DRY] would check that {sha} is at least {min_age_days} days on the default "
-              f"branch, pin the build tools with hashes and check them, lock and check {package} "
-              f"from {source}, swap, uv sync --locked --no-dev --no-cache "
-              "--no-build-package <each registry package> (only hashed build tools)")
-        return Installed(name=name, kind="git", package=package, requested=sha, command=uv,
-                         args=["run", "--project", str(target), "--locked", "--no-dev", *tail],
-                         tree=target, lockfile_sha256="", overrides={}, override_reason=None,
-                         secrets=tuple(secrets), accepted=accepted, source=git_source)
     if settled is None:
         import _staging
         settled = _staging.settled_ref
@@ -666,14 +659,15 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
         pyproject = fetch_text(f"https://raw.githubusercontent.com/{source}/{sha}/"
                                f"{subdir + '/' if subdir else ''}pyproject.toml")
     requires = build_requires(pyproject)
-    root.mkdir(parents=True, exist_ok=True)
+    if not dry:
+        root.mkdir(parents=True, exist_ok=True)
     root = root.resolve()
-    require_build_hash_uv(run, uv, root)
     target = root / name
     for leftover in stale_leftovers(root, name):
         print(f"  note: leftover of an aborted run, not used: {leftover}")
     chosen = {}
-    with staged(root, name) as stage:
+    with work_stage(root, name, dry) as stage:
+        require_build_hash_uv(run, uv, stage)
         build_tools = build_constraints(requires, stage, run, uv, check, min_age_days)
         dependency = f"{package} @ git+{git_source}"
         (stage / "pyproject.toml").write_text(
@@ -701,6 +695,20 @@ def git_install(*, name: str, git_url: str, package: str, executable: str | None
             if result.code:
                 raise Refused(result.code, f"lockfile check for {package} failed (see above); "
                                            "the installed tree is unchanged")
+        if dry:
+            if entries:
+                print_dry_clean(entries)
+            else:
+                print("  [DRY] the lockfile holds no registry package to check")
+            print(f"  [DRY] would swap the tree in at {target} and run uv sync --locked "
+                  "--no-dev --no-cache --no-build-package <each registry package>")
+            return Installed(name=name, kind="git", package=package, requested=sha, command=uv,
+                             args=["run", "--project", str(target), "--locked", "--no-dev",
+                                   *tail],
+                             tree=target, lockfile_sha256=hashlib.sha256(lock_bytes).hexdigest(),
+                             overrides={}, override_reason=None, secrets=tuple(secrets),
+                             accepted=accepted, source=git_source)
+
         def sync(tree: Path) -> None:
             code, out = run(git_sync_command(uv, entries), tree)
             if code != 0:
