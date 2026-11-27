@@ -1,17 +1,17 @@
-"""Stage skills through the pinned `skills` CLI without touching any agent.
+"""Stage skills from a commit-pinned GitHub ZIP through the pinned `skills` CLI.
 
-The CLI's project mode writes only below its working directory: the skill to
-`<cwd>/.agents/skills/<name>` and the lock to `<cwd>/skills-lock.json`. Run in a
-throw-away directory, it fetches a skill exactly as a normal install would --
-same source formats, same selection by name -- but nothing reaches an agent
-until agent-guard has scanned the staged files and promoted them.
+agent-guard downloads the commit archive from GitHub itself and extracts it into
+a subfolder of the throw-away working directory. The `skills` CLI then runs in
+project mode against that local folder only: it writes each requested skill to
+`<cwd>/.agents/skills/<name>` and the lock to `<cwd>/skills-lock.json`, without
+touching any agent directory, running `git clone`, fetching submodules, or using
+machine `gh`/`git` credentials.
 
-A commit is pinned with `owner/repo#<sha>`; the CLI records it as `ref` in the
-lock, which is checked below, so the verdict belongs to one immutable commit.
-
-The only parts of the CLI this module relies on are `add` in project mode and
-the project lock format (version 2 since skills 1.9.0). An unknown lock version stops with an
-error instead of guessing, so a pin bump that changes the format fails loudly.
+Because the commit comes from our own ZIP download (`archive/<sha>.zip`), the
+verdict belongs to one immutable commit. The project lock (version 2 since
+skills 1.9.0) is still checked so every staged skill came from that local
+folder (`sourceType: "local"`). An unknown lock version stops with an error
+instead of guessing, so a pin bump that changes the format fails loudly.
 """
 from __future__ import annotations
 
@@ -22,11 +22,13 @@ import os
 import re
 import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 from typing import NamedTuple
 
 import _dossier
 import _skills_cli
+import _url_resolver
 from _skillspector import run_bounded
 
 LOCK_FILE = "skills-lock.json"
@@ -246,10 +248,41 @@ def settled_ref(source: str, branch: str, head: str, *, now=None,
 
 # -- staging ------------------------------------------------------------------
 
-def stage_argv(source: str, ref: str, names: list) -> list:
+def fetch_archive(source: str, ref: str, dest: Path) -> Path:
+    """Download the commit ZIP for `source` at `ref` and extract it under `dest`."""
+    source = check_source(source)
+    if not SHA.fullmatch(ref or ""):
+        raise StageError(f"ref must be a full commit SHA, got {ref!r}")
+    url = f"https://github.com/{source}/archive/{ref}.zip"
+    try:
+        data = _url_resolver.http_bytes(url)
+    except _url_resolver.FetchError as exc:
+        raise StageError(f"{source}#{ref[:12]}: archive download failed ({exc})") from exc
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        _url_resolver.safe_extract_zip(data, dest)
+    except (zipfile.BadZipFile, ValueError, OSError) as exc:
+        raise StageError(f"{source}#{ref[:12]}: archive extraction failed ({exc})") from exc
+    return _url_resolver.first_child_dir(dest)
+
+
+def _same_path(recorded, expected: Path, base: Path) -> bool:
+    if not isinstance(recorded, str) or not recorded.strip():
+        return False
+    candidate = Path(recorded)
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    try:
+        return os.path.normcase(str(candidate.resolve())) == os.path.normcase(str(expected.resolve()))
+    except OSError:
+        return False
+
+
+def stage_argv(local_source: Path, names: list) -> list:
     argv = [_skills_cli.npx_path() or "npx", "-y",
             f"{_skills_cli.SKILLS_PACKAGE}@{_skills_cli.SKILLS_VERSION}",
-            "add", f"{check_source(source)}#{ref}"]
+            "add", str(local_source)]
     for name in names:
         argv += ["-s", check_name(name)]
     argv += ["-a", STAGE_AGENT, "-y"]
@@ -272,15 +305,20 @@ def stage(source: str, ref: str, names: list, workdir: Path,
           timeout: float = STAGE_TIMEOUT) -> dict:
     """Fetch `names` from `source` at commit `ref` into `workdir`.
 
+    Downloads the commit ZIP itself and lets the pinned skills CLI stage from
+    that local folder, so no git clone or submodule fetch runs before a verdict.
     Returns {name: Staged} for every requested skill the source still has;
     a missing name is simply absent from the result."""
+    source = check_source(source)
     if not SHA.fullmatch(ref or ""):
         raise StageError(f"ref must be a full commit SHA, got {ref!r}")
     if _skills_cli.npx_path() is None:
         raise StageError("npx not found on PATH")
     if not _skills_cli.verify_pinned_package():
         raise StageError("the pinned skills CLI did not pass verification")
-    argv = stage_argv(source, ref, names)
+    workdir = Path(workdir)
+    repo_root = fetch_archive(source, ref, workdir / "_archive")
+    argv = stage_argv(repo_root, names)
     try:
         result = run_bounded(argv, env=_skills_cli.hardened_env(), timeout=timeout,
                              cwd=str(workdir))
@@ -296,9 +334,12 @@ def stage(source: str, ref: str, names: list, workdir: Path,
         path = workdir / ".agents" / "skills" / name
         if entry is None or not (path / "SKILL.md").is_file():
             continue
-        if entry.get("source") != source or entry.get("ref") != ref:
-            raise StageError(f"{name}: lock records {entry.get('source')}#{entry.get('ref')}, "
-                             f"expected {source}#{ref}")
+        if (not isinstance(entry, dict)
+                or entry.get("sourceType") != "local"
+                or not _same_path(entry.get("source"), repo_root, workdir)):
+            raise StageError(f"{name}: lock records {entry.get('sourceType') if isinstance(entry, dict) else entry!r} "
+                             f"{entry.get('source') if isinstance(entry, dict) else ''!r}, "
+                             f"expected local {repo_root}")
         staged[name] = Staged(name, path, entry)
     return staged
 

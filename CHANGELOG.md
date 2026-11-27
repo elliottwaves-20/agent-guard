@@ -20,11 +20,15 @@
   (more symlinks confined) and 1.8.0 (install and remove no longer delete
   agent category directories or unmanaged files). GuardDog reports the same
   four findings as for 1.7.0, reviewed in
-  `scripts/reviewed/skills-cli-1.9.0.json`. As in 1.7.0, the CLI retries an
-  unauthenticated GitHub API read that is rate-limited or answered 401/404
-  through `gh api`, so an existing GitHub CLI login on the machine is used for
-  that read; 1.9.0 extends this to the commit lookup. The reduced environment
-  still carries no token variables.
+  `scripts/reviewed/skills-cli-1.9.0.json`.
+- Skill update staging (`scripts/_staging.py`, `update_skills.py`) now
+  downloads the pinned commit archive (`archive/<sha>.zip`) itself and runs the
+  pinned `skills` CLI only on that extracted local folder instead of passing
+  `owner/repo#<sha>`. This avoids `git clone`, prevents the recursive
+  `git submodule update` introduced in `skills` 1.8.0 from contacting arbitrary
+  hosts before a verdict, and keeps the CLI from reaching machine `gh`/`git`
+  logins. The lock check verifies `sourceType: "local"` against the extracted
+  archive directory.
 
 ### Known limitations
 

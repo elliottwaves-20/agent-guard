@@ -60,8 +60,9 @@ def listing_at(source: str) -> tuple:
     """(commit sha of HEAD, [skill names the pinned skills CLI lists at that commit])."""
     sha = subprocess.run(["gh", "api", f"repos/{source}/commits/HEAD", "-q", ".sha"],
                          capture_output=True, text=True, check=True).stdout.strip()
-    argv = _staging.stage_argv(source, sha, [])[:5] + ["--list"]
     with tempfile.TemporaryDirectory() as tmp:
+        repo_root = _staging.fetch_archive(source, sha, Path(tmp) / "_archive")
+        argv = _staging.stage_argv(repo_root, [])[:5] + ["--list"]
         done = subprocess.run(argv, cwd=tmp, capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=300)
     return sha, parse_cli_list(done.stdout)

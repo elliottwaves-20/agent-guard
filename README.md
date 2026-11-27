@@ -697,12 +697,13 @@ python scripts/update_skills.py --add NAME --source owner/repo            # new 
 python scripts/update_skills.py --all --json report.json                   # weekly run
 ```
 
-Each skill is fetched by the pinned `skills` CLI in *project mode* into a
-throw-away directory, pinned to the source's current commit (`owner/repo#<sha>`)
-— no agent directory and no global lock is touched. The staged files are
-compared with the installed copy; only a difference is scanned, and only a
-SAFE version replaces the installed one. Anything else keeps the installed
-version active:
+For each source, agent-guard downloads the pinned commit as a ZIP archive
+(`archive/<sha>.zip`), extracts it into a throw-away directory, and runs the
+pinned `skills` CLI in *project mode* on that local folder — no agent
+directory, global lock, `git clone`, or submodule fetch runs before a verdict.
+The staged files are compared with the installed copy; only a difference is
+scanned, and only a SAFE version replaces the installed one. Anything else keeps
+the installed version active:
 
 - **BLOCK:** the new version goes to `quarantine` (with its report) and the
   skill is reported as `blocked` in every run (while sibling skills from the

@@ -2,11 +2,11 @@
 """Update installed skills through stage -> scan -> promote.
 
 Needs a [distribution] section with `origins` in the agent-guard config. Every
-skill listed there is fetched at its source's current commit by the pinned
-`skills` CLI into a throw-away directory (see _staging.py), compared with the
-installed copy, and -- only when it differs -- scanned. A SAFE version replaces
-the installed one (the old one goes to `backup`); anything else leaves the
-installed version active.
+skill listed there is fetched as a commit-pinned GitHub ZIP archive, staged
+from that local folder by the pinned `skills` CLI into a throw-away directory
+(see _staging.py), compared with the installed copy, and -- only when it
+differs -- scanned. A SAFE version replaces the installed one (the old one goes
+to `backup`); anything else leaves the installed version active.
 
 The 7-day rule comes first: `git ls-remote` tells whether a source moved; if
 it did, only the newest branch state that has been on GitHub for at least

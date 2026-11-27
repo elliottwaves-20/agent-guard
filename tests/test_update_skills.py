@@ -559,43 +559,88 @@ class StagingBoundaryTests(unittest.TestCase):
                 with self.assertRaises(staging.StageError):
                     staging.read_stage_lock(Path(tmp))
 
-    def _stage_with_lock(self, work, lock):
+    def _stage_with_lock(self, work, lock, repo_root=None):
+        repo_root = repo_root or (work / "_archive" / "r-aaaa")
+        repo_root.mkdir(parents=True, exist_ok=True)
         (work / "skills-lock.json").write_text(json.dumps(lock))
         done = SimpleNamespace(returncode=0, stdout="", stderr="")
         with patch.object(staging._skills_cli, "npx_path", return_value="npx"), \
              patch.object(staging._skills_cli, "verify_pinned_package", return_value=True), \
+             patch.object(staging, "fetch_archive", return_value=repo_root), \
              patch.object(staging, "run_bounded", return_value=done):
             return staging.stage("o/r", REF, ["alpha"], work)
 
-    def test_stage_reads_the_lock_the_pinned_cli_writes(self):
-        # Shape written by skills 1.9.0 (lock version 2), from a real staging run.
+    def test_stage_reads_the_local_lock_the_pinned_cli_writes(self):
+        # Shape written by skills 1.9.0 (lock version 2) for a local directory.
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
+            repo_root = work / "_archive" / "r-aaaa"
             write_skill(work / ".agents" / "skills" / "alpha", "v1")
             staged = self._stage_with_lock(work, {"version": 2, "skills": {"alpha": {
-                "source": "o/r", "ref": REF, "commit": REF, "sourceType": "github",
-                "skillPath": "alpha/SKILL.md", "computedHash": "0" * 64}}})
+                "source": str(repo_root), "sourceType": "local",
+                "computedHash": "0" * 64}}}, repo_root=repo_root)
             self.assertEqual(list(staged), ["alpha"])
             self.assertEqual(staged["alpha"].path, work / ".agents" / "skills" / "alpha")
 
-    def test_stage_rejects_a_ref_other_than_requested(self):
+    def test_stage_accepts_relative_local_source_in_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
+            repo_root = work / "_archive" / "r-aaaa"
             write_skill(work / ".agents" / "skills" / "alpha", "v1")
-            (work / "skills-lock.json").write_text(json.dumps({"version": 2, "skills": {
-                "alpha": {"source": "o/r", "ref": REF2, "sourceType": "github"}}}))
-            done = SimpleNamespace(returncode=0, stdout="", stderr="")
-            with patch.object(staging._skills_cli, "npx_path", return_value="npx"), \
-                 patch.object(staging._skills_cli, "verify_pinned_package", return_value=True), \
-                 patch.object(staging, "run_bounded", return_value=done):
-                with self.assertRaises(staging.StageError):
-                    staging.stage("o/r", REF, ["alpha"], work)
+            staged = self._stage_with_lock(work, {"version": 2, "skills": {"alpha": {
+                "source": "./_archive/r-aaaa", "sourceType": "local",
+                "computedHash": "0" * 64}}}, repo_root=repo_root)
+            self.assertEqual(list(staged), ["alpha"])
 
-    def test_stage_argv_pins_commit_and_never_installs_globally(self):
-        argv = staging.stage_argv("o/r", REF, ["alpha"])
-        self.assertIn(f"o/r#{REF}", argv)
+    def test_stage_rejects_remote_or_wrong_source_in_lock(self):
+        for bad_entry in (
+            {"source": "o/r", "ref": REF, "sourceType": "github"},
+            {"source": "C:/elsewhere", "sourceType": "local"},
+            {"source": "", "sourceType": "local"},
+        ):
+            with self.subTest(entry=bad_entry), tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp)
+                repo_root = work / "_archive" / "r-aaaa"
+                write_skill(work / ".agents" / "skills" / "alpha", "v1")
+                with self.assertRaises(staging.StageError):
+                    self._stage_with_lock(work, {"version": 2, "skills": {"alpha": bad_entry}},
+                                          repo_root=repo_root)
+
+    def test_stage_argv_uses_local_path_and_never_installs_globally(self):
+        local = Path("/tmp/archive/repo")
+        argv = staging.stage_argv(local, ["alpha"])
+        self.assertIn(str(local), argv)
         self.assertNotIn("-g", argv)
         self.assertIn(f"skills@{staging._skills_cli.SKILLS_VERSION}", argv)
+
+    def test_fetch_archive_downloads_commit_zip_and_extracts_root(self):
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("repo-aaa/skills/alpha/SKILL.md", "---\nname: alpha\n---\nhi\n")
+        seen = []
+
+        def fake_bytes(url):
+            seen.append(url)
+            return buf.getvalue()
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(staging._url_resolver, "http_bytes", side_effect=fake_bytes):
+            root = staging.fetch_archive("o/r", REF, Path(tmp) / "_archive")
+            self.assertEqual(seen, [f"https://github.com/o/r/archive/{REF}.zip"])
+            self.assertTrue((root / "skills" / "alpha" / "SKILL.md").is_file())
+
+    def test_fetch_archive_wraps_bad_zip_and_fetch_error(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(staging._url_resolver, "http_bytes", return_value=b"not a zip"):
+            with self.assertRaises(staging.StageError):
+                staging.fetch_archive("o/r", REF, Path(tmp) / "_archive")
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(staging._url_resolver, "http_bytes",
+                          side_effect=staging._url_resolver.FetchError("HTTP 404")):
+            with self.assertRaises(staging.StageError):
+                staging.fetch_archive("o/r", REF, Path(tmp) / "_archive")
 
     def test_stage_requires_full_sha(self):
         with self.assertRaises(staging.StageError):
