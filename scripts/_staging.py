@@ -10,7 +10,7 @@ A commit is pinned with `owner/repo#<sha>`; the CLI records it as `ref` in the
 lock, which is checked below, so the verdict belongs to one immutable commit.
 
 The only parts of the CLI this module relies on are `add` in project mode and
-the project lock format (version 1). An unknown lock version stops with an
+the project lock format (version 2 since skills 1.9.0). An unknown lock version stops with an
 error instead of guessing, so a pin bump that changes the format fails loudly.
 """
 from __future__ import annotations

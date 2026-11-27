@@ -20,11 +20,11 @@
   (more symlinks confined) and 1.8.0 (install and remove no longer delete
   agent category directories or unmanaged files). GuardDog reports the same
   four findings as for 1.7.0, reviewed in
-  `scripts/reviewed/skills-cli-1.9.0.json`. New in 1.9.0: when an
-  unauthenticated GitHub API request is rate-limited or answered 401/404, the
-  CLI retries it through `gh api`, so an existing GitHub CLI login on the
-  machine is used for that read; the reduced environment still carries no
-  token variables.
+  `scripts/reviewed/skills-cli-1.9.0.json`. As in 1.7.0, the CLI retries an
+  unauthenticated GitHub API read that is rate-limited or answered 401/404
+  through `gh api`, so an existing GitHub CLI login on the machine is used for
+  that read; 1.9.0 extends this to the commit lookup. The reduced environment
+  still carries no token variables.
 
 ## 0.6.0 - 2026-11-27
 
