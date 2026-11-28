@@ -450,7 +450,9 @@ Notes the agent must respect:
 - `npm` / `pypi` also run the dynamic install analysis (OpenSSF
   package-analysis, same rules as MCP Stage 1b); the worst stage decides.
   It needs Docker on every platform, about 1 GB of image plus a cache volume,
-  and a privileged container for gVisor. The first run takes a few minutes.
+  and a privileged container for gVisor. The first run takes a few minutes:
+  it pulls the image and builds a local copy with the pinned gVisor `runsc`
+  (needs `storage.googleapis.com`; a failed build is no verdict).
   `--no-dynamic` and `--allow-host` follow the same rules as for MCP scans:
   only with the user's explicit consent.
 - GuardDog `capability-*` findings are informational (nearly every library
