@@ -124,9 +124,14 @@ SANDBOX_UV_IMAGE = ("ghcr.io/astral-sh/uv:0.13.9@sha256:"
 # by CVE-2026-95702 (VFS UAF with code execution in the sentry, fixed in
 # 20260831.0). We pin the base image by digest and build a thin local overlay
 # that upgrades runsc from gVisor's signed APT repository to the newest release
-# at least 7 days old. The inner sandbox image is pinned to the matching release
-# tag instead of the moving :latest tag.
+# at least 7 days old. `analyze` names its inner sandbox images only by tag, so
+# each run first pulls them by these digests, tags them as DYNAMIC_SANDBOX_TAG
+# and starts `analyze -nopull` (digests of rel-38, checked 2026-11-28).
 DYNAMIC_BASE_IMAGE = ("gcr.io/ossf-malware-analysis/analysis@sha256:"
                       "1f3104f3f0cfddeaf62f0952d663e129cb5efe38486766e676fb926fa84c4c27")
 DYNAMIC_SANDBOX_TAG = "rel-38"
+DYNAMIC_SANDBOX_IMAGES = {
+    "dynamic-analysis": "sha256:d90cdfac786491580614b9cefd0d12223131528c476de331842336c145bef5a7",
+    "static-analysis": "sha256:4090d93047421928630df0bd9a54ad38bdff681ff2cfb0dfd112f1d9ed1efdec",
+}
 DYNAMIC_GVISOR_VERSION = "20261116.0"  # release-20261116.0, published 2026-11-17

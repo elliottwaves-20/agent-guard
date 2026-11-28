@@ -33,8 +33,10 @@
   overlay on top of the digest-pinned OpenSSF `rel-38` analysis image that
   upgrades gVisor `runsc` from `20260216.0` to `release-20261116.0` from
   gVisor's signed APT repository, closing CVE-2026-95702 (VFS use-after-free in
-  gVisor `< 20260831.0`). The inner sandbox image is now pinned to
-  `-image-tag rel-38` instead of the moving `:latest` tag.
+  gVisor `< 20260831.0`). The inner sandbox images (`dynamic-analysis`,
+  `static-analysis`) are no longer pulled by the moving `:latest` tag: each run
+  pulls them by their pinned `rel-38` digests, tags them locally and starts
+  `analyze -nopull`.
   `scripts/check_image_pins.py` also tracks new `google/gvisor` releases under
   the 7-day age rule.
 

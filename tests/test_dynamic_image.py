@@ -106,6 +106,27 @@ class DynamicImageTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(dyn.verdict(report), 0)
 
+    def _prep(self, images):
+        script = dyn.sandbox_prep_script(images)
+        return subprocess.run(
+            ["docker", "run", "--rm", "--privileged", "-v", f"{dyn.CACHE_VOLUME}:/var/lib/containers",
+             self.tag, "sh", "-c", script, "sh", "podman", "images", "--digests",
+             "--format", "{{.Repository}}:{{.Tag}} {{.Digest}}"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
+
+    def test_prep_script_tags_inner_images_from_pinned_digests(self):
+        proc = self._prep(_pins.DYNAMIC_SANDBOX_IMAGES)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-1500:])
+        listed = set(proc.stdout.splitlines())
+        for image, digest in _pins.DYNAMIC_SANDBOX_IMAGES.items():
+            self.assertIn(f"{dyn.SANDBOX_REGISTRY}/{image}:{dyn.SANDBOX_TAG} {digest}", listed)
+
+    def test_prep_script_fails_on_unknown_digest(self):
+        bogus = dict(_pins.DYNAMIC_SANDBOX_IMAGES, **{"static-analysis": "sha256:" + "0" * 64})
+        proc = self._prep(bogus)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout[-1500:])
+        self.assertNotIn("REPOSITORY", proc.stdout)
+
     def test_gvisor_pin_is_a_real_release_at_least_seven_days_old(self):
         tag = f"release-{_pins.DYNAMIC_GVISOR_VERSION}"
         req = _url_resolver.attach_github_auth(urllib.request.Request(

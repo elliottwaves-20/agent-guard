@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 os.environ.setdefault("AGENT_GUARD_NO_USER_CONFIG", "1")  # never read this machine's personal config
 
 dyn = importlib.import_module("_dynamic")
+_pins = importlib.import_module("_pins")
 
 HONEY = "PLANTED-HONEY-VALUE-0123456789"
 ENV = ["TERM=xterm", f"AWS_SECRET_ACCESS_KEY={HONEY}", "HOME=/root", "container=podman"]
@@ -395,6 +396,25 @@ class RunTests(unittest.TestCase):
             source = m.rsplit(":", 1)[0]
             self.assertTrue(source.startswith(str(Path("/tmp/out"))) or source in (
                 dyn.CACHE_VOLUME, "/tmp"), m)
+
+    def test_inner_sandbox_images_are_pulled_by_digest_before_analyze(self):
+        name = "x;touch /pwn"
+        argv = dyn.docker_argv("npm", name, "1.0.0", Path("/tmp/out"))
+        self.assertIn("-nopull", argv)
+        i = argv.index(dyn.analysis_image())
+        self.assertEqual(argv[i + 1:i + 3], ["sh", "-c"])
+        script = argv[i + 3]
+        self.assertEqual(argv[i + 4:i + 6], ["sh", "analyze"])
+        self.assertTrue(script.startswith("set -eu\n"), script)
+        self.assertNotIn(name, script)
+        self.assertEqual(argv[argv.index("-package") + 1], name)
+        self.assertEqual(set(_pins.DYNAMIC_SANDBOX_IMAGES), {"dynamic-analysis", "static-analysis"})
+        for image, digest in _pins.DYNAMIC_SANDBOX_IMAGES.items():
+            ref = f"{dyn.SANDBOX_REGISTRY}/{image}"
+            self.assertIn(f"podman pull -q {ref}@{digest}", script)
+            self.assertIn(f"podman tag {ref}@{digest} {ref}:{dyn.SANDBOX_TAG}", script)
+            self.assertIn(f"podman image inspect --format '{{{{.Digest}}}}' {ref}:{dyn.SANDBOX_TAG})\" = {digest}", script)
+        self.assertTrue(script.rstrip().endswith('exec "$@"'), script)
 
     def test_without_version_no_version_flag(self):
         argv = dyn.docker_argv("pypi", "six", None, Path("/tmp/out"))

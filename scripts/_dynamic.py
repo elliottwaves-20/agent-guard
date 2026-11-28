@@ -45,6 +45,7 @@ from _skillspector import run_bounded
 # overlaid locally with the pinned gVisor runsc release (scripts/_pins.py).
 BASE_IMAGE = _pins.DYNAMIC_BASE_IMAGE
 SANDBOX_TAG = _pins.DYNAMIC_SANDBOX_TAG
+SANDBOX_REGISTRY = "gcr.io/ossf-malware-analysis"
 GVISOR_VERSION = _pins.DYNAMIC_GVISOR_VERSION
 GVISOR_SUITE = GVISOR_VERSION.split(".", 1)[0]
 DOCKER_IMAGE = "agent-guard-dynamic-analysis"
@@ -309,6 +310,21 @@ def build_analysis_image() -> str:
     return tag
 
 
+def sandbox_prep_script(images=None, tag: str = SANDBOX_TAG) -> str:
+    """Shell script run before `analyze -nopull`: pull each inner sandbox image by
+    its pinned digest, tag it as `tag` and check the tag. Without the tag, podman
+    would pull `tag` from the registry on its own (`--pull=missing`)."""
+    images = _pins.DYNAMIC_SANDBOX_IMAGES if images is None else images
+    lines = ["set -eu"]
+    for image, digest in images.items():
+        ref = f"{SANDBOX_REGISTRY}/{image}"
+        lines += [f"podman pull -q {ref}@{digest} >/dev/null",
+                  f"podman tag {ref}@{digest} {ref}:{tag}",
+                  f"[ \"$(podman image inspect --format '{{{{.Digest}}}}' {ref}:{tag})\" = {digest} ]"]
+    lines.append('exec "$@"')
+    return "\n".join(lines) + "\n"
+
+
 def docker_argv(ecosystem: str, name: str, version: str | None, out: Path,
                 container: str = "agent-guard-dynamic", image: str | None = None) -> list:
     argv = ["docker", "run", "--cgroupns=host", "--privileged", "--rm", "--name", container,
@@ -318,10 +334,11 @@ def docker_argv(ecosystem: str, name: str, version: str | None, out: Path,
             "-v", f"{out / 'writes'}:/writeResults",
             "-v", f"{out / 'analyzed'}:/analyzedPackages",
             "-v", f"{out / 'strace'}:/straceLogs",
-            image or analysis_image(), "analyze", "-ecosystem", ecosystem, "-package", name]
+            image or analysis_image(), "sh", "-c", sandbox_prep_script(), "sh",
+            "analyze", "-ecosystem", ecosystem, "-package", name]
     if version:
         argv += ["-version", version]
-    argv += ["-image-tag", SANDBOX_TAG,
+    argv += ["-image-tag", SANDBOX_TAG, "-nopull",
              "-dynamic-bucket", "file:///results/", "-file-writes-bucket", "file:///writeResults/",
              "-static-bucket", "file:///staticResults/",
              "-analyzed-pkg-bucket", "file:///analyzedPackages/",
